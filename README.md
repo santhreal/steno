@@ -202,7 +202,7 @@ commands = true
 format = true
 
 [ui]
-overlay = true         # bottom-center status bar (X11)
+overlay = true         # bottom-center status pill (X11)
 done_flash_ms = 1200    # how long done/error stays visible
 ```
 

@@ -1,13 +1,19 @@
 //! Animated status pill: a small borderless ARGB window at the bottom
-//! center of the primary monitor. Three states match the product mock:
+//! center of the primary monitor. Pixel copy of the product mock:
 //!
-//! - Recording  → "Transcribing" (waveform + elapsed timer)
-//! - Transcribing → "Processing" (spinner)
-//! - Done       → "Done" (check draw)
+//! - Recording    → "Transcribing" (waveform + elapsed timer), 188 px
+//! - Transcribing → "Processing" (spinner), 164 px
+//! - Done         → "Done" (check draw), 118 px
+//! - Error        → "Error" (x mark)
 //!
-//! Pure display: override-redirect, takes no input, never focuses.
-//! Cosmetic and fail-open: no DISPLAY / no ARGB visual / any X error
-//! simply disables the overlay — dictation itself is unaffected.
+//! Geometry is in logical (CSS) px; everything renders at the display's
+//! scale factor (Xft.dpi / 96, default 1.0) so the pill is the SAME size
+//! the mock specifies on any monitor. The window's input shape is empty:
+//! clicks pass straight through to the app below.
+//!
+//! Pure display: override-redirect, takes no focus. Cosmetic and
+//! fail-open: no DISPLAY / no ARGB visual / any X error simply disables
+//! the overlay — dictation itself is unaffected.
 
 use std::f32::consts::PI;
 use std::path::Path;
@@ -18,8 +24,8 @@ use std::time::{Duration, Instant};
 use fontdue::{Font, FontSettings};
 use serde::Deserialize;
 use tiny_skia::{
-    Color, FillRule, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint, Rect, Stroke,
-    StrokeDash, Transform,
+    Color, FillRule, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint,
+    PremultipliedColorU8, Stroke, StrokeDash, Transform,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -116,6 +122,86 @@ impl Overlay {
 // Dropping the Overlay closes the channel; the thread notices and
 // destroys the window before exiting.
 
+/// Logical (CSS px) design metrics straight from the mock.
+mod mock {
+    pub const WIN_W: f32 = 268.0; // pill 188 + 40 shadow bleed each side
+    pub const WIN_H: f32 = 126.0; // 24 top + 46 pill + 56 shadow bleed
+    pub const TOP_PAD: f32 = 24.0;
+    pub const PILL_H: f32 = 46.0;
+    pub const ICON: f32 = 26.0;
+    pub const PAD_X: f32 = 16.0;
+    pub const GAP: f32 = 12.0;
+    pub const LABEL_PX: f32 = 13.0;
+    pub const META_PX: f32 = 11.0;
+    pub const BOTTOM_MARGIN: f32 = 48.0; // gap above the screen edge
+    pub const SHADOW_DY: f32 = 12.0;
+    pub const SHADOW_BLUR: f32 = 12.0; // box-blur radius ≈ css 34px blur
+    pub const SHADOW_ALPHA: u8 = 28; // rgba(0,0,0,.11)
+}
+
+/// Device-space geometry: logical metrics × the display scale factor.
+#[derive(Debug, Clone, Copy)]
+struct Geo {
+    s: f32,
+    win_w: u32,
+    win_h: u32,
+}
+
+impl Geo {
+    fn new(s: f32) -> Self {
+        Self {
+            s,
+            win_w: (mock::WIN_W * s).round() as u32,
+            win_h: (mock::WIN_H * s).round() as u32,
+        }
+    }
+    fn l(&self, logical: f32) -> f32 {
+        logical * self.s
+    }
+}
+
+fn pill_width(stage: Stage, geo: &Geo) -> f32 {
+    let logical = match stage {
+        Stage::Recording => 188.0,
+        Stage::Transcribing => 164.0,
+        Stage::Done => 118.0,
+        Stage::Error => 128.0,
+        Stage::Hidden => 118.0,
+    };
+    geo.l(logical)
+}
+
+/// Display scale factor from the X resource database (Xft.dpi / 96).
+/// Defaults to 1.0 — rendering twice as big on a 1x display was the
+/// "massive" bug; never guess 2x.
+fn detect_scale<C: x11rb::connection::Connection>(conn: &C, root: u32) -> f32 {
+    use x11rb::protocol::xproto::*;
+    let reply = conn
+        .get_property(
+            false,
+            root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            0,
+            8192,
+        )
+        .ok()
+        .and_then(|c| c.reply().ok());
+    if let Some(reply) = reply {
+        let text = String::from_utf8_lossy(&reply.value);
+        for line in text.lines() {
+            if let Some(v) = line.trim().strip_prefix("Xft.dpi:") {
+                if let Ok(dpi) = v.trim().parse::<f32>() {
+                    if dpi.is_finite() && dpi > 0.0 {
+                        return (dpi / 96.0).clamp(1.0, 2.0);
+                    }
+                }
+            }
+        }
+    }
+    1.0
+}
+
 /// Geometry of the primary monitor's active CRTC, or None when RandR or
 /// a primary output is unavailable.
 fn primary_rect<C: x11rb::connection::Connection>(
@@ -135,10 +221,7 @@ fn primary_rect<C: x11rb::connection::Connection>(
     if info.crtc == 0 {
         return None;
     }
-    let c = randr::get_crtc_info(conn, info.crtc, 0)
-        .ok()?
-        .reply()
-        .ok()?;
+    let c = randr::get_crtc_info(conn, info.crtc, 0).ok()?.reply().ok()?;
     Some((
         i32::from(c.x),
         i32::from(c.y),
@@ -154,15 +237,6 @@ fn run(rx: Receiver<Stage>, failed: std::sync::Arc<std::sync::atomic::AtomicBool
     }
 }
 
-/// Logical design size (CSS px from the mock). Drawn at SCALE for sharpness.
-const SCALE: u32 = 2;
-const WIN_W: u32 = 260 * SCALE;
-const WIN_H: u32 = 90 * SCALE;
-const PILL_H: f32 = 46.0 * SCALE as f32;
-const ICON: f32 = 26.0 * SCALE as f32;
-const PAD_X: f32 = 16.0 * SCALE as f32;
-const GAP: f32 = 12.0 * SCALE as f32;
-
 fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
@@ -174,14 +248,16 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
     let (visual, depth) = find_argb_visual(&conn, screen)
         .ok_or_else(|| anyhow::anyhow!("no 32-bit ARGB visual — compositor required for pill"))?;
 
+    let geo = Geo::new(detect_scale(&conn, screen.root));
     let (ox, oy, ow, oh) = primary_rect(&conn, screen.root).unwrap_or((
         0,
         0,
         i32::from(screen.width_in_pixels),
         i32::from(screen.height_in_pixels),
     ));
-    let x = (ox + (ow - WIN_W as i32) / 2).clamp(0, i32::from(i16::MAX)) as i16;
-    let y = (oy + oh - WIN_H as i32 - 72).clamp(0, i32::from(i16::MAX)) as i16;
+    let x = (ox + (ow - geo.win_w as i32) / 2).clamp(0, i32::from(i16::MAX)) as i16;
+    let y = (oy + oh - geo.win_h as i32 - geo.l(mock::BOTTOM_MARGIN) as i32)
+        .clamp(0, i32::from(i16::MAX)) as i16;
 
     let colormap = conn.generate_id()?;
     conn.create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual)?;
@@ -193,8 +269,8 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
         screen.root,
         x,
         y,
-        WIN_W as u16,
-        WIN_H as u16,
+        geo.win_w as u16,
+        geo.win_h as u16,
         0,
         WindowClass::INPUT_OUTPUT,
         visual,
@@ -212,17 +288,32 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
         AtomEnum::STRING,
         b"dictate",
     )?;
+    // Click-through: empty INPUT shape. Without this the (mostly
+    // transparent) window still swallows every click in its rectangle.
+    x11rb::protocol::shape::rectangles(
+        &conn,
+        x11rb::protocol::shape::SO::SET,
+        x11rb::protocol::shape::SK::INPUT,
+        ClipOrdering::UNSORTED,
+        win,
+        0,
+        0,
+        &[],
+    )?
+    .check()?;
 
     let gc = conn.generate_id()?;
     conn.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
 
-    let mut pixmap =
-        SkPixmap::new(WIN_W, WIN_H).ok_or_else(|| anyhow::anyhow!("cannot allocate overlay pixmap"))?;
+    let mut pixmap = SkPixmap::new(geo.win_w, geo.win_h)
+        .ok_or_else(|| anyhow::anyhow!("cannot allocate overlay pixmap"))?;
+    let mut shadow_mask = SkPixmap::new(geo.win_w, geo.win_h)
+        .ok_or_else(|| anyhow::anyhow!("cannot allocate shadow mask"))?;
     let mut mapped = false;
     let mut stage = Stage::Hidden;
     let mut stage_since = Instant::now();
     let mut rec_since = Instant::now();
-    let mut pill_w = pill_width(Stage::Recording);
+    let mut pill_w = pill_width(Stage::Recording, &geo);
     let frame = Duration::from_millis(33);
     let mut last_frame = Instant::now();
     let anim_origin = Instant::now();
@@ -249,7 +340,7 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
             }
         }
 
-        let target_w = pill_width(stage);
+        let target_w = pill_width(stage, &geo);
         // Ease width toward the mock's per-state sizes.
         pill_w += (target_w - pill_w) * 0.28;
         if (pill_w - target_w).abs() < 0.5 {
@@ -265,15 +356,16 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
                 conn.flush()?;
                 mapped = false;
             } else {
-                let anim_t = anim_origin.elapsed().as_secs_f32();
                 draw_frame(
                     &mut pixmap,
+                    &mut shadow_mask,
                     &font,
                     stage,
-                    anim_t,
+                    anim_origin.elapsed().as_secs_f32(),
                     pill_w,
-                    stage_since,
-                    rec_since,
+                    stage_since.elapsed().as_secs_f32(),
+                    rec_since.elapsed().as_secs(),
+                    &geo,
                 );
                 if !mapped {
                     conn.map_window(win)?;
@@ -300,17 +392,6 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
-}
-
-fn pill_width(stage: Stage) -> f32 {
-    let logical = match stage {
-        Stage::Recording => 188.0,
-        Stage::Transcribing => 164.0,
-        Stage::Done => 118.0,
-        Stage::Error => 128.0,
-        Stage::Hidden => 118.0,
-    };
-    logical * SCALE as f32
 }
 
 fn load_font() -> anyhow::Result<Font> {
@@ -386,226 +467,291 @@ fn put_argb<C: x11rb::connection::Connection>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     pixmap: &mut SkPixmap,
+    shadow_mask: &mut SkPixmap,
     font: &Font,
     stage: Stage,
     anim_t: f32,
     pill_w: f32,
-    stage_since: Instant,
-    rec_since: Instant,
+    stage_age: f32,
+    rec_secs: u64,
+    geo: &Geo,
 ) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
 
-    let pill_h = PILL_H;
-    let x = (WIN_W as f32 - pill_w) * 0.5;
-    let y = (WIN_H as f32 - pill_h) * 0.5;
+    let pill_h = geo.l(mock::PILL_H);
+    let x = (geo.win_w as f32 - pill_w) * 0.5;
+    let y = geo.l(mock::TOP_PAD);
 
-    // Soft drop shadow under the pill.
-    draw_round_rect(
-        pixmap,
-        x,
-        y + 6.0 * SCALE as f32,
-        pill_w,
-        pill_h,
-        pill_h * 0.5,
-        Color::from_rgba8(0, 0, 0, 28),
-    );
-    draw_round_rect(
-        pixmap,
-        x,
-        y + 2.0 * SCALE as f32,
-        pill_w,
-        pill_h,
-        pill_h * 0.5,
-        Color::from_rgba8(0, 0, 0, 18),
-    );
+    // Brief scale(.97→1) pulse on every state change (mock transition cue).
+    let pulse = if stage_age < 0.18 {
+        let t = stage_age / 0.18;
+        let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
+        0.97 + 0.03 * e
+    } else {
+        1.0
+    };
+    let cx = x + pill_w * 0.5;
+    let cy = y + pill_h * 0.5;
+    let pw = pill_w * pulse;
+    let ph = pill_h * pulse;
+    let px = cx - pw * 0.5;
+    let py = cy - ph * 0.5;
 
-    // White pill body + hairline border.
+    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, geo);
+
+    // White pill body rgba(255,255,255,.94) + hairline border.
     draw_round_rect(
         pixmap,
-        x,
-        y,
-        pill_w,
-        pill_h,
-        pill_h * 0.5,
+        px,
+        py,
+        pw,
+        ph,
+        ph * 0.5,
         Color::from_rgba8(255, 255, 255, 240),
     );
     stroke_round_rect(
         pixmap,
-        x + 0.5,
-        y + 0.5,
-        pill_w - 1.0,
-        pill_h - 1.0,
-        pill_h * 0.5,
-        Color::from_rgba8(17, 17, 17, 40),
-        1.0 * SCALE as f32,
+        px + 0.5 * geo.s,
+        py + 0.5 * geo.s,
+        pw - 1.0 * geo.s,
+        ph - 1.0 * geo.s,
+        ph * 0.5,
+        Color::from_rgba8(17, 17, 17, 41), // rgba(17,17,17,.16)
+        1.0 * geo.s,
     );
 
-    // Icon circle.
-    let ix = x + PAD_X;
-    let iy = y + (pill_h - ICON) * 0.5;
+    // Icon disc.
+    let icon = geo.l(mock::ICON) * pulse;
+    let pad_x = geo.l(mock::PAD_X) * pulse;
+    let gap = geo.l(mock::GAP) * pulse;
+    let ix = px + pad_x;
+    let iy = py + (ph - icon) * 0.5;
     fill_circle(
         pixmap,
-        ix + ICON * 0.5,
-        iy + ICON * 0.5,
-        ICON * 0.5,
+        ix + icon * 0.5,
+        iy + icon * 0.5,
+        icon * 0.5,
         Color::from_rgba8(17, 17, 17, 255),
     );
 
     match stage {
-        Stage::Recording => draw_wave(pixmap, ix, iy, anim_t),
-        Stage::Transcribing => draw_spinner(pixmap, ix, iy, anim_t),
-        Stage::Done => draw_check(pixmap, ix, iy, stage_since.elapsed().as_secs_f32()),
-        Stage::Error => draw_x(pixmap, ix, iy),
+        Stage::Recording => draw_wave(pixmap, ix, iy, icon, anim_t),
+        Stage::Transcribing => draw_spinner(pixmap, ix, iy, icon, anim_t),
+        Stage::Done => draw_check(pixmap, ix, iy, icon, stage_age),
+        Stage::Error => draw_x(pixmap, ix, iy, icon),
         Stage::Hidden => {}
     }
 
     // Label.
-    let label = label(stage);
-    let text_x = ix + ICON + GAP;
-    let text_size = 13.0 * SCALE as f32;
+    let text_x = ix + icon + gap;
     draw_text(
         pixmap,
         font,
-        label,
+        label(stage),
         text_x,
-        y + pill_h * 0.5,
-        text_size,
+        py + ph * 0.5,
+        geo.l(mock::LABEL_PX) * pulse,
         Color::from_rgba8(17, 17, 17, 255),
     );
 
     // Elapsed timer on the live-capture state.
     if stage == Stage::Recording {
-        let secs = rec_since.elapsed().as_secs();
-        let meta = format!("{}:{:02}", secs / 60, secs % 60);
-        let meta_size = 11.0 * SCALE as f32;
+        let meta = format!("{}:{:02}", rec_secs / 60, rec_secs % 60);
+        let meta_size = geo.l(mock::META_PX) * pulse;
         let tw = text_width(font, &meta, meta_size);
         draw_text(
             pixmap,
             font,
             &meta,
-            x + pill_w - PAD_X - tw,
-            y + pill_h * 0.5,
+            px + pw - pad_x - tw,
+            py + ph * 0.5,
             meta_size,
             Color::from_rgba8(119, 119, 119, 255),
         );
     }
 }
 
-fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, t: f32) {
-    let cx = ix + ICON * 0.5;
-    let cy = iy + ICON * 0.5;
-    let heights = [5.0, 10.0, 14.0, 8.0];
-    let delays = [-0.4, -0.2, 0.0, -0.3];
-    let bar_w = 2.0 * SCALE as f32;
-    let gap = 2.0 * SCALE as f32;
-    let total = 4.0 * bar_w + 3.0 * gap;
-    let left = cx - total * 0.5;
-    let mut paint = Paint::default();
-    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
-    paint.anti_alias = true;
-    for (i, (&h, &d)) in heights.iter().zip(delays.iter()).enumerate() {
-        let phase = (t + d) * 2.0 * PI;
-        let scale = 0.55 + 0.45 * (0.5 + 0.5 * phase.sin());
-        let bh = h * SCALE as f32 * scale;
-        let x = left + i as f32 * (bar_w + gap);
-        let y = cy - bh * 0.5;
-        if let Some(rect) = Rect::from_xywh(x, y, bar_w, bh) {
-            let mut pb = PathBuilder::new();
-            pb.push_rect(rect);
-            // rounded bars via thick stroke circle ends — simple rect is fine at 2x
-            if let Some(path) = pb.finish() {
-                pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
+/// The mock's `0 12px 34px rgba(0,0,0,.11)` drop shadow: a rounded-rect
+/// alpha mask, box-blurred (3 passes ≈ gaussian), tinted black.
+fn draw_shadow(
+    pixmap: &mut SkPixmap,
+    mask: &mut SkPixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    geo: &Geo,
+) {
+    mask.fill(Color::from_rgba8(0, 0, 0, 0));
+    draw_round_rect(
+        mask,
+        x,
+        y + geo.l(mock::SHADOW_DY),
+        w,
+        h,
+        h * 0.5,
+        Color::from_rgba8(0, 0, 0, mock::SHADOW_ALPHA),
+    );
+    box_blur_alpha(mask, geo.l(mock::SHADOW_BLUR).max(1.0) as u32);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        mask.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Separable box blur over the alpha channel (premultiplied black, so all
+/// channels scale with alpha), 3 passes ≈ gaussian. Prefix-sum windows
+/// with constant divisor: edges fade to transparent, no lopsidedness.
+fn box_blur_alpha(pm: &mut SkPixmap, radius: u32) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if radius == 0 || w < 2 || h < 2 {
+        return;
+    }
+    let mut buf: Vec<u32> = pm.pixels().iter().map(|p| p.alpha() as u32).collect();
+    let mut tmp = vec![0u32; buf.len()];
+    let r = radius as usize;
+    let n = (2 * r + 1) as u32;
+    let mut ps = vec![0u32; w.max(h) + 1];
+    for _ in 0..3 {
+        // Horizontal.
+        for row in 0..h {
+            let base = row * w;
+            ps[0] = 0;
+            for i in 0..w {
+                ps[i + 1] = ps[i] + buf[base + i];
+            }
+            for col in 0..w {
+                let lo = col.saturating_sub(r);
+                let hi = (col + r).min(w - 1);
+                tmp[base + col] = (ps[hi + 1] - ps[lo]) / n;
+            }
+        }
+        // Vertical.
+        for col in 0..w {
+            ps[0] = 0;
+            for i in 0..h {
+                ps[i + 1] = ps[i] + tmp[i * w + col];
+            }
+            for row in 0..h {
+                let lo = row.saturating_sub(r);
+                let hi = (row + r).min(h - 1);
+                buf[row * w + col] = (ps[hi + 1] - ps[lo]) / n;
             }
         }
     }
+    for (px, a) in pm.pixels_mut().iter_mut().zip(buf.iter()) {
+        *px = PremultipliedColorU8::from_rgba(0, 0, 0, (*a).min(255) as u8)
+            .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+    }
 }
 
-fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, t: f32) {
-    let cx = ix + ICON * 0.5;
-    let cy = iy + ICON * 0.5;
-    let r = 6.5 * SCALE as f32;
-    let mut paint = Paint::default();
-    paint.set_color(Color::from_rgba8(255, 255, 255, 90));
-    paint.anti_alias = true;
+fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+    let cx = ix + icon * 0.5;
+    let cy = iy + icon * 0.5;
+    let u = icon / mock::ICON; // device px per logical px
+    let heights = [5.0, 10.0, 14.0, 8.0];
+    let delays = [-0.4, -0.2, 0.0, -0.3];
+    let bar_w = 2.0 * u;
+    let gap = 2.0 * u;
+    let total = 4.0 * bar_w + 3.0 * gap;
+    let left = cx - total * 0.5;
+    for (i, (&h, &d)) in heights.iter().zip(delays.iter()).enumerate() {
+        let phase = ((t + d) * 2.0 * PI).sin() * 0.5 + 0.5; // 0..1
+        let scale = 0.55 + 0.60 * phase; // mock: scaleY .55↔1.15
+        let alpha = (0.65 + 0.35 * phase) * 255.0; // mock: opacity .65↔1
+        let bh = (h * u * scale).max(bar_w);
+        let x = left + i as f32 * (bar_w + gap);
+        let y = cy - bh * 0.5;
+        // Mock bars are fully rounded (radius 99px).
+        draw_round_rect(
+            pixmap,
+            x,
+            y,
+            bar_w,
+            bh,
+            bar_w * 0.5,
+            Color::from_rgba8(255, 255, 255, alpha.round() as u8),
+        );
+    }
+}
+
+fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+    let cx = ix + icon * 0.5;
+    let cy = iy + icon * 0.5;
+    let u = icon / mock::ICON;
+    // 13px box, 1.5px border → centerline radius 5.75.
+    let r = 5.75 * u;
     let stroke = Stroke {
-        width: 1.5 * SCALE as f32,
+        width: 1.5 * u,
         ..Stroke::default()
     };
-    // Track ring.
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
+    // Track ring rgba(255,255,255,.35).
+    paint.set_color(Color::from_rgba8(255, 255, 255, 89));
     if let Some(path) = circle_path(cx, cy, r) {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
-    // Sweep arc.
+    // White quarter arc, .8s per revolution.
     paint.set_color(Color::from_rgba8(255, 255, 255, 255));
-    let ang = t * 2.0 * PI * 1.25;
-    if let Some(path) = arc_path(cx, cy, r, ang, ang + 1.7) {
+    let ang = t * 2.0 * PI * 1.25 - PI * 0.5; // start at the top
+    if let Some(path) = arc_path(cx, cy, r, ang, ang + PI * 0.5) {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
 
-fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, age: f32) {
-    let cx = ix + ICON * 0.5;
-    let cy = iy + ICON * 0.5;
-    let s = SCALE as f32;
-    // Mock path roughly: M3.2 8.3 L6.6 11.5 L12.9 4.8 in 16x16 viewBox.
-    let p0 = (cx - 4.8 * s, cy + 0.3 * s);
-    let p1 = (cx - 1.4 * s, cy + 3.5 * s);
-    let p2 = (cx + 4.9 * s, cy - 3.2 * s);
+fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
+    let cx = ix + icon * 0.5;
+    let cy = iy + icon * 0.5;
+    // Mock: 16-unit viewBox (M3.2 8.3 L6.6 11.5 L12.9 4.8, stroke 2.2)
+    // mapped onto a 13px glyph box.
+    let k = 13.0 * (icon / mock::ICON) / 16.0;
+    let p0 = (cx - 4.8 * k, cy + 0.3 * k);
+    let p1 = (cx - 1.4 * k, cy + 3.5 * k);
+    let p2 = (cx + 4.9 * k, cy - 3.2 * k);
     let mut pb = PathBuilder::new();
     pb.move_to(p0.0, p0.1);
     pb.line_to(p1.0, p1.1);
     pb.line_to(p2.0, p2.1);
     let Some(path) = pb.finish() else { return };
-    let len = ((p1.0 - p0.0).hypot(p1.1 - p0.1)) + ((p2.0 - p1.0).hypot(p2.1 - p1.1));
+    let len = (p1.0 - p0.0).hypot(p1.1 - p0.1) + (p2.0 - p1.0).hypot(p2.1 - p1.1);
     let progress = ((age - 0.08) / 0.45).clamp(0.0, 1.0);
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color(Color::from_rgba8(255, 255, 255, 255));
-    paint.anti_alias = true;
     let stroke = Stroke {
-        width: 2.2 * s,
+        width: 2.2 * k,
         line_cap: tiny_skia::LineCap::Round,
         line_join: tiny_skia::LineJoin::Round,
-        dash: StrokeDash::new(vec![len, len], len * (1.0 - progress)),
+        dash: StrokeDash::new(vec![len.max(0.01), len.max(0.01)], len * (1.0 - progress)),
         ..Stroke::default()
     };
-    if let Some(dash) = stroke.dash.clone() {
-        let stroke = Stroke {
-            width: 2.2 * s,
-            line_cap: tiny_skia::LineCap::Round,
-            line_join: tiny_skia::LineJoin::Round,
-            dash: Some(dash),
-            ..Stroke::default()
-        };
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-    } else {
-        // Fallback: full check if dash construction fails.
-        let stroke = Stroke {
-            width: 2.2 * s,
-            line_cap: tiny_skia::LineCap::Round,
-            line_join: tiny_skia::LineJoin::Round,
-            ..Stroke::default()
-        };
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-    }
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
-fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32) {
-    let cx = ix + ICON * 0.5;
-    let cy = iy + ICON * 0.5;
-    let s = 4.2 * SCALE as f32;
-    let mut paint = Paint::default();
+fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
+    let cx = ix + icon * 0.5;
+    let cy = iy + icon * 0.5;
+    let u = icon / mock::ICON;
+    let s = 4.2 * u;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color(Color::from_rgba8(255, 255, 255, 255));
-    paint.anti_alias = true;
     let stroke = Stroke {
-        width: 2.0 * SCALE as f32,
+        width: 2.0 * u,
         line_cap: tiny_skia::LineCap::Round,
         ..Stroke::default()
     };
@@ -631,9 +777,11 @@ fn draw_round_rect(
     let Some(path) = round_rect_path(x, y, w, h, radius) else {
         return;
     };
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color(color);
-    paint.anti_alias = true;
     pixmap.fill_path(
         &path,
         &paint,
@@ -643,6 +791,7 @@ fn draw_round_rect(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stroke_round_rect(
     pixmap: &mut SkPixmap,
     x: f32,
@@ -656,9 +805,11 @@ fn stroke_round_rect(
     let Some(path) = round_rect_path(x, y, w, h, radius) else {
         return;
     };
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color(color);
-    paint.anti_alias = true;
     let stroke = Stroke {
         width,
         ..Stroke::default()
@@ -686,9 +837,11 @@ fn fill_circle(pixmap: &mut SkPixmap, cx: f32, cy: f32, r: f32, color: Color) {
     let Some(path) = circle_path(cx, cy, r) else {
         return;
     };
-    let mut paint = Paint::default();
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color(color);
-    paint.anti_alias = true;
     pixmap.fill_path(
         &path,
         &paint,
@@ -736,43 +889,161 @@ fn draw_text(
     size: f32,
     color: Color,
 ) {
-    // Vertically center on center_y using the font ascent/descent of 'H'.
-    let metrics = font.horizontal_line_metrics(size);
-    let baseline = if let Some(m) = metrics {
+    // Vertically center the em box on center_y.
+    let baseline = if let Some(m) = font.horizontal_line_metrics(size) {
         center_y - (m.ascent + m.descent) * 0.5 + m.ascent
     } else {
         center_y + size * 0.35
     };
+    let cr = (color.red() * 255.0) as u16;
+    let cg = (color.green() * 255.0) as u16;
+    let cb = (color.blue() * 255.0) as u16;
+    let ca = (color.alpha() * 255.0) as u16;
     let mut pen_x = x;
-    let mut paint = PixmapPaint::default();
-    paint.opacity = color.alpha();
     for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, size);
-        if !bitmap.is_empty() {
-            if let Some(mut glyph) = SkPixmap::new(metrics.width.max(1) as u32, metrics.height.max(1) as u32)
+        if !bitmap.is_empty() && metrics.width > 0 && metrics.height > 0 {
+            if let Some(mut glyph) =
+                SkPixmap::new(metrics.width as u32, metrics.height as u32)
             {
-                for (i, a) in bitmap.iter().enumerate() {
-                    let px = i % metrics.width;
-                    let py = i / metrics.width;
-                    let alpha = ((*a as f32) / 255.0 * color.alpha() * 255.0).round() as u8;
-                    glyph.pixels_mut()[py * metrics.width + px] = tiny_skia::PremultipliedColorU8::from_rgba(
-                        ((color.red() * 255.0) as u8).saturating_mul(alpha) / 255,
-                        ((color.green() * 255.0) as u8).saturating_mul(alpha) / 255,
-                        ((color.blue() * 255.0) as u8).saturating_mul(alpha) / 255,
-                        alpha,
-                    )
-                    .unwrap_or_else(|| tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+                for (i, coverage) in bitmap.iter().enumerate() {
+                    // coverage × color alpha → final alpha; premultiply rgb
+                    // with u16 math (u8 saturating_mul truncated dark text).
+                    let a = (*coverage as u16 * ca + 127) / 255;
+                    let r = (cr * a + 127) / 255;
+                    let g = (cg * a + 127) / 255;
+                    let b = (cb * a + 127) / 255;
+                    glyph.pixels_mut()[i] =
+                        PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, a as u8)
+                            .unwrap_or_else(|| {
+                                PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap()
+                            });
                 }
                 pixmap.draw_pixmap(
                     (pen_x + metrics.xmin as f32).round() as i32,
                     (baseline + metrics.ymin as f32).round() as i32,
                     glyph.as_ref(),
-                    &paint,
+                    &PixmapPaint::default(),
                     Transform::identity(),
                     None,
                 );
             }
         }
         pen_x += metrics.advance_width;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render every mock state to PNG for off-screen visual review.
+    /// Writes only when DICTATE_DUMP_DIR is set: pure CPU, no X, no mic.
+    #[test]
+    fn dump_mock_frames() {
+        let Ok(dir) = std::env::var("DICTATE_DUMP_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let font = load_font().unwrap();
+        eprintln!("dump font: {:?}", font.name());
+        for s in [1.0f32, 2.0] {
+            let geo = Geo::new(s);
+            for (name, stage, age) in [
+                ("recording", Stage::Recording, 0.5f32),
+                ("processing", Stage::Transcribing, 0.5),
+                ("done", Stage::Done, 1.0),
+                ("done-draw", Stage::Done, 0.2),
+                ("error", Stage::Error, 0.5),
+            ] {
+                let mut pm = SkPixmap::new(geo.win_w, geo.win_h).unwrap();
+                let mut mask = SkPixmap::new(geo.win_w, geo.win_h).unwrap();
+                draw_frame(
+                    &mut pm,
+                    &mut mask,
+                    &font,
+                    stage,
+                    0.35,
+                    pill_width(stage, &geo),
+                    age,
+                    8,
+                    &geo,
+                );
+                write_png(&format!("{dir}/{name}-{s}x.png"), &pm);
+            }
+        }
+    }
+
+    fn write_png(path: &str, pm: &SkPixmap) {
+        // Unpremultiply for PNG's straight alpha.
+        let mut rgba = Vec::with_capacity(pm.data().len());
+        for px in pm.data().chunks_exact(4) {
+            let a = px[3] as u32;
+            let un = |c: u8| ((c as u32 * 255 + a / 2).checked_div(a).unwrap_or(0)).min(255) as u8;
+            if a == 0 {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                rgba.push(un(px[0]));
+                rgba.push(un(px[1]));
+                rgba.push(un(px[2]));
+                rgba.push(px[3]);
+            }
+        }
+        let (w, h) = (pm.width(), pm.height());
+        let mut raw = Vec::with_capacity((w as usize + 1) * h as usize);
+        for row in 0..h as usize {
+            raw.push(0); // filter: none
+            raw.extend_from_slice(&rgba[row * w as usize * 4..(row + 1) * w as usize * 4]);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
+        png_chunk(&mut out, b"IHDR", &ihdr);
+        // zlib stream with stored (uncompressed) deflate blocks.
+        let mut z = vec![0x78, 0x01];
+        let chunks: Vec<&[u8]> = raw.chunks(65535).collect();
+        for (i, block) in chunks.iter().enumerate() {
+            z.push(if i + 1 == chunks.len() { 1 } else { 0 });
+            z.extend_from_slice(&(block.len() as u16).to_le_bytes());
+            z.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+            z.extend_from_slice(block);
+        }
+        z.extend_from_slice(&adler32(&raw).to_be_bytes());
+        png_chunk(&mut out, b"IDAT", &z);
+        png_chunk(&mut out, b"IEND", &[]);
+        std::fs::write(path, &out).unwrap();
+    }
+
+    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc_data = Vec::with_capacity(4 + data.len());
+        crc_data.extend_from_slice(kind);
+        crc_data.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_data).to_be_bytes());
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in data {
+            a = (a + x as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
     }
 }
