@@ -52,15 +52,19 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load `path`, or the default config path when `None`. A missing file is
-    /// not an error: defaults apply. A malformed file is an error with the
-    /// offending line context.
+    /// Load `path`, or the default config path when `None`. A missing
+    /// DEFAULT file is not an error (defaults apply); a missing EXPLICIT
+    /// path is an error — a silent typo would be worse. A malformed file
+    /// is an error with the offending line context.
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let path = match path {
-            Some(p) => expand_tilde(p),
-            None => default_config_path(),
+        let (path, explicit) = match path {
+            Some(p) => (expand_tilde(p), true),
+            None => (default_config_path(), false),
         };
         if !path.exists() {
+            if explicit {
+                bail!("config file '{}' does not exist — fix the path or remove the flag", path.display());
+            }
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(&path)

@@ -9,7 +9,7 @@ mod commands;
 mod dictionary;
 mod format;
 
-pub use commands::{COMMANDS, VoiceCommand};
+pub use commands::COMMANDS;
 pub use dictionary::Dictionary;
 
 use serde::Deserialize;
