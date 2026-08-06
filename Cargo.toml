@@ -1,0 +1,26 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal offline speech-to-text dictation CLI powered by whisper.cpp"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.18"
+env_logger = "0.11"
+hound = "3"
+log = "0.4"
+rubato = "4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+whisper-rs = "0.16"
+
+[features]
+cuda = ["whisper-rs/cuda"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
