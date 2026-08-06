@@ -83,7 +83,10 @@ impl Config {
             path.display()
         );
         let raw = fs::read_to_string(&path).with_context(|| {
-            format!("cannot read config {} — check its permissions", path.display())
+            format!(
+                "cannot read config {} — check its permissions",
+                path.display()
+            )
         })?;
         let cfg: Self = toml::from_str(&raw)
             .with_context(|| format!("invalid TOML in config {}", path.display()))?;
@@ -396,7 +399,8 @@ mod tests {
     fn resolve_model_accepts_symlinked_model() {
         let cfg = Config::default();
         let target = temp_file("real.bin", b"nonempty");
-        let link = std::env::temp_dir().join(format!("dictate-test-{}-link.bin", std::process::id()));
+        let link =
+            std::env::temp_dir().join(format!("dictate-test-{}-link.bin", std::process::id()));
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let got = resolve_model(Some(&link), &cfg).unwrap();
         fs::remove_file(&link).ok();
@@ -408,7 +412,10 @@ mod tests {
     fn expand_tilde_variants() {
         let home = home_dir().unwrap();
         assert_eq!(expand_tilde(Path::new("~")).unwrap(), home);
-        assert_eq!(expand_tilde(Path::new("~/x/y.bin")).unwrap(), home.join("x/y.bin"));
+        assert_eq!(
+            expand_tilde(Path::new("~/x/y.bin")).unwrap(),
+            home.join("x/y.bin")
+        );
         assert_eq!(
             expand_tilde(Path::new("/abs/path")).unwrap(),
             PathBuf::from("/abs/path")

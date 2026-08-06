@@ -60,7 +60,10 @@ fn type_text(text: &str) -> Result<()> {
 /// Only '\n' is sent (the "new line" voice command is intentional);
 /// every other control character is stripped before typing.
 fn sanitize_for_typing(text: &str) -> String {
-    let clean: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
+    let clean: String = text
+        .chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect();
     if clean.len() != text.len() {
         log::warn!("stripped control characters from the transcript before typing");
     }
@@ -86,7 +89,10 @@ mod tests {
 
     #[test]
     fn newline_is_kept_by_design() {
-        assert_eq!(sanitize_for_typing("line one\nline two"), "line one\nline two");
+        assert_eq!(
+            sanitize_for_typing("line one\nline two"),
+            "line one\nline two"
+        );
     }
 
     #[test]

@@ -56,8 +56,7 @@ pub fn format(input: &str) -> String {
 
         // The standalone pronoun "i" is always capitalized. A pending
         // (not yet flushed) space already ends the previous word.
-        let word_before =
-            !pending_space && out.chars().last().is_some_and(char::is_alphanumeric);
+        let word_before = !pending_space && out.chars().last().is_some_and(char::is_alphanumeric);
         let word_after = chars.peek().is_some_and(|n| n.is_alphanumeric());
         let c = if c == 'i' && !word_before && !word_after {
             'I'
@@ -68,9 +67,7 @@ pub fn format(input: &str) -> String {
         // a quote delimiter.
         let squote = c == '\'' && !(word_before && word_after);
 
-        let closing = is_closing(c)
-            || (c == '"' && in_dquote)
-            || (squote && in_squote);
+        let closing = is_closing(c) || (c == '"' && in_dquote) || (squote && in_squote);
 
         if pending_space {
             pending_space = false;
@@ -106,9 +103,8 @@ pub fn format(input: &str) -> String {
             _ if squote => in_squote = !in_squote,
             _ => {}
         }
-        last_open = matches!(c, '(' | '[' | '{')
-            || (c == '"' && in_dquote)
-            || (squote && in_squote);
+        last_open =
+            matches!(c, '(' | '[' | '{') || (c == '"' && in_dquote) || (squote && in_squote);
     }
     out
 }
@@ -129,7 +125,10 @@ mod tests {
     #[test]
     fn no_space_before_punctuation_or_closers() {
         assert_eq!(format("hello , world ."), "Hello, world.");
-        assert_eq!(format("wait ; really : yes ! no ?"), "Wait; really: yes! No?");
+        assert_eq!(
+            format("wait ; really : yes ! no ?"),
+            "Wait; really: yes! No?"
+        );
         assert_eq!(format("fifty %"), "Fifty%");
         assert_eq!(format("( hi ) [ there ] { you }"), "(Hi) [there] {you}");
     }
@@ -143,7 +142,10 @@ mod tests {
 
     #[test]
     fn apostrophes_are_not_quotes() {
-        assert_eq!(format("i don't think it's ' odd '"), "I don't think it's 'odd'");
+        assert_eq!(
+            format("i don't think it's ' odd '"),
+            "I don't think it's 'odd'"
+        );
         assert_eq!(format("rock 'n' roll"), "Rock 'n' roll");
     }
 
@@ -197,7 +199,8 @@ mod tests {
 
     #[test]
     fn combined_messy_input() {
-        let messy = "  hello   world .  i said \" hi there \" ( it works ) .\n\nnext  line !  ok ?  ";
+        let messy =
+            "  hello   world .  i said \" hi there \" ( it works ) .\n\nnext  line !  ok ?  ";
         let expected = "Hello world. I said \"hi there\" (it works).\n\nNext line! Ok?";
         assert_eq!(format(messy), expected);
     }

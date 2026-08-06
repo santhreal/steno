@@ -135,7 +135,10 @@ pub(super) fn tokenize(input: &str) -> Vec<Tok<'_>> {
             toks.push(Tok::Newline);
         }
         for chunk in line.split_whitespace() {
-            let lead = chunk.len() - chunk.trim_start_matches(|c: char| !c.is_alphanumeric()).len();
+            let lead = chunk.len()
+                - chunk
+                    .trim_start_matches(|c: char| !c.is_alphanumeric())
+                    .len();
             for c in chunk[..lead].chars() {
                 toks.push(Tok::Punct(c));
             }
@@ -297,7 +300,11 @@ mod tests {
                 match cmd.action {
                     Action::Insert(s) => assert_eq!(apply(phrase), s, "phrase {phrase:?}"),
                     Action::Newline => assert_eq!(apply(phrase), "\n", "phrase {phrase:?}"),
-                    Action::Paragraph => assert_eq!(apply(phrase), "", "phrase {phrase:?} at start emits nothing before text"),
+                    Action::Paragraph => assert_eq!(
+                        apply(phrase),
+                        "",
+                        "phrase {phrase:?} at start emits nothing before text"
+                    ),
                     Action::Scratch => assert_eq!(
                         apply(&format!("keep this. delete this {phrase}")),
                         "keep this .",
@@ -419,10 +426,7 @@ mod tests {
     /// Regression: repeated scratch walks back sentence by sentence.
     #[test]
     fn repeated_scratch_deletes_one_sentence_each_time() {
-        assert_eq!(
-            apply("one period two period scratch that scratch that"),
-            ""
-        );
+        assert_eq!(apply("one period two period scratch that scratch that"), "");
         assert_eq!(
             apply("a period b period c period scratch that scratch that"),
             "a ."
@@ -434,7 +438,10 @@ mod tests {
     /// truncation must step over the whole char, not `idx + 1`.
     #[test]
     fn scratch_treats_ellipsis_as_sentence_boundary() {
-        assert_eq!(apply("wait dot dot dot no nevermind scratch that"), "wait …");
+        assert_eq!(
+            apply("wait dot dot dot no nevermind scratch that"),
+            "wait …"
+        );
     }
 
     /// Command phrases must never match across a newline.

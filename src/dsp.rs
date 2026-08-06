@@ -183,7 +183,8 @@ pub fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>>
         return Ok(Vec::new());
     }
 
-    let params = rubato::SincInterpolationParameters::new(256, rubato::WindowFunction::BlackmanHarris2);
+    let params =
+        rubato::SincInterpolationParameters::new(256, rubato::WindowFunction::BlackmanHarris2);
     let mut resampler = rubato::Async::<f32>::new_sinc(
         to_rate as f64 / from_rate as f64,
         1.0, // fixed ratio, no runtime adjustment
@@ -192,7 +193,9 @@ pub fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>>
         1,
         rubato::FixedAsync::Input,
     )
-    .with_context(|| format!("failed to build sinc resampler for {from_rate} Hz -> {to_rate} Hz"))?;
+    .with_context(|| {
+        format!("failed to build sinc resampler for {from_rate} Hz -> {to_rate} Hz")
+    })?;
 
     let buf_in = rubato::audioadapter_buffers::direct::InterleavedSlice::new(input, 1, input.len())
         .context("failed to wrap input for resampling")?;
@@ -218,7 +221,11 @@ impl DcBlock {
         } else {
             (-2.0 * std::f32::consts::PI * 5.0 / rate as f32).exp()
         };
-        Self { x1: 0.0, y1: 0.0, r }
+        Self {
+            x1: 0.0,
+            y1: 0.0,
+            r,
+        }
     }
     pub fn process(&mut self, samples: &mut [f32]) {
         for s in samples.iter_mut() {
@@ -414,10 +421,22 @@ mod tests {
         let (samples, rate) = read_wav(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(rate, 44_100);
-        assert_eq!(samples.len(), 2, "stereo must downmix to one sample per frame");
-        assert!(samples[0].abs() < 1e-6, "opposite channels must cancel, got {}", samples[0]);
+        assert_eq!(
+            samples.len(),
+            2,
+            "stereo must downmix to one sample per frame"
+        );
+        assert!(
+            samples[0].abs() < 1e-6,
+            "opposite channels must cancel, got {}",
+            samples[0]
+        );
         let want = 8_388_607.0 / 8_388_608.0;
-        assert!((samples[1] - want).abs() < 1e-6, "got {}, want {want}", samples[1]);
+        assert!(
+            (samples[1] - want).abs() < 1e-6,
+            "got {}, want {want}",
+            samples[1]
+        );
     }
 
     #[test]
@@ -526,7 +545,11 @@ mod tests {
         let mean = tail.iter().sum::<f32>() / tail.len() as f32;
         assert!(mean.abs() < 0.01, "DC offset not removed, tail mean {mean}");
         // The AC component must survive: DC block is not a mute.
-        assert!(rms(tail) > 0.2, "signal energy lost, tail rms {}", rms(tail));
+        assert!(
+            rms(tail) > 0.2,
+            "signal energy lost, tail rms {}",
+            rms(tail)
+        );
     }
 
     // ---- normalize ----
@@ -843,7 +866,10 @@ mod tests {
         }
         let mut dc = DcBlock::new(rate);
         dc.process(&mut signal);
-        assert!(signal.iter().all(|s| s.is_finite()), "output must stay finite");
+        assert!(
+            signal.iter().all(|s| s.is_finite()),
+            "output must stay finite"
+        );
         assert!(
             signal.iter().all(|s| s.abs() <= 1.1),
             "output must stay bounded, peak {}",
@@ -851,7 +877,10 @@ mod tests {
         );
         let tail = &signal[n - rate as usize..];
         let mean = tail.iter().sum::<f32>() / tail.len() as f32;
-        assert!(mean.abs() < 0.01, "tail of long buffer must be DC-free, mean {mean}");
+        assert!(
+            mean.abs() < 0.01,
+            "tail of long buffer must be DC-free, mean {mean}"
+        );
     }
 
     /// WHY: Endpoint::feed must never panic or miscount on boundary input
@@ -869,7 +898,10 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(ep.feed(&[]), VadEvent::WaitingForSpeech);
         }
-        assert!(!ep.speech_started(), "empty chunks must never confirm speech");
+        assert!(
+            !ep.speech_started(),
+            "empty chunks must never confirm speech"
+        );
         // Empty chunks must not have advanced the start-timeout clock:
         // real speech right after still counts normally.
         assert_eq!(ep.feed(&speech()), VadEvent::WaitingForSpeech);

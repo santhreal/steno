@@ -190,7 +190,10 @@ mod tests {
         let path = std::env::temp_dir().join("dictate-dict-test-definitely-missing.toml");
         let err = Dictionary::load(Some(&path)).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains(path.to_str().unwrap()), "error must name path: {msg}");
+        assert!(
+            msg.contains(path.to_str().unwrap()),
+            "error must name path: {msg}"
+        );
     }
 
     #[test]
@@ -212,7 +215,10 @@ mod tests {
         let path = temp_toml("malformed", "[overrides\nnot toml");
         let err = Dictionary::load(Some(&path)).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains(path.to_str().unwrap()), "error must name file: {msg}");
+        assert!(
+            msg.contains(path.to_str().unwrap()),
+            "error must name file: {msg}"
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -221,7 +227,10 @@ mod tests {
         let path = temp_toml("no-overrides", "[other]\nx = 1\n");
         let err = Dictionary::load(Some(&path)).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("overrides"), "error must mention overrides: {msg}");
+        assert!(
+            msg.contains("overrides"),
+            "error must mention overrides: {msg}"
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -245,7 +254,10 @@ mod tests {
         let d = Dictionary::from_entries([("new york", "NY"), ("new york city", "NYC")]);
         assert_eq!(d.apply("new york city"), "NYC");
         assert_eq!(d.apply("new york state"), "NY state");
-        assert_eq!(d.apply("i love new york city and new york"), "i love NYC and NY");
+        assert_eq!(
+            d.apply("i love new york city and new york"),
+            "i love NYC and NY"
+        );
     }
 
     #[test]
@@ -302,11 +314,8 @@ mod tests {
     fn single_character_and_three_way_overlap() {
         let d = Dictionary::from_entries([("a", "A!")]);
         assert_eq!(d.apply("a cat sat"), "A! cat sat");
-        let d = Dictionary::from_entries([
-            ("new york", "NY"),
-            ("new york city", "NYC"),
-            ("york", "Y"),
-        ]);
+        let d =
+            Dictionary::from_entries([("new york", "NY"), ("new york city", "NYC"), ("york", "Y")]);
         assert_eq!(d.apply("a trip to new york city"), "a trip to NYC");
         assert_eq!(d.apply("new york state"), "NY state");
         // "york" fires only where no longer phrase starts earlier.
@@ -324,8 +333,7 @@ mod tests {
             ("scratch that", "KEPT"),
             ("new york", "NY"),
         ]);
-        let pipe =
-            crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
+        let pipe = crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
         // "period" fired as a command; the override is dead.
         assert_eq!(pipe.process("wait period"), "Wait.");
         // "scratch that" fired as a command, not replaced with KEPT.

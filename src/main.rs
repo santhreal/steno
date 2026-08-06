@@ -126,7 +126,10 @@ fn main() -> Result<()> {
             max_gain: cfg.dsp.max_gain,
         })?,
     };
-    log::info!("{:.1}s of audio captured", samples.len() as f32 / dsp::WHISPER_RATE as f32);
+    log::info!(
+        "{:.1}s of audio captured",
+        samples.len() as f32 / dsp::WHISPER_RATE as f32
+    );
 
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
     let transcriber = stt::Transcriber::load(&model, language, cfg.n_threads)?;
@@ -201,8 +204,14 @@ mod tests {
     fn bare_type_flag_is_refused_when_disarmed() {
         let err = output_mode(true, false, false).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("disarmed"), "error must name the blocker: {msg}");
-        assert!(msg.contains("type_output"), "error must name the arming key: {msg}");
+        assert!(
+            msg.contains("disarmed"),
+            "error must name the blocker: {msg}"
+        );
+        assert!(
+            msg.contains("type_output"),
+            "error must name the arming key: {msg}"
+        );
     }
 
     #[test]

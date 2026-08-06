@@ -85,12 +85,26 @@ fn dictate(args: &[&str], wav: &Path, extra: &[String]) -> Output {
 fn raw_and_processed(model: &Path, wav: &Path, extra: &[String]) -> (String, String) {
     let m = &["--model", model.to_str().unwrap()];
     let raw_out = dictate(&[m[0], m[1], "--raw"], wav, extra);
-    assert!(raw_out.status.success(), "raw run: {}", String::from_utf8_lossy(&raw_out.stderr));
+    assert!(
+        raw_out.status.success(),
+        "raw run: {}",
+        String::from_utf8_lossy(&raw_out.stderr)
+    );
     let out = dictate(m, wav, extra);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     (
-        String::from_utf8(raw_out.stdout).unwrap().trim_end().to_string(),
-        String::from_utf8(out.stdout).unwrap().trim_end().to_string(),
+        String::from_utf8(raw_out.stdout)
+            .unwrap()
+            .trim_end()
+            .to_string(),
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim_end()
+            .to_string(),
     )
 }
 
@@ -155,26 +169,54 @@ fn e2e_commands_and_formatting() {
 
     // STT fidelity: whisper must have heard content and command words,
     // otherwise the pipeline assertions below prove nothing.
-    anchor_raw!(raw_lower, "this is a test", "quick brown fox", "period", "new line", "question mark");
+    anchor_raw!(
+        raw_lower,
+        "this is a test",
+        "quick brown fox",
+        "period",
+        "new line",
+        "question mark"
+    );
     // whisper emits a single line; a newline in the output can only come
     // from the `new line` command.
-    assert!(!raw.contains('\n'), "raw transcript unexpectedly multi-line: {raw:?}");
-    assert!(raw.contains('.'), "sanity: raw transcript has no punctuation at all: {raw:?}");
+    assert!(
+        !raw.contains('\n'),
+        "raw transcript unexpectedly multi-line: {raw:?}"
+    );
+    assert!(
+        raw.contains('.'),
+        "sanity: raw transcript has no punctuation at all: {raw:?}"
+    );
     // The pipeline must transform, not pass through.
-    assert_ne!(raw, text, "pipeline left the transcript untouched: {text:?}");
+    assert_ne!(
+        raw, text,
+        "pipeline left the transcript untouched: {text:?}"
+    );
 
     // Command transforms (observable regardless of STT wording).
     assert!(text.contains('.'), "period command did not fire: {text:?}");
-    assert!(text.contains('\n'), "new line command did not fire: {text:?}");
-    assert!(text.contains('?'), "question mark command did not fire: {text:?}");
+    assert!(
+        text.contains('\n'),
+        "new line command did not fire: {text:?}"
+    );
+    assert!(
+        text.contains('?'),
+        "question mark command did not fire: {text:?}"
+    );
     // The spoken command words themselves must be gone: whisper adds its
     // own '.' around "period", so symbol presence alone proves nothing.
     commands_consumed!(lower, text, "period", "new line", "question mark");
     // Content survived the pipeline.
     assert!(lower.contains("quick brown fox"), "content lost: {text:?}");
     // Formatter: first letter capitalized, no space before punctuation.
-    assert!(text.chars().next().unwrap().is_uppercase(), "no leading capital: {text:?}");
-    assert!(!text.contains(" .") && !text.contains(" ?"), "space before punctuation: {text:?}");
+    assert!(
+        text.chars().next().unwrap().is_uppercase(),
+        "no leading capital: {text:?}"
+    );
+    assert!(
+        !text.contains(" .") && !text.contains(" ?"),
+        "space before punctuation: {text:?}"
+    );
 }
 
 #[test]
@@ -187,7 +229,11 @@ fn e2e_scratch_and_dictionary() {
     let tmp = std::env::temp_dir().join("dictate-e2e-2");
     std::fs::create_dir_all(&tmp).unwrap();
     let dict = tmp.join("dict.toml");
-    std::fs::write(&dict, "[overrides]\n\"main street\" = \"Main Street\"\n\"um\" = \"\"\n").unwrap();
+    std::fs::write(
+        &dict,
+        "[overrides]\n\"main street\" = \"Main Street\"\n\"um\" = \"\"\n",
+    )
+    .unwrap();
     let wav = speak(
         &tmp,
         "t2.wav",
@@ -205,24 +251,50 @@ fn e2e_scratch_and_dictionary() {
     // scratch that is broken.
     anchor_raw!(
         raw_lower,
-        "went to the store", "scratch that", "went to the bank", "comma", "main street", "period"
+        "went to the store",
+        "scratch that",
+        "went to the bank",
+        "comma",
+        "main street",
+        "period"
     );
-    assert_ne!(raw, text, "pipeline left the transcript untouched: {text:?}");
+    assert_ne!(
+        raw, text,
+        "pipeline left the transcript untouched: {text:?}"
+    );
 
     // Scratch: the rescinded clause is gone, the kept clause survives.
-    assert!(!lower.contains("store"), "scratch that did not delete: {text:?}");
-    assert!(!lower.contains("scratch"), "scratch command words leaked: {text:?}");
-    assert!(lower.contains("went to the bank"), "kept clause lost: {text:?}");
+    assert!(
+        !lower.contains("store"),
+        "scratch that did not delete: {text:?}"
+    );
+    assert!(
+        !lower.contains("scratch"),
+        "scratch command words leaked: {text:?}"
+    );
+    assert!(
+        lower.contains("went to the bank"),
+        "kept clause lost: {text:?}"
+    );
     // Dictionary: phrase override applied, replacement case exact.
-    assert!(text.contains("Main Street"), "dictionary override missing: {text:?}");
+    assert!(
+        text.contains("Main Street"),
+        "dictionary override missing: {text:?}"
+    );
     // Case-sensitive: the un-overridden lowercase phrase must be gone
     // (the lowercase haystack would always contain the replacement).
-    assert!(!text.contains("main street"), "override did not apply (lowercase phrase survives): {text:?}");
+    assert!(
+        !text.contains("main street"),
+        "override did not apply (lowercase phrase survives): {text:?}"
+    );
     // Commands: symbols present AND spoken words consumed (whisper emits
     // its own ',' around "comma", so symbol presence alone is vacuous).
     assert!(text.contains(','), "comma command did not fire: {text:?}");
     commands_consumed!(lower, text, "comma", "period");
-    assert!(!text.contains(",,"), "duplicate punctuation leaked: {text:?}");
+    assert!(
+        !text.contains(",,"),
+        "duplicate punctuation leaked: {text:?}"
+    );
 }
 
 #[test]
@@ -249,18 +321,38 @@ fn e2e_quotes_paragraph_and_names() {
 
     anchor_raw!(
         raw_lower,
-        "open quote", "close quote", "new paragraph", "exclamation mark", "hello world", "boss"
+        "open quote",
+        "close quote",
+        "new paragraph",
+        "exclamation mark",
+        "hello world",
+        "boss"
     );
-    assert!(!raw.contains("\n\n"), "raw transcript unexpectedly has a blank line: {raw:?}");
-    assert_ne!(raw, text, "pipeline left the transcript untouched: {text:?}");
+    assert!(
+        !raw.contains("\n\n"),
+        "raw transcript unexpectedly has a blank line: {raw:?}"
+    );
+    assert_ne!(
+        raw, text,
+        "pipeline left the transcript untouched: {text:?}"
+    );
 
     assert!(text.contains('"'), "quote commands did not fire: {text:?}");
-    assert!(text.contains("\n\n"), "new paragraph command did not fire: {text:?}");
-    assert!(text.contains('!'), "exclamation command did not fire: {text:?}");
+    assert!(
+        text.contains("\n\n"),
+        "new paragraph command did not fire: {text:?}"
+    );
+    assert!(
+        text.contains('!'),
+        "exclamation command did not fire: {text:?}"
+    );
     commands_consumed!(lower, text, "quote", "paragraph", "exclamation");
     // Dictionary name override: applied, and the original word is gone.
     assert!(text.contains("Mukund"), "name override missing: {text:?}");
-    assert!(!lower.contains("boss"), "un-overridden word leaked: {text:?}");
+    assert!(
+        !lower.contains("boss"),
+        "un-overridden word leaked: {text:?}"
+    );
 }
 
 #[test]
@@ -309,11 +401,20 @@ fn typing_is_fail_closed_without_config_arming() {
         .expect("run dictate");
     assert!(!out.status.success(), "--type without arming must fail");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("disarmed"), "error must name the blocker: {err}");
-    assert!(err.contains("type_output"), "error must name the arming key: {err}");
+    assert!(
+        err.contains("disarmed"),
+        "error must name the blocker: {err}"
+    );
+    assert!(
+        err.contains("type_output"),
+        "error must name the arming key: {err}"
+    );
     // The guard must fire fast — before whisper (never prints model load)
     // and before the microphone is opened.
-    assert!(!err.contains("whisper"), "model loaded before the guard: {err}");
+    assert!(
+        !err.contains("whisper"),
+        "model loaded before the guard: {err}"
+    );
 }
 
 /// Real typing end-to-end (keystrokes landing in a window) is
@@ -339,15 +440,35 @@ fn list_commands_documents_every_command() {
     );
     // Every primary spoken form and its documented alternates.
     for needle in [
-        "period", "full stop", "comma", "question mark", "exclamation mark", "colon",
-        "semicolon", "ellipsis", "dot dot dot", "open quote", "close quote", "end quote",
-        "unquote", "open paren", "close paren", "percent sign", "dollar sign", "new line",
-        "new paragraph", "scratch that", "delete that",
+        "period",
+        "full stop",
+        "comma",
+        "question mark",
+        "exclamation mark",
+        "colon",
+        "semicolon",
+        "ellipsis",
+        "dot dot dot",
+        "open quote",
+        "close quote",
+        "end quote",
+        "unquote",
+        "open paren",
+        "close paren",
+        "percent sign",
+        "dollar sign",
+        "new line",
+        "new paragraph",
+        "scratch that",
+        "delete that",
     ] {
         assert!(text.contains(needle), "missing {needle} in --list-commands");
     }
     // Every line names its effect.
     for line in text.lines() {
-        assert!(line.contains('→'), "doc line lacks an effect arrow: {line:?}");
+        assert!(
+            line.contains('→'),
+            "doc line lacks an effect arrow: {line:?}"
+        );
     }
 }

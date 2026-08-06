@@ -22,9 +22,9 @@ pub struct RecordConfig {
 /// Names of all input devices, for `dictate --list-devices`.
 pub fn list_input_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();
-    let devices = host
-        .input_devices()
-        .context("failed to enumerate audio input devices — check that PipeWire/PulseAudio is running")?;
+    let devices = host.input_devices().context(
+        "failed to enumerate audio input devices — check that PipeWire/PulseAudio is running",
+    )?;
     let names: Vec<String> = devices.map(|d| d.to_string()).collect();
     if names.is_empty() {
         bail!(
@@ -80,11 +80,15 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         cpal::SampleFormat::F64 => build_stream::<f64>(&device, &stream_config, tx, &dev_name),
         cpal::SampleFormat::I8 => build_stream::<i8>(&device, &stream_config, tx, &dev_name),
         cpal::SampleFormat::I16 => build_stream::<i16>(&device, &stream_config, tx, &dev_name),
-        cpal::SampleFormat::I24 => build_stream::<cpal::I24>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::I24 => {
+            build_stream::<cpal::I24>(&device, &stream_config, tx, &dev_name)
+        }
         cpal::SampleFormat::I32 => build_stream::<i32>(&device, &stream_config, tx, &dev_name),
         cpal::SampleFormat::U8 => build_stream::<u8>(&device, &stream_config, tx, &dev_name),
         cpal::SampleFormat::U16 => build_stream::<u16>(&device, &stream_config, tx, &dev_name),
-        cpal::SampleFormat::U24 => build_stream::<cpal::U24>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::U24 => {
+            build_stream::<cpal::U24>(&device, &stream_config, tx, &dev_name)
+        }
         cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
         other => bail!(
             "device '{dev_name}' only offers unsupported sample format {other:?} — pick another device (`dictate --list-devices`)"
@@ -105,8 +109,9 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         );
     }
 
-    let mut samples = dsp::resample(&captured, dev_rate, WHISPER_RATE)
-        .with_context(|| format!("failed to resample recording from {dev_rate} Hz to {WHISPER_RATE} Hz"))?;
+    let mut samples = dsp::resample(&captured, dev_rate, WHISPER_RATE).with_context(|| {
+        format!("failed to resample recording from {dev_rate} Hz to {WHISPER_RATE} Hz")
+    })?;
     let mut dc = dsp::DcBlock::new(WHISPER_RATE);
     dc.process(&mut samples);
     dsp::normalize(&mut samples, cfg.target_rms, cfg.max_gain);
@@ -124,7 +129,9 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
 fn select_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device> {
     let devices: Vec<cpal::Device> = host
         .input_devices()
-        .context("failed to enumerate audio input devices — check that PipeWire/PulseAudio is running")?
+        .context(
+            "failed to enumerate audio input devices — check that PipeWire/PulseAudio is running",
+        )?
         .collect();
     let names: Vec<String> = devices.iter().map(|d| d.to_string()).collect();
     match needle {
@@ -254,7 +261,9 @@ fn capture_loop(
         };
         match msg {
             Msg::Error(e) => {
-                bail!("capture stream on device '{dev_name}' failed: {e} — check the microphone connection and permissions");
+                bail!(
+                    "capture stream on device '{dev_name}' failed: {e} — check the microphone connection and permissions"
+                );
             }
             Msg::Data(mono) => pending.extend_from_slice(&mono),
         }
@@ -332,7 +341,9 @@ mod tests {
     /// before the stream is built.
     #[test]
     fn mono_channels_rejects_zero_channel_devices() {
-        let err = mono_channels(&stream_config(0), "fake-dev").unwrap_err().to_string();
+        let err = mono_channels(&stream_config(0), "fake-dev")
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("fake-dev") && err.contains("0 channels"),
             "error must name the device and the problem, got: {err}"

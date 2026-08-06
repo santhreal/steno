@@ -179,7 +179,7 @@ mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── whisper.cpp decode (greedy, temperature fallback)
     ── voice commands → dictionary → formatter
-    ── stdout, or synthetic keystrokes (xdotool --type)
+    ── stdout, or synthetic keystrokes (xdotool, when armed)
 ```
 
 Recording ends on an energy-VAD endpoint (silence after speech), so there is
