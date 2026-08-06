@@ -1,12 +1,14 @@
 # light-dictate
 
 Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
-out. No daemon, no cloud, no GPU required.
+out. No cloud, no GPU required. One-shot or a background daemon.
 
-`dictate` records one utterance from your microphone, stops by itself when you
-finish speaking, transcribes it locally with
+`dictate` records from your microphone, transcribes locally with
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp), cleans the text up,
 and prints it — or types it into whatever window is focused.
+
+Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
+keeps the model loaded and listens for **Ctrl+Space** (hold to talk).
 
 ```
 $ dictate
@@ -60,25 +62,46 @@ set `model_path` in the config) to choose.
 
 ## Use it
 
-**Record and print.** Run `dictate`, speak, pause. Recording stops after
-about a second of silence (configurable). Text streams to stdout segment
-by segment as it is decoded, so it composes: `dictate | xclip -selection
-clipboard`.
-
-**Record and type.** Typing is fail-closed: it works only after you arm it
-once in `~/.config/dictate/config.toml`:
+**Daemon (recommended for daily use).** Arm typing once, then start the
+resident model:
 
 ```toml
+# ~/.config/dictate/config.toml
 type_output = true
+model_path = "~/.local/share/dictate/models/ggml-small.en.bin"
 ```
 
-Then `dictate` (or `dictate --type`) types the result into the currently
-focused window via `xdotool` (X11; install with `sudo apt install
-xdotool`), and `dictate --stdout` prints instead for one run. Typed text
-streams in as it is decoded; the clipboard is never touched. Bind it to a
-global shortcut for real dictation: GNOME Settings → Keyboard → Custom
-Shortcuts, command `/path/to/dictate`, e.g. Ctrl+Space. Click into any
-text field, press the shortcut, speak.
+```
+$ dictate start
+Dictation running (PID 12345).
+Hotkey: hold Ctrl+Space to speak.
+Log: /home/you/.cache/dictate/dictate.log
+
+$ dictate status
+Dictation running (PID 12345).
+Hotkey: hold Ctrl+Space to speak.
+
+$ dictate stop
+Dictation stopped.
+```
+
+Hold **Ctrl+Space**, speak, release. The daemon already has the model in
+memory, so there is no cold-start per utterance. `dictate restart` bounces
+it; `dictate start --foreground` runs in the terminal for debugging.
+Make sure no other app (GNOME custom shortcut, etc.) already owns
+Ctrl+Space.
+
+**Record and print (one-shot).** Run `dictate`, speak, pause. Recording
+stops after about a second of silence (configurable). Text streams to
+stdout segment by segment as it is decoded, so it composes:
+`dictate | xclip -selection clipboard`.
+
+**Record and type (one-shot).** Typing is fail-closed: it works only after
+you arm it once in `~/.config/dictate/config.toml` (`type_output = true`).
+Then `dictate` (or `dictate --type`) types into the focused window via
+`xdotool` (X11; `sudo apt install xdotool`), and `dictate --stdout`
+prints instead for one run. Typed text streams as it is decoded; the
+clipboard is never touched.
 
 **Status bar.** While running, a small borderless bar at the bottom center
 of your primary monitor shows the stage: recording, transcribing, done.
@@ -100,9 +123,9 @@ Useful flags: `--list-devices` and `--device <name>` pick a microphone,
 `--model`/`--dictionary`/`--config <path>` override auto-resolution,
 `-v`/`-vv` shows what the pipeline is doing.
 
-Every invocation is a fresh process that loads the model from disk, so each
-dictation costs a few seconds of startup and decode time beyond your
-speech. Smaller models start faster.
+One-shot invocations load the model from disk each time (a few seconds of
+startup). `dictate start` keeps the model resident so hold-to-talk skips
+that cost. Smaller models start faster either way.
 
 ## Voice commands
 
@@ -192,9 +215,9 @@ mic ── capture (cpal/ALSA)
     ── streamed to stdout, or synthetic keystrokes (xdotool, when armed)
 ```
 
-Recording ends on an energy-VAD endpoint (silence after speech), so there is
-no button to press twice and no daemon to babysit. Each invocation is a
-fresh process: state never leaks between utterances.
+One-shot mode ends on an energy-VAD endpoint (silence after speech). Daemon
+mode ends when you release Ctrl+Space. Either way each utterance gets a
+fresh decode state — nothing leaks between them.
 
 ## Notes and limits
 

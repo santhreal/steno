@@ -1,8 +1,12 @@
-//! Microphone capture via cpal. One `record()` call: open stream, collect
-//! until the endpoint detector fires or `max_duration` elapses, tear down.
-//! No daemon, no background threads left running.
+//! Microphone capture via cpal.
+//!
+//! - `record()` — open stream, collect until the VAD endpoint / timeout, tear down.
+//! - `record_while()` — open stream, collect until a stop flag or `max_duration`, tear down.
+//!
+//! Both leave no capture threads running after they return.
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::sync::atomic::{AtomicBool, Ordering};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -121,6 +125,81 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
             "no speech detected on device '{dev_name}' — check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
         );
     }
+    Ok(samples)
+}
+
+
+/// Record while `stop` is clear. Ends on `stop`, `max_duration`, or capture
+/// failure. Returns processed 16 kHz mono samples, or an empty `Vec` when
+/// the hold produced no usable speech (caller should skip transcription).
+pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool) -> Result<Vec<f32>> {
+    let host = cpal::default_host();
+    let device = select_device(&host, cfg.device.as_deref())?;
+    let dev_name = device.to_string();
+
+    let ranges: Vec<_> = device
+        .supported_input_configs()
+        .with_context(|| {
+            format!("failed to query input formats of device '{dev_name}' — is it still connected?")
+        })?
+        .collect();
+    let range = ranges
+        .iter()
+        .max_by(|a, b| a.cmp_default_heuristics(b))
+        .ok_or_else(|| {
+            anyhow!(
+                "device '{dev_name}' supports no input stream formats — pick another device (`dictate --list-devices`)"
+            )
+        })?;
+    let chosen = range
+        .try_with_standard_sample_rate()
+        .unwrap_or_else(|| range.with_max_sample_rate());
+    let format = chosen.sample_format();
+    let stream_config = chosen.config();
+    let channels = stream_config.channels as usize;
+    let dev_rate = stream_config.sample_rate;
+    log::info!(
+        "push-to-talk from '{dev_name}' at {dev_rate} Hz, {channels} channel(s), {format:?}"
+    );
+
+    let (tx, rx) = mpsc::channel::<Msg>();
+    let stream = match format {
+        cpal::SampleFormat::F32 => build_stream::<f32>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::F64 => build_stream::<f64>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::I8 => build_stream::<i8>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::I16 => build_stream::<i16>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::I24 => {
+            build_stream::<cpal::I24>(&device, &stream_config, tx, &dev_name)
+        }
+        cpal::SampleFormat::I32 => build_stream::<i32>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::U8 => build_stream::<u8>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::U16 => build_stream::<u16>(&device, &stream_config, tx, &dev_name),
+        cpal::SampleFormat::U24 => {
+            build_stream::<cpal::U24>(&device, &stream_config, tx, &dev_name)
+        }
+        cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
+        other => bail!(
+            "device '{dev_name}' only offers unsupported sample format {other:?} — pick another device (`dictate --list-devices`)"
+        ),
+    }?;
+    stream.play().with_context(|| {
+        format!("failed to start capture on device '{dev_name}' — check microphone permissions")
+    })?;
+
+    let result = capture_until_stop(&rx, &stream, cfg, dev_rate, &dev_name, stop);
+    drop(stream);
+    let captured = result?;
+    if captured.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut samples = dsp::resample(&captured, dev_rate, WHISPER_RATE).with_context(|| {
+        format!("failed to resample recording from {dev_rate} Hz to {WHISPER_RATE} Hz")
+    })?;
+    let mut dc = dsp::DcBlock::new(WHISPER_RATE);
+    dc.process(&mut samples);
+    dsp::normalize(&mut samples, cfg.target_rms, cfg.max_gain);
+    trim_leading_silence(&mut samples, cfg.vad.speech_threshold);
     Ok(samples)
 }
 
@@ -295,6 +374,63 @@ fn capture_loop(
     // Ensure the callback cannot outlive this function's use of the channel.
     stream.pause().ok();
     Ok((captured, endpoint.speech_started()))
+}
+
+
+/// Collect frames until `stop` is set, `max_duration` elapses, or the
+/// backend goes silent past the wall-clock guard. No VAD endpoint — the
+/// hotkey release is the endpoint.
+fn capture_until_stop(
+    rx: &mpsc::Receiver<Msg>,
+    stream: &cpal::Stream,
+    cfg: &RecordConfig,
+    dev_rate: u32,
+    dev_name: &str,
+    stop: &AtomicBool,
+) -> Result<Vec<f32>> {
+    let max_frames = (cfg.max_duration.as_secs_f64() * dev_rate as f64) as usize;
+    let mut captured: Vec<f32> = Vec::new();
+    let deadline = capture_deadline(cfg.max_duration);
+
+    loop {
+        if stop.load(Ordering::Relaxed) || captured.len() >= max_frames {
+            break;
+        }
+        let msg = match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(m) => m,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    log::warn!("device '{dev_name}' stopped delivering frames; ending capture");
+                    break;
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        match msg {
+            Msg::Error(e) => {
+                bail!(
+                    "capture stream on device '{dev_name}' failed: {e} — check the microphone connection and permissions"
+                );
+            }
+            Msg::Data(mono) => {
+                let room = max_frames.saturating_sub(captured.len());
+                if room == 0 {
+                    break;
+                }
+                if mono.len() > room {
+                    captured.extend_from_slice(&mono[..room]);
+                    break;
+                }
+                captured.extend_from_slice(&mono);
+            }
+        }
+    }
+    stream.pause().ok();
+    Ok(captured)
 }
 
 /// Wall-clock deadline for a backend that stops delivering frames, or

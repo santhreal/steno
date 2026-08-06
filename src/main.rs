@@ -2,41 +2,46 @@
 //!
 //! Binary name: `dictate`.
 //!
-//! `dictate` records one utterance from the microphone (stopping at the end
-//! of speech), transcribes it locally, applies the text pipeline, and prints
-//! the result. `dictate clip.wav` transcribes a file instead. `--type` types
-//! the result into the focused window instead of printing.
+//! One-shot: `dictate` records one utterance (VAD endpoint), transcribes it
+//! locally, and prints or types the result. `dictate clip.wav` transcribes a
+//! file. Daemon: `dictate start` keeps the model loaded system-wide; hold
+//! Ctrl+Space to dictate into the focused window; `dictate stop` tears it down.
 
 mod audio;
 mod config;
+mod daemon;
 mod dsp;
+mod hotkey;
 mod output;
 mod overlay;
 mod stt;
 mod text;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "dictate", version, about, long_about = None)]
-struct Cli {
+pub struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Transcribe this WAV file instead of recording from the microphone.
     input: Option<PathBuf>,
 
     /// Path to a ggml whisper model (.bin). Overrides config.
-    #[arg(short, long)]
-    model: Option<PathBuf>,
+    #[arg(short, long, global = true)]
+    pub model: Option<PathBuf>,
 
     /// Path to a dictionary TOML with an [overrides] table.
-    #[arg(short, long)]
-    dictionary: Option<PathBuf>,
+    #[arg(short, long, global = true)]
+    pub dictionary: Option<PathBuf>,
 
     /// Spoken language code (e.g. "en") or "auto".
-    #[arg(short, long)]
-    language: Option<String>,
+    #[arg(short, long, global = true)]
+    pub language: Option<String>,
 
     /// Type the result into the focused window via xdotool (X11) instead
     /// of printing. SAFETY: requires `type_output = true` in the config
@@ -49,28 +54,51 @@ struct Cli {
     stdout: bool,
 
     /// Skip the text pipeline (commands, dictionary, formatting).
-    #[arg(long)]
-    raw: bool,
+    #[arg(long, global = true)]
+    pub raw: bool,
 
     /// List microphone input devices and exit.
     #[arg(long)]
     list_devices: bool,
 
     /// Input device name substring (default: system default device).
-    #[arg(long)]
-    device: Option<String>,
+    #[arg(long, global = true)]
+    pub device: Option<String>,
 
     /// Config file path (default: ~/.config/dictate/config.toml).
-    #[arg(long)]
-    config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
 
     /// Print the voice command table and exit.
     #[arg(long)]
     list_commands: bool,
 
     /// Increase log verbosity (-v info, -vv debug, -vvv trace).
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Load the model system-wide and listen for Ctrl+Space (hold to talk).
+    Start {
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the background dictation daemon.
+    Stop,
+    /// Show whether the daemon is running.
+    Status,
+    /// Restart the background daemon.
+    Restart {
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Internal worker process started by `dictate start`.
+    #[command(hide = true)]
+    Daemon,
 }
 
 fn main() -> Result<()> {
@@ -78,6 +106,15 @@ fn main() -> Result<()> {
     init_log(cli.verbose);
     // Route whisper.cpp/ggml chatter through `log` (quiet by default, -v shows it).
     whisper_rs::install_logging_hooks();
+
+    match cli.command {
+        Some(Command::Start { foreground }) => return daemon::start(&cli, foreground),
+        Some(Command::Stop) => return daemon::stop(),
+        Some(Command::Status) => return daemon::status(),
+        Some(Command::Restart { foreground }) => return daemon::restart(&cli, foreground),
+        Some(Command::Daemon) => return daemon::run_daemon(&cli),
+        None => {}
+    }
 
     if cli.list_commands {
         for c in text::COMMANDS {
@@ -142,14 +179,31 @@ fn main() -> Result<()> {
 
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
     let transcriber = stt::Transcriber::load(&model, language, cfg.n_threads)?;
-
-    // Stream: each finalized whisper segment goes through the pipeline
-    // and out to the user immediately, while decode continues.
     let dict = text::Dictionary::load(
         config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
     )?;
     let pipeline = text::TextPipeline::new(cfg.text, dict);
+    emit_transcript(
+        &samples,
+        &transcriber,
+        pipeline,
+        cli.raw,
+        mode,
+        &overlay,
+        cfg.ui.done_flash_ms,
+    )
+}
 
+/// Run the text pipeline + emitter over `samples`. Shared by one-shot and daemon.
+pub(crate) fn emit_transcript(
+    samples: &[f32],
+    transcriber: &stt::Transcriber,
+    pipeline: text::TextPipeline,
+    raw: bool,
+    mode: output::OutputMode,
+    overlay: &overlay::Overlay,
+    flash_ms: u64,
+) -> Result<()> {
     struct StreamCtx {
         emitter: output::Emitter,
         state: text::FmtState,
@@ -162,15 +216,15 @@ fn main() -> Result<()> {
         error: None,
     }));
     let ctx2 = ctx.clone();
-    let run_pipeline = move |raw: &str| {
+    let run_pipeline = move |chunk: &str| {
         let mut c = ctx2.borrow_mut();
         if c.error.is_some() {
             return; // a dead emitter must not spam further errors
         }
-        let (text, state) = if cli.raw {
-            (raw.trim().to_string(), c.state)
+        let (text, state) = if raw {
+            (chunk.trim().to_string(), c.state)
         } else {
-            pipeline.process_stream(raw, c.state)
+            pipeline.process_stream(chunk, c.state)
         };
         c.state = state;
         if let Err(e) = c.emitter.push(&text) {
@@ -178,13 +232,13 @@ fn main() -> Result<()> {
             c.error = Some(e.to_string());
         }
     };
-    transcriber.transcribe_streaming(&samples, run_pipeline)?;
+    transcriber.transcribe_streaming(samples, run_pipeline)?;
 
     // whisper-rs owns the callback after full(); borrow, don't unwrap.
     let mut ctx = ctx.borrow_mut();
     if let Some(e) = ctx.error.take() {
         overlay.set(overlay::Stage::Error);
-        overlay.flash(cfg.ui.done_flash_ms); // keep the error stage visible
+        overlay.flash(flash_ms);
         anyhow::bail!("{e}");
     }
     let started = ctx.emitter.started();
@@ -193,7 +247,7 @@ fn main() -> Result<()> {
         log::debug!("empty transcript, nothing emitted");
     }
     overlay.set(overlay::Stage::Done);
-    overlay.flash(cfg.ui.done_flash_ms);
+    overlay.flash(flash_ms);
     Ok(())
 }
 

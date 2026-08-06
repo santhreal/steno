@@ -330,23 +330,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "light-dictate"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "cpal",
- "env_logger",
- "hound",
- "log",
- "rubato",
- "serde",
- "toml",
- "whisper-rs",
- "x11rb",
-]
-
-[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,6 +561,24 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "light-dictate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cpal",
+ "env_logger",
+ "hound",
+ "libc",
+ "log",
+ "rubato",
+ "serde",
+ "toml",
+ "whisper-rs",
+ "x11rb",
 ]
 
 [[package]]
