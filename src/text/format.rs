@@ -10,6 +10,9 @@
 //!   inserts its own punctuation around spoken command words: "bank,
 //!   comma," must not become "bank,,"). Runs of '.' are kept ("..."),
 //!   intentional stutters like "!!" are lost.
+//! - text between the dictionary's verbatim markers is copied through
+//!   without case transforms (no sentence capitalization, no "i" → "I"),
+//!   so replacements keep their exact written case.
 //!
 //! Idempotent: format(format(x)) == format(x).
 //!
@@ -53,12 +56,27 @@ impl Default for FmtState {
     }
 }
 
+/// Strip the dictionary's verbatim markers without formatting; used when
+/// the pipeline runs with formatting disabled.
+pub(super) fn strip_verbatim(input: &str) -> String {
+    if !input.contains(super::VERBATIM_START) {
+        return input.to_string();
+    }
+    input
+        .chars()
+        .filter(|&c| c != super::VERBATIM_START && c != super::VERBATIM_END)
+        .collect()
+}
+
 /// Streaming entry point: pass [`FmtState::default`] for the first chunk,
 /// then feed each returned state into the next call.
 pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut pending_space = false;
+    // Inside a verbatim-marked dictionary replacement: no case transforms.
+    // Local to the call — a marker never legitimately spans chunks.
+    let mut verbatim = false;
     let FmtState {
         mut capitalize_next,
         mut in_dquote,
@@ -67,6 +85,14 @@ pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
     } = state;
 
     while let Some(c) = chars.next() {
+        if c == super::VERBATIM_START {
+            verbatim = true;
+            continue;
+        }
+        if c == super::VERBATIM_END {
+            verbatim = false;
+            continue;
+        }
         match c {
             ' ' | '\t' | '\r' => {
                 pending_space = true;
@@ -88,7 +114,7 @@ pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
         // (not yet flushed) space already ends the previous word.
         let word_before = !pending_space && out.chars().last().is_some_and(char::is_alphanumeric);
         let word_after = chars.peek().is_some_and(|n| n.is_alphanumeric());
-        let c = if c == 'i' && !word_before && !word_after {
+        let c = if !verbatim && c == 'i' && !word_before && !word_after {
             'I'
         } else {
             c
@@ -113,7 +139,7 @@ pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
             continue;
         }
 
-        if capitalize_next && c.is_alphabetic() {
+        if !verbatim && capitalize_next && c.is_alphabetic() {
             out.extend(c.to_uppercase());
         } else {
             out.push(c);
@@ -369,5 +395,43 @@ mod tests {
         let messy = "  hello   world .  i said \" hi there \" ( it works ) .\n\nnext  line !  e.g. 3.14 ok ?  ";
         let once = format(messy);
         assert_eq!(format(&once), once, "format must be idempotent");
+    }
+
+    /// The dictionary wraps each replacement in verbatim markers; the
+    /// formatter must copy marked text through without sentence
+    /// capitalization or the "i" → "I" rule, and never emit a marker.
+    #[test]
+    fn verbatim_marked_text_keeps_its_case() {
+        use super::super::{VERBATIM_END, VERBATIM_START};
+        let marked = |s: &str| format!("{VERBATIM_START}{s}{VERBATIM_END}");
+        // Sentence start: a lowercase brand stays lowercase.
+        assert_eq!(format(&marked("veyyon")), "veyyon");
+        assert_eq!(
+            format(&format!("{} is great", marked("veyyon"))),
+            "veyyon is great"
+        );
+        // The standalone-"i" rule cannot fire inside a replacement.
+        assert_eq!(format(&format!("say {}", marked("i"))), "Say i");
+        // A marked word still ends the sentence-start state: the
+        // following word is not capitalized, and the carried state
+        // reflects real text, not the markers.
+        let (out, st) = format_with(&marked("veyyon"), FmtState::default());
+        assert_eq!(out, "veyyon");
+        assert!(!st.capitalize_next);
+        // Spacing and punctuation around marked text behave normally.
+        assert_eq!(
+            format(&format!("{} , ok .", marked("veyyon"))),
+            "veyyon, ok."
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_removes_only_markers() {
+        use super::strip_verbatim;
+        assert_eq!(strip_verbatim("plain text"), "plain text");
+        assert_eq!(
+            strip_verbatim("a \u{E000}veyyon\u{E001} b"),
+            "a veyyon b"
+        );
     }
 }

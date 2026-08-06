@@ -3,6 +3,15 @@
 //! 2. dictionary      — multi-word phrase overrides, empty replacement deletes
 //! 3. formatting      — sentence capitalization, punctuation spacing
 //!
+//! Dictionary replacements are inserted verbatim: the formatter spaces and
+//! punctuates around them but never re-cases them, so a lowercase-branded
+//! entry ("veyyon") stays lowercase even at a sentence start.
+//!
+//! Streaming limit: each whisper segment is processed on its own, so a
+//! multi-word dictionary phrase split across two segments never matches.
+//! Keep overrides to phrases whisper emits within one breath, or make each
+//! half its own entry.
+//!
 //! Pure string logic; no I/O except dictionary file loading.
 
 mod commands;
@@ -33,6 +42,14 @@ impl Default for TextConfig {
     }
 }
 
+/// Private-use sentinel pair wrapping each dictionary replacement between
+/// stages 2 and 3. The formatter copies marked text through without case
+/// transforms and strips the markers; they never reach emitted output.
+/// Chosen from the Unicode private use area so real transcripts and
+/// dictionary entries cannot contain them.
+const VERBATIM_START: char = '\u{E000}';
+const VERBATIM_END: char = '\u{E001}';
+
 pub struct TextPipeline {
     cfg: TextConfig,
     dict: Dictionary,
@@ -52,10 +69,12 @@ impl TextPipeline {
         if self.cfg.commands {
             s = commands::apply(&s);
         }
-        s = self.dict.apply(&s);
         if self.cfg.format {
+            // Marked replacements let the formatter protect their case.
+            s = self.dict.apply_marked(&s);
             format::format_with(&s, state)
         } else {
+            s = self.dict.apply(&s);
             (s.trim().to_string(), state)
         }
     }

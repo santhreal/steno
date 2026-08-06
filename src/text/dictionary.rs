@@ -9,7 +9,9 @@
 //! ```
 //!
 //! Matching is case-insensitive, whole-word, longest phrase first.
-//! Replacement text is inserted literally (case as written).
+//! Replacement text is inserted literally (case as written): `apply_marked`
+//! wraps each replacement in verbatim markers so the formatter never
+//! re-cases it, and [`Dictionary::apply`] strips them for plain-text callers.
 //!
 //! An override whose phrase collides with a voice command phrase (say
 //! "period") is dead: commands run first (see `mod.rs`) and consume the
@@ -94,6 +96,15 @@ impl Dictionary {
     /// Apply overrides to `input`. Whole-word matching: a phrase never
     /// matches inside a larger word.
     pub fn apply(&self, input: &str) -> String {
+        super::format::strip_verbatim(&self.apply_marked(input))
+    }
+
+    /// [`apply`](Self::apply) plus a verbatim marker pair around every
+    /// inserted replacement, so the formatter can protect the replacement's
+    /// case ("veyyon" must not become "Veyyon" at a sentence start).
+    /// Callers that do not run the formatter must strip the markers
+    /// (`format::strip_verbatim`); `TextPipeline` handles both paths.
+    pub(super) fn apply_marked(&self, input: &str) -> String {
         if self.is_empty() {
             return input.to_string();
         }
@@ -143,9 +154,18 @@ impl Dictionary {
                     }
                     match found {
                         // Unlike commands, a replacement never absorbs
-                        // punctuation after the phrase.
+                        // punctuation after the phrase. Mark it verbatim so
+                        // the formatter leaves its case alone.
                         Some((r, end)) => {
-                            emit(&mut out, r, &mut first);
+                            if !r.is_empty() {
+                                if !first {
+                                    out.push(' ');
+                                }
+                                out.push(super::VERBATIM_START);
+                                out.push_str(r);
+                                out.push(super::VERBATIM_END);
+                                first = false;
+                            }
                             i = end;
                         }
                         None => {
@@ -219,6 +239,9 @@ mod tests {
             msg.contains(path.to_str().unwrap()),
             "error must name file: {msg}"
         );
+        // The toml parser's line/column must survive the added context so
+        // the user can find the broken entry.
+        assert!(msg.contains("line"), "error must locate the line: {msg}");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -359,5 +382,98 @@ mod tests {
         assert_eq!(d.apply("i love new york."), "i love New York .");
         let d = Dictionary::from_entries([("um", "")]);
         assert_eq!(d.apply("well, um, okay"), "well , , okay");
+    }
+
+    /// `apply_marked` wraps every inserted replacement in the verbatim
+    /// marker pair; `apply` strips them. This marker contract is what
+    /// lets the formatter protect replacement case.
+    #[test]
+    fn apply_marked_wraps_replacements_and_apply_strips() {
+        let d = Dictionary::from_entries([("vayon", "veyyon")]);
+        assert_eq!(
+            d.apply_marked("say vayon"),
+            "say \u{E000}veyyon\u{E001}"
+        );
+        assert_eq!(d.apply("say vayon"), "say veyyon");
+        // Non-replaced text and deletions carry no markers.
+        let d = Dictionary::from_entries([("um", "")]);
+        assert_eq!(d.apply_marked("well um okay"), "well okay");
+    }
+
+    /// Regression ("Vayon" bug): whisper hears the brand "veyyon" as
+    /// "Vayon". An entry for the misspelling must match case-insensitively
+    /// and insert the brand's exact lowercase form — even at a sentence
+    /// start, where the formatter used to re-capitalize the replacement
+    /// to "Veyyon".
+    #[test]
+    fn misspelling_override_keeps_lowercase_brand_at_sentence_start() {
+        let dict = Dictionary::from_entries([("vayon", "veyyon")]);
+        let pipe = crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
+        assert_eq!(
+            pipe.process_stream("vayon is great", Default::default()).0,
+            "veyyon is great"
+        );
+        // Whisper's own capitalization of the misspelling also matches.
+        assert_eq!(
+            pipe.process_stream("Vayon is great", Default::default()).0,
+            "veyyon is great"
+        );
+        // Sentence capitalization still applies to ordinary words, and a
+        // mid-sentence replacement is untouched either way.
+        assert_eq!(
+            pipe.process_stream("i like vayon", Default::default()).0,
+            "I like veyyon"
+        );
+        // After a voice command's punctuation, same protection.
+        assert_eq!(
+            pipe.process_stream("vayon period", Default::default()).0,
+            "veyyon."
+        );
+    }
+
+    /// The misspelling must also match with transcript punctuation glued
+    /// to it ("Vayon," / "Vayon.") — the tokenizer splits edge
+    /// punctuation off before matching.
+    #[test]
+    fn misspelling_override_matches_next_to_punctuation() {
+        let dict = Dictionary::from_entries([("vayon", "veyyon")]);
+        // Dict level: punctuation is split off and survives the rewrite.
+        assert_eq!(dict.apply("Vayon, really."), "veyyon , really .");
+        // Pipeline level: the formatter re-attaches it.
+        let pipe = crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
+        assert_eq!(
+            pipe.process_stream("Vayon, really.", Default::default()).0,
+            "veyyon, really."
+        );
+        assert_eq!(
+            pipe.process_stream("is \"vayon\" it?", Default::default()).0,
+            "Is \"veyyon\" it?"
+        );
+    }
+
+    /// Longest phrase first: the two-word misspelling beats its one-word
+    /// prefix wherever both could start.
+    #[test]
+    fn longest_misspelling_phrase_wins() {
+        let d = Dictionary::from_entries([("vay", "V"), ("vay on", "veyyon")]);
+        assert_eq!(d.apply("vay on fire"), "veyyon fire");
+        assert_eq!(d.apply("Vay on fire"), "veyyon fire");
+        assert_eq!(d.apply("vay fire"), "V fire");
+    }
+
+    /// With formatting disabled the pipeline must still strip the
+    /// verbatim markers — they are an internal contract, never output.
+    #[test]
+    fn verbatim_markers_never_reach_output_when_formatting_disabled() {
+        let dict = Dictionary::from_entries([("vayon", "veyyon")]);
+        let cfg = crate::text::TextConfig {
+            commands: false,
+            format: false,
+        };
+        let pipe = crate::text::TextPipeline::new(cfg, dict);
+        assert_eq!(
+            pipe.process_stream("vayon is great", Default::default()).0,
+            "veyyon is great"
+        );
     }
 }

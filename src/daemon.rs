@@ -319,6 +319,11 @@ fn preflight(cli: &Cli) -> Result<()> {
         );
     }
     let _ = config::resolve_model(cli.model.as_ref(), &cfg)?;
+    // A malformed dictionary must fail `dictate start` here, not surface
+    // only as a readiness-handshake timeout pointing at the daemon log.
+    let _ = text::Dictionary::load(
+        config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
+    )?;
     if std::env::var_os("DISPLAY").is_none() {
         bail!("DISPLAY is unset — the daemon needs X11 for Caps Lock and typing");
     }
@@ -365,9 +370,14 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         model.display()
     );
     let transcriber = Transcriber::load(&model, language, cfg.n_threads)?;
-    let dict = text::Dictionary::load(
-        config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
-    )?;
+    let dict_path = config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?;
+    let dict = text::Dictionary::load(dict_path.as_deref())?;
+    if let Some(p) = &dict_path {
+        eprintln!(
+            "dictate: dictionary {} loaded; edits apply after `dictate restart`",
+            p.display()
+        );
+    }
     let text_cfg = cfg.text;
     let overlay = Overlay::start(&cfg.ui);
 
