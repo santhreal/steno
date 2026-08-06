@@ -168,7 +168,10 @@ mod tests {
         assert!(!st.capitalize_next);
         let (b, st) = format_with("brown fox.", st);
         assert_eq!(b, "brown fox.");
-        assert!(st.capitalize_next, "sentence-final period must set next-chunk capital");
+        assert!(
+            st.capitalize_next,
+            "sentence-final period must set next-chunk capital"
+        );
         let (c, _) = format_with("done here", st);
         assert_eq!(c, "Done here");
     }
@@ -176,7 +179,10 @@ mod tests {
     #[test]
     fn stream_pronoun_and_newline_state() {
         // The pronoun rule applies mid-sentence too.
-        let mid = FmtState { capitalize_next: false, ..FmtState::default() };
+        let mid = FmtState {
+            capitalize_next: false,
+            ..FmtState::default()
+        };
         let (a, _) = format_with("then i left", mid);
         assert_eq!(a, "then I left");
         // A trailing newline means the next chunk starts a sentence.
