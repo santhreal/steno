@@ -95,6 +95,14 @@ pub fn read_wav(path: &Path) -> Result<(Vec<f32>, u32)> {
                 let v = s.with_context(|| {
                     format!("WAV file '{}' contains a corrupt sample", path.display())
                 })?;
+                // clamp() propagates NaN, and a NaN sample poisons the
+                // resampler and every downstream stage — reject it.
+                if !v.is_finite() {
+                    bail!(
+                        "WAV file '{}' contains a NaN or infinite sample — re-export it as 16/24-bit PCM",
+                        path.display()
+                    );
+                }
                 interleaved.push(v.clamp(-1.0, 1.0));
             }
         }
@@ -138,6 +146,13 @@ pub fn read_wav(path: &Path) -> Result<(Vec<f32>, u32)> {
         }
     }
 
+    if interleaved.is_empty() {
+        bail!(
+            "WAV file '{}' contains no audio samples — provide a non-empty recording",
+            path.display()
+        );
+    }
+
     let inv = 1.0 / channels as f32;
     let mono: Vec<f32> = interleaved
         .chunks_exact(channels)
@@ -153,6 +168,13 @@ pub fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>>
         bail!(
             "cannot resample from {from_rate} Hz to {to_rate} Hz — sample rates must be greater than 0"
         );
+    }
+    // A single NaN/inf sample would be smeared across the entire output
+    // by the sinc filter; fail at the boundary instead of feeding garbage
+    // to the transcriber. Checked before the passthrough so 16 kHz input
+    // is covered too.
+    if input.iter().any(|s| !s.is_finite()) {
+        bail!("cannot resample audio containing NaN or infinite samples — check the input source");
     }
     if from_rate == to_rate {
         return Ok(input.to_vec());
@@ -211,10 +233,19 @@ impl DcBlock {
 /// Scale `samples` so the whole buffer sits at `target_rms`, with gain
 /// clamped to [1/max_gain, max_gain] and hard-limiting any sample that
 /// would exceed [-1.0, 1.0] after gain. Silent buffers stay silent.
+///
+/// `target_rms` and `max_gain` come from user config. A non-positive or
+/// non-finite `target_rms` skips normalization; a `max_gain` below 1,
+/// non-finite, or NaN degenerates to "no gain change" — never a panic in
+/// `f32::clamp` (which requires min <= max and non-NaN bounds).
 pub fn normalize(samples: &mut [f32], target_rms: f32, max_gain: f32) {
-    if samples.is_empty() {
+    if samples.is_empty() || !target_rms.is_finite() || target_rms <= 0.0 {
         return;
     }
+    // f32::max discards a NaN operand, so NaN/<=0/<1 all become 1.0 and
+    // the clamp range below degenerates to [1.0, 1.0] (a no-op) instead
+    // of panicking on min > max.
+    let max_gain = max_gain.max(1.0);
     let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
     if !rms.is_finite() || rms == 0.0 {
         return;
@@ -661,5 +692,190 @@ mod tests {
             assert_eq!(ep.feed(&silence()), VadEvent::InSpeech);
         }
         assert_eq!(ep.feed(&silence()), VadEvent::Endpoint);
+    }
+
+    // ---- regression tests: adversarial input boundaries ----
+
+    /// WHY: f32::clamp propagates NaN, so a NaN/inf sample in a float WAV
+    /// used to sail through read_wav, get smeared across the whole buffer
+    /// by the sinc resampler, and poison the transcript. Non-finite
+    /// samples must be rejected at the boundary, naming the path.
+    #[test]
+    fn read_wav_rejects_non_finite_float_samples() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let path = temp_wav("nonfinite");
+            {
+                let mut w = hound::WavWriter::create(
+                    &path,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: 16_000,
+                        bits_per_sample: 32,
+                        sample_format: hound::SampleFormat::Float,
+                    },
+                )
+                .unwrap();
+                w.write_sample(0.25f32).unwrap();
+                w.write_sample(bad).unwrap();
+                w.finalize().unwrap();
+            }
+            let err = read_wav(&path).unwrap_err().to_string();
+            std::fs::remove_file(&path).unwrap();
+            assert!(
+                err.contains("NaN or infinite") && err.contains("nonfinite"),
+                "error must name the path and the property, got: {err}"
+            );
+        }
+    }
+
+    /// WHY: a 0-length WAV used to return Ok(vec![]), and the empty buffer
+    /// then flowed into the transcriber instead of producing an actionable
+    /// error. Empty input must fail at read time, naming the path.
+    #[test]
+    fn read_wav_empty_file_errors() {
+        let path = temp_wav("empty");
+        {
+            let w = hound::WavWriter::create(
+                &path,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            w.finalize().unwrap();
+        }
+        let err = read_wav(&path).unwrap_err().to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            err.contains("no audio samples") && err.contains("empty"),
+            "error must name the path and say the file is empty, got: {err}"
+        );
+    }
+
+    /// WHY: the sinc filter convolves every input sample into the whole
+    /// output, so one NaN/inf sample turns the entire resampled buffer
+    /// into NaN. resample must reject non-finite input on every path,
+    /// including the same-rate passthrough (which skips the filter).
+    #[test]
+    fn resample_rejects_non_finite_input_on_all_paths() {
+        assert!(resample(&[0.1, f32::NAN, 0.2], 44_100, 16_000).is_err());
+        assert!(resample(&[0.1, f32::INFINITY, 0.2], 44_100, 16_000).is_err());
+        assert!(resample(&[0.1, f32::NEG_INFINITY, 0.2], 44_100, 16_000).is_err());
+        // Passthrough path: same rate must still reject, not copy NaN out.
+        assert!(resample(&[0.1, f32::NAN, 0.2], 16_000, 16_000).is_err());
+        // All-finite control: both paths still work.
+        assert!(resample(&[0.1, 0.2, 0.3], 16_000, 16_000).is_ok());
+    }
+
+    /// WHY: extreme device rates (8 kHz telephony, 192 kHz studio) hit
+    /// resample ratios of 2.0 and 1/12. These must produce finite output
+    /// of the expected length and preserve the signal's frequency, not
+    /// error or emit garbage.
+    #[test]
+    fn resample_extreme_ratios_preserve_sine() {
+        for from_rate in [8_000u32, 192_000] {
+            let input = sine(440.0, from_rate, from_rate as usize, 0.8);
+            let out = resample(&input, from_rate, WHISPER_RATE).unwrap();
+            assert!(
+                (out.len() as i64 - 16_000).abs() <= 4,
+                "1s at {from_rate} Hz should become ~16000 samples, got {}",
+                out.len()
+            );
+            assert!(
+                out.iter().all(|s| s.is_finite()),
+                "resampled output must be finite at {from_rate} Hz input"
+            );
+            let f = zero_crossing_freq(&out, WHISPER_RATE);
+            assert!(
+                (430.0..=450.0).contains(&f),
+                "440 Hz sine from {from_rate} Hz resampled to {f} Hz dominant frequency"
+            );
+        }
+    }
+
+    /// WHY: target_rms and max_gain come straight from user TOML.
+    /// max_gain < 1.0 made the clamp range [1/max_gain, max_gain] have
+    /// min > max, and NaN bounds panic inside f32::clamp — a config typo
+    /// crashed the process. Invalid gain parameters must degrade to a
+    /// no-op, never a panic and never NaN samples.
+    #[test]
+    fn normalize_invalid_gain_params_are_a_safe_noop() {
+        for bad_gain in [0.0f32, -1.0, 0.5, f32::NAN, f32::NEG_INFINITY] {
+            let original = vec![0.3f32, -0.2, 0.1];
+            let mut s = original.clone();
+            normalize(&mut s, 0.1, bad_gain);
+            assert!(
+                s.iter().all(|v| v.is_finite()),
+                "max_gain {bad_gain} must not produce non-finite samples"
+            );
+            // A degenerate clamp range [1.0, 1.0] means gain exactly 1.0.
+            assert_eq!(s, original, "max_gain {bad_gain} must be a no-op");
+        }
+        for bad_target in [0.0f32, -0.1, f32::NAN] {
+            let original = vec![0.3f32, -0.2, 0.1];
+            let mut s = original.clone();
+            normalize(&mut s, bad_target, 8.0);
+            assert_eq!(s, original, "target_rms {bad_target} must be a no-op");
+        }
+        // Infinite max_gain is a legitimate "no cap": still fine.
+        let mut s = vec![0.001f32; 100];
+        normalize(&mut s, 0.1, f32::INFINITY);
+        assert!(s.iter().all(|v| v.is_finite() && *v > 0.001));
+    }
+
+    /// WHY: DcBlock carries recursive state (y1); over a long buffer an
+    /// unstable coefficient or denormal blow-up would corrupt the tail of
+    /// a long dictation. A 10-minute buffer must stay finite, bounded,
+    /// and centered on zero.
+    #[test]
+    fn dcblock_long_buffer_stays_stable() {
+        let rate = 16_000u32;
+        let n = rate as usize * 600; // 10 minutes
+        let mut signal = sine(220.0, rate, n, 0.4);
+        for (i, s) in signal.iter_mut().enumerate() {
+            *s += 0.2; // DC offset, plus a step at the midpoint
+            if i == n / 2 {
+                *s += 0.5;
+            }
+        }
+        let mut dc = DcBlock::new(rate);
+        dc.process(&mut signal);
+        assert!(signal.iter().all(|s| s.is_finite()), "output must stay finite");
+        assert!(
+            signal.iter().all(|s| s.abs() <= 1.1),
+            "output must stay bounded, peak {}",
+            signal.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+        );
+        let tail = &signal[n - rate as usize..];
+        let mean = tail.iter().sum::<f32>() / tail.len() as f32;
+        assert!(mean.abs() < 0.01, "tail of long buffer must be DC-free, mean {mean}");
+    }
+
+    /// WHY: Endpoint::feed must never panic or miscount on boundary input
+    /// — a zero device rate (pathological cpal config) or an empty chunk
+    /// (drained capture buffer) are no-ops, not state transitions.
+    #[test]
+    fn endpoint_zero_rate_and_empty_chunk_are_safe_noops() {
+        let mut ep = Endpoint::new(test_vad(), 0);
+        for _ in 0..100 {
+            assert_eq!(ep.feed(&speech()), VadEvent::WaitingForSpeech);
+        }
+        assert!(!ep.speech_started(), "zero rate must never confirm speech");
+
+        let mut ep = Endpoint::new(test_vad(), 16_000);
+        for _ in 0..100 {
+            assert_eq!(ep.feed(&[]), VadEvent::WaitingForSpeech);
+        }
+        assert!(!ep.speech_started(), "empty chunks must never confirm speech");
+        // Empty chunks must not have advanced the start-timeout clock:
+        // real speech right after still counts normally.
+        assert_eq!(ep.feed(&speech()), VadEvent::WaitingForSpeech);
+        // NaN samples are treated as silence, not speech.
+        let nan_chunk = vec![f32::NAN; CHUNK];
+        assert_eq!(ep.feed(&nan_chunk), VadEvent::WaitingForSpeech);
+        assert!(!ep.speech_started());
     }
 }

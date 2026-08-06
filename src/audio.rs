@@ -165,6 +165,19 @@ enum Msg {
     Error(String),
 }
 
+/// Channel count for the downmix, rejecting pathological device configs.
+/// `chunks_exact(0)` panics, and inside the cpal callback that unwind
+/// would cross the FFI boundary, so a 0-channel device must be refused
+/// before the stream is built.
+fn mono_channels(config: &cpal::StreamConfig, dev_name: &str) -> Result<usize> {
+    if config.channels == 0 {
+        bail!(
+            "device '{dev_name}' reports an input stream with 0 channels — pick another device (`dictate --list-devices`)"
+        );
+    }
+    Ok(config.channels as usize)
+}
+
 /// Open an input stream whose callback downmixes to mono f32 and forwards
 /// frames over the channel. Generic over the device's native sample type.
 fn build_stream<T>(
@@ -177,7 +190,7 @@ where
     T: cpal::SizedSample + Send + 'static,
     f32: cpal::FromSample<T>,
 {
-    let channels = config.channels as usize;
+    let channels = mono_channels(config, dev_name)?;
     let data_tx = tx.clone();
     let err_tx = tx;
     device
@@ -222,7 +235,7 @@ fn capture_loop(
     let mut captured: Vec<f32> = Vec::new();
     // Wall-clock guard only: if the backend goes silent we still honor
     // max_duration (+ slack) instead of hanging forever.
-    let deadline = Instant::now() + cfg.max_duration + Duration::from_secs(2);
+    let deadline = capture_deadline(cfg.max_duration);
 
     'outer: loop {
         if captured.len() >= max_frames {
@@ -231,7 +244,7 @@ fn capture_loop(
         let msg = match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(m) => m,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if Instant::now() >= deadline {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
                     log::warn!("device '{dev_name}' stopped delivering frames; ending capture");
                     break;
                 }
@@ -275,6 +288,15 @@ fn capture_loop(
     Ok((captured, endpoint.speech_started()))
 }
 
+/// Wall-clock deadline for a backend that stops delivering frames, or
+/// `None` when `max_duration` is too large to add to `Instant::now()`
+/// (a multi-century config): `Instant + Duration` panics on overflow, so
+/// this uses checked arithmetic. `None` is safe — `max_frames` still
+/// bounds the capture by frame count.
+fn capture_deadline(max_duration: Duration) -> Option<Instant> {
+    Instant::now().checked_add(max_duration.saturating_add(Duration::from_secs(2)))
+}
+
 /// Drop leading windows whose RMS stays under `threshold`.
 fn trim_leading_silence(samples: &mut Vec<f32>, threshold: f32) {
     let hop = (WHISPER_RATE as usize / 100).max(1); // 10 ms windows
@@ -289,5 +311,83 @@ fn trim_leading_silence(samples: &mut Vec<f32>, threshold: f32) {
     }
     if cut > 0 {
         samples.drain(..cut);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_config(channels: u16) -> cpal::StreamConfig {
+        cpal::StreamConfig {
+            channels,
+            sample_rate: 48_000,
+            buffer_size: cpal::BufferSize::Default,
+        }
+    }
+
+    /// WHY: a device reporting 0 channels used to reach the capture
+    /// callback, where chunks_exact(0) panics — an unwind across the cpal
+    /// FFI boundary. The device must be refused with an actionable error
+    /// before the stream is built.
+    #[test]
+    fn mono_channels_rejects_zero_channel_devices() {
+        let err = mono_channels(&stream_config(0), "fake-dev").unwrap_err().to_string();
+        assert!(
+            err.contains("fake-dev") && err.contains("0 channels"),
+            "error must name the device and the problem, got: {err}"
+        );
+        assert_eq!(mono_channels(&stream_config(1), "fake-dev").unwrap(), 1);
+        assert_eq!(mono_channels(&stream_config(8), "fake-dev").unwrap(), 8);
+    }
+
+    /// WHY: max_duration comes from user TOML as u64 seconds. The old
+    /// code did `Instant::now() + max_duration + slack`, which panics on
+    /// overflow for absurd (multi-century) values. The deadline must be
+    /// computed with checked arithmetic and degrade to None.
+    #[test]
+    fn capture_deadline_never_panics_on_absurd_durations() {
+        // Sane values produce a deadline in the near future.
+        let d = capture_deadline(Duration::from_secs(30)).unwrap();
+        assert!(d > Instant::now());
+        assert!(d <= Instant::now() + Duration::from_secs(33));
+        // Absurd values must not panic; None means "rely on frame count".
+        let _ = capture_deadline(Duration::from_secs(u64::MAX));
+        let _ = capture_deadline(Duration::MAX);
+    }
+
+    /// WHY: trim_leading_silence walks 10 ms windows; buffers shorter
+    /// than one window, empty buffers, and all-silence buffers are
+    /// boundary cases that must not panic or corrupt the sample count.
+    #[test]
+    fn trim_leading_silence_boundary_cases() {
+        // Empty input: no-op.
+        let mut s: Vec<f32> = Vec::new();
+        trim_leading_silence(&mut s, 0.01);
+        assert!(s.is_empty());
+
+        // Shorter than one 10 ms window (160 samples): untouched, since
+        // no full window can be judged.
+        let mut s = vec![0.0f32; 100];
+        trim_leading_silence(&mut s, 0.01);
+        assert_eq!(s.len(), 100);
+
+        // All silence, exact multiple of the window: everything drains
+        // (the caller then errors). A partial tail window is kept — only
+        // full windows are judged.
+        let mut s = vec![0.0f32; 480];
+        trim_leading_silence(&mut s, 0.01);
+        assert!(s.is_empty());
+        let mut s = vec![0.0f32; 500];
+        trim_leading_silence(&mut s, 0.01);
+        assert_eq!(s.len(), 20, "the partial tail window is not a full window");
+
+        // Leading silence followed by speech: exactly the silent prefix
+        // (3 full windows) is removed, the loud tail is untouched.
+        let mut s = vec![0.0f32; 480];
+        s.extend_from_slice(&vec![0.5f32; 320]);
+        trim_leading_silence(&mut s, 0.01);
+        assert_eq!(s.len(), 320);
+        assert!(s.iter().all(|&v| v == 0.5));
     }
 }
