@@ -321,19 +321,20 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         log::error!("capture failed: {e}");
                         overlay.set(Stage::Error);
                         overlay.flash(cfg.ui.done_flash_ms);
+                        overlay.set(Stage::Hidden);
                         continue;
                     }
                     Err(_) => {
                         log::error!("capture thread panicked");
                         overlay.set(Stage::Error);
                         overlay.flash(cfg.ui.done_flash_ms);
+                        overlay.set(Stage::Hidden);
                         continue;
                     }
                 };
                 if samples.is_empty() {
                     log::debug!("empty hold — skipped");
-                    overlay.set(Stage::Done);
-                    overlay.flash(cfg.ui.done_flash_ms);
+                    overlay.set(Stage::Hidden);
                     continue;
                 }
                 overlay.set(Stage::Transcribing);
@@ -350,6 +351,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     log::error!("transcript failed: {e}");
                     overlay.set(Stage::Error);
                     overlay.flash(cfg.ui.done_flash_ms);
+                    overlay.set(Stage::Hidden);
                 }
             }
             HotkeyEvent::Release => {

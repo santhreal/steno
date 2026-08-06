@@ -24,13 +24,15 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             overlay: true,
-            done_flash_ms: 600,
+            done_flash_ms: 2000,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    /// Window unmapped — idle between utterances.
+    Hidden,
     Recording,
     Transcribing,
     Done,
@@ -39,6 +41,7 @@ pub enum Stage {
 
 fn label(stage: Stage) -> &'static str {
     match stage {
+        Stage::Hidden => "",
         Stage::Recording => "dictate - recording...",
         Stage::Transcribing => "dictate - transcribing...",
         Stage::Done => "dictate - done",
@@ -177,8 +180,9 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
             .override_redirect(1)
             .event_mask(EventMask::EXPOSURE),
     )?;
-    conn.map_window(win)?;
-    conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
+    // Start hidden. Map only while a stage is active so the daemon does
+    // not leave a permanent bar on screen between utterances.
+    let mut mapped = false;
     // Name the window so tests/debuggers can find it.
     conn.change_property8(
         PropMode::REPLACE,
@@ -218,26 +222,50 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
             .font(font),
     )?;
 
-    let mut text = String::from("dictate");
+    let mut text = String::new();
     let redraw = |text: &str| -> anyhow::Result<()> {
         x11rb::protocol::xproto::clear_area(&conn, false, win, 0, 0, W as u16, H as u16)?;
         // ~9 px per char for 9x15 fonts; center approximately.
         let tw = text.len() as i16 * 9;
         let tx = ((W as i16 - tw) / 2).max(4);
-        x11rb::protocol::xproto::image_text8(&conn, win, gc, tx, 22, text.as_bytes())?;
+        if !text.is_empty() {
+            x11rb::protocol::xproto::image_text8(&conn, win, gc, tx, 22, text.as_bytes())?;
+        }
         conn.flush()?;
         Ok(())
     };
-    redraw(&text)?;
+
+    let show = |stage: Stage, mapped: &mut bool, text: &mut String| -> anyhow::Result<()> {
+        match stage {
+            Stage::Hidden => {
+                if *mapped {
+                    conn.unmap_window(win)?;
+                    conn.flush()?;
+                    *mapped = false;
+                }
+                text.clear();
+            }
+            other => {
+                *text = label(other).to_string();
+                if !*mapped {
+                    conn.map_window(win)?;
+                    conn.configure_window(
+                        win,
+                        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+                    )?;
+                    *mapped = true;
+                }
+                redraw(text)?;
+            }
+        }
+        Ok(())
+    };
 
     loop {
         // Drain stage updates (also detects main-thread exit).
         loop {
             match rx.try_recv() {
-                Ok(stage) => {
-                    text = label(stage).to_string();
-                    redraw(&text)?;
-                }
+                Ok(stage) => show(stage, &mut mapped, &mut text)?,
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     conn.destroy_window(win)?;
@@ -248,7 +276,7 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
         }
         // Redraw on expose; otherwise nap briefly.
         match conn.poll_for_event() {
-            Ok(Some(x11rb::protocol::Event::Expose(_))) => redraw(&text)?,
+            Ok(Some(x11rb::protocol::Event::Expose(_))) if mapped => redraw(&text)?,
             Ok(_) => thread::sleep(Duration::from_millis(30)),
             Err(e) => return Err(e.into()),
         }

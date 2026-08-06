@@ -239,6 +239,7 @@ pub(crate) fn emit_transcript(
     if let Some(e) = ctx.error.take() {
         overlay.set(overlay::Stage::Error);
         overlay.flash(flash_ms);
+        overlay.set(overlay::Stage::Hidden);
         anyhow::bail!("{e}");
     }
     let started = ctx.emitter.started();
@@ -248,6 +249,7 @@ pub(crate) fn emit_transcript(
     }
     overlay.set(overlay::Stage::Done);
     overlay.flash(flash_ms);
+    overlay.set(overlay::Stage::Hidden);
     Ok(())
 }
 
