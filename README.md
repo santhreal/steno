@@ -24,6 +24,7 @@ You need a Rust toolchain, a C compiler, and cmake (for whisper.cpp).
 ```
 cargo build --release
 # binary: target/release/dictate
+cargo install --path .   # or: install `dictate` into ~/.cargo/bin
 ```
 
 NVIDIA GPU acceleration is a compile-time feature (CUDA toolkit required):
@@ -52,8 +53,10 @@ Which model is a speed/accuracy tradeoff:
 | `ggml-medium.en.bin` | 1.5 GB | More accurate, slower |
 | `ggml-large-v3-turbo.bin` | 1.6 GB | Best accuracy; multilingual |
 
-With exactly one `*.bin` in the models directory, `dictate` finds it
-automatically. Otherwise pass `--model /path/to/model.bin`.
+`dictate` looks in `~/.local/share/dictate/models` when `--model` is not
+passed and picks the first `*.bin` alphabetically. With one model there is
+nothing to configure; with several, pass `--model /path/to/model.bin` (or
+set `model_path` in the config) to choose.
 
 ## Use it
 
@@ -61,18 +64,39 @@ automatically. Otherwise pass `--model /path/to/model.bin`.
 about a second of silence (configurable). The text is printed, so it
 composes: `dictate | xclip -selection clipboard`.
 
-**Record and type.** `dictate --type` types the result into the currently
-focused window via `xdotool` (X11). Bind it to a global shortcut for real
-dictation: GNOME Settings → Keyboard → Custom Shortcuts, command
-`/path/to/dictate --type`, e.g. Ctrl+Space. Click into any text field, press
-the shortcut, speak.
+**Record and type.** Typing is fail-closed: it works only after you arm it
+once in `~/.config/dictate/config.toml`:
+
+```toml
+type_output = true
+```
+
+Then `dictate` (or `dictate --type`) types the result into the currently
+focused window via `xdotool` (X11; install with `sudo apt install
+xdotool`), and `dictate --stdout` prints instead for one run. Bind it to a
+global shortcut for real dictation: GNOME Settings → Keyboard → Custom
+Shortcuts, command `/path/to/dictate`, e.g. Ctrl+Space. Click into any
+text field, press the shortcut, speak.
+
+A bare `dictate --type` without the config entry fails with an error —
+typing is deliberately not enableable from the command line, so no script,
+test, or agent can inject keystrokes into your session unless you armed it
+yourself. Control characters other than newline are stripped before
+typing, so a transcript can never smuggle Tab or Escape keystrokes into
+the target.
 
 **Transcribe a file.** `dictate clip.wav` reads a WAV instead of recording —
+any PCM or 32-bit float WAV, resampled to 16 kHz mono internally —
 also useful for testing your setup without a microphone.
 
 Useful flags: `--list-devices` and `--device <name>` pick a microphone,
 `--language en` skips language detection, `--raw` skips all text processing,
+`--model`/`--dictionary`/`--config <path>` override auto-resolution,
 `-v`/`-vv` shows what the pipeline is doing.
+
+Every invocation is a fresh process that loads the model from disk, so each
+dictation costs a few seconds of startup and decode time beyond your
+speech. Smaller models start faster.
 
 ## Voice commands
 
@@ -85,14 +109,18 @@ table:
 | comma | `,` |
 | question mark | `?` |
 | exclamation mark / point | `!` |
-| colon / semicolon | `:` / `;` |
+| colon | `:` |
+| semicolon | `;` |
 | ellipsis / dot dot dot | `…` |
-| open quote / close quote | `"` |
-| open paren / close paren | `(` `)` |
-| percent sign / dollar sign | `%` `$` |
+| open quote | `"` |
+| close quote / end quote / unquote | `"` |
+| open paren | `(` |
+| close paren | `)` |
+| percent sign | `%` |
+| dollar sign | `$` |
 | new line | line break |
 | new paragraph | blank line |
-| scratch that / delete that | deletes back to the last sentence boundary |
+| scratch that / delete that | delete back to the last sentence boundary |
 
 Commands match whole words only. whisper often adds its own punctuation
 around spoken commands ("bank, comma,"); duplicate punctuation is collapsed
@@ -101,7 +129,9 @@ during formatting, so you get "bank, " and not "bank,, ".
 ## Dictionary
 
 The dictionary rewrites phrases after commands run — names, jargon, product
-terms whisper gets wrong. Create `~/.config/dictate/dictionary.toml`:
+terms whisper gets wrong. Create `~/.config/dictate/dictionary.toml`
+(picked up automatically when it exists; `--dictionary <path>` points
+elsewhere):
 
 ```toml
 [overrides]
@@ -116,7 +146,8 @@ replacement's case is used exactly as written.
 ## Configuration
 
 Everything has a default; `~/.config/dictate/config.toml` overrides it; CLI
-flags override the file. A full config looks like:
+flags override the file (`--config <path>` loads a different file). A full
+config looks like:
 
 ```toml
 model_path = "~/.local/share/dictate/models/ggml-small.en.bin"
@@ -124,7 +155,7 @@ dictionary_path = "~/.config/dictate/dictionary.toml"
 language = "auto"        # or "en", "de", ...
 n_threads = 8            # decode threads; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
-type_output = false      # --type by default
+type_output = false      # arm typing (xdotool); the ONLY way to enable it
 
 [vad]
 silence_ms = 900         # stop after this much trailing silence
@@ -157,9 +188,14 @@ fresh process: state never leaks between utterances.
 
 ## Notes and limits
 
-- `--type` sends keystrokes to the **focused** window. That is the feature;
-  it is also why you should not run it while a password field is focused.
-- X11 only for `--type` (xdotool). On Wayland, use stdout mode with your
+- Typing sends keystrokes to the **focused** window. That is the feature;
+  it is also why you should not dictate while a password field is focused.
+  It is armed only via `type_output = true` in your config — never from a
+  CLI flag (see above). The test suite never types; real keystroke e2e
+  belongs in a disposable microVM (e.g. Firecracker), not a live desktop.
+- If no speech starts within `start_timeout_secs`, `dictate` exits non-zero
+  with an error, so scripts can tell silence apart from an empty result.
+- X11 only for typing (xdotool). On Wayland, use stdout mode with your
   compositor's tooling.
 - English `.en` models ignore `language`; multilingual models need it
   (`--language de`) or auto-detection kicks in.

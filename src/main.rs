@@ -36,10 +36,14 @@ struct Cli {
     language: Option<String>,
 
     /// Type the result into the focused window via xdotool (X11) instead
-    /// of printing. Bind `dictate --type` to a desktop shortcut for
-    /// real dictation.
+    /// of printing. SAFETY: requires `type_output = true` in the config
+    /// file — typing is never enabled from the command line alone.
     #[arg(long)]
     r#type: bool,
+
+    /// Print to stdout even when typing is armed in the config.
+    #[arg(long)]
+    stdout: bool,
 
     /// Skip the text pipeline (commands, dictionary, formatting).
     #[arg(long)]
@@ -87,9 +91,26 @@ fn main() -> Result<()> {
 
     let cfg = config::Config::load(cli.config.as_deref())?;
     let language = cli.language.as_deref().unwrap_or(&cfg.language);
+    // Fail closed and fail FAST: a disarmed --type must error before the
+    // microphone opens, the model loads, or xdotool is ever spawned.
+    let mode = output_mode(cli.r#type, cli.stdout, cfg.type_output)?;
+
+    // Warn about flags that have no effect in the chosen mode; silently
+    // ignoring them would look like they worked.
+    if cli.raw && cli.dictionary.is_some() {
+        log::warn!("--raw skips the text pipeline; --dictionary is ignored");
+    }
+    if cli.input.is_some() && cli.device.is_some() {
+        log::warn!("--device is ignored when transcribing a file");
+    }
 
     let samples = match &cli.input {
         Some(path) => {
+            anyhow::ensure!(
+                !path.is_dir(),
+                "'{}' is a directory — pass a WAV file",
+                path.display()
+            );
             let (raw, rate) = dsp::read_wav(path)?;
             let mut s = dsp::resample(&raw, rate, dsp::WHISPER_RATE)?;
             let mut dc = dsp::DcBlock::new(dsp::WHISPER_RATE);
@@ -115,18 +136,37 @@ fn main() -> Result<()> {
     let out = if cli.raw {
         transcript
     } else {
-        let dict = text::Dictionary::load(config::resolve_dictionary(cli.dictionary.as_ref(), &cfg).as_deref())?;
+        let dict = text::Dictionary::load(
+            config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
+        )?;
         text::TextPipeline::new(cfg.text, dict).process(&transcript)
     };
 
-    output::emit(
-        &out,
-        if cli.r#type {
-            output::OutputMode::Type
-        } else {
-            output::OutputMode::Stdout
-        },
-    )
+    output::emit(&out, mode)
+}
+
+/// Decide where the transcript goes. Typing is fail-closed: the ONLY way
+/// to enable it is `type_output = true` in the config file — a deliberate,
+/// persistent act by the user. A bare `--type` flag is never sufficient,
+/// so no script, test, or agent can make dictate inject keystrokes into a
+/// live session without the user having armed their own config first.
+fn output_mode(cli_type: bool, cli_stdout: bool, cfg_armed: bool) -> Result<output::OutputMode> {
+    if cli_stdout {
+        return Ok(output::OutputMode::Stdout);
+    }
+    if cli_type && !cfg_armed {
+        anyhow::bail!(
+            "typing is disarmed: set `type_output = true` in {} to arm it. \
+             Typing injects real keystrokes into the focused window and is \
+             deliberately not enableable from the command line alone.",
+            config::default_config_path()?.display()
+        );
+    }
+    Ok(if cli_type || cfg_armed {
+        output::OutputMode::Type
+    } else {
+        output::OutputMode::Stdout
+    })
 }
 
 fn init_log(verbosity: u8) {
@@ -138,4 +178,56 @@ fn init_log(verbosity: u8) {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level.as_str()))
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for output-mode selection. WHY: typing injects
+    //! real keystrokes into the focused window, so it must be fail-closed
+    //! — armable only through the config file, never through a CLI flag.
+    //! A test, script, or agent running `dictate --type` must error out
+    //! before xdotool is spawned.
+    use super::*;
+
+    #[test]
+    fn stdout_when_nothing_requests_typing() {
+        assert!(matches!(
+            output_mode(false, false, false).unwrap(),
+            output::OutputMode::Stdout
+        ));
+    }
+
+    #[test]
+    fn bare_type_flag_is_refused_when_disarmed() {
+        let err = output_mode(true, false, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disarmed"), "error must name the blocker: {msg}");
+        assert!(msg.contains("type_output"), "error must name the arming key: {msg}");
+    }
+
+    #[test]
+    fn armed_config_types_with_or_without_flag() {
+        assert!(matches!(
+            output_mode(false, false, true).unwrap(),
+            output::OutputMode::Type
+        ));
+        assert!(matches!(
+            output_mode(true, false, true).unwrap(),
+            output::OutputMode::Type
+        ));
+    }
+
+    #[test]
+    fn stdout_flag_overrides_armed_config() {
+        assert!(matches!(
+            output_mode(false, true, true).unwrap(),
+            output::OutputMode::Stdout
+        ));
+        // --stdout also suppresses the disarmed-typing error: the user
+        // explicitly asked for stdout, so nothing would be typed anyway.
+        assert!(matches!(
+            output_mode(true, true, false).unwrap(),
+            output::OutputMode::Stdout
+        ));
+    }
 }
