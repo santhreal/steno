@@ -17,12 +17,14 @@ clap = { version = "4", default-features = false, features = ["std", "derive", "
 cpal = "0.18"
 # RUST_LOG regex filters and jiff timestamps are unused; keep terminal colors.
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+fontdue = "0.9"
 hound = "3"
 libc = "0.2"
 log = "0.4"
 # Only the sinc resampler is used; the default fft_resampler feature pulls in rustfft.
 rubato = { version = "4", default-features = false }
 serde = { version = "1", features = ["derive"] }
+tiny-skia = "0.11"
 # Config and dictionary are only parsed, never serialized; skip the display feature.
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 whisper-rs = { version = "0.16", features = ["log_backend"] }

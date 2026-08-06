@@ -103,9 +103,10 @@ Then `dictate` (or `dictate --type`) types into the focused window via
 prints instead for one run. Typed text streams as it is decoded; the
 clipboard is never touched.
 
-**Status bar.** While running, a small borderless bar at the bottom center
-of your primary monitor shows the stage: recording, transcribing, done.
-It takes no focus and no input. Disable it with `[ui] overlay = false`.
+**Status pill.** A tiny animated monochrome pill at the bottom center of
+your primary monitor shows the stage: Transcribing (waveform + timer),
+Processing (spinner), Done (check). It takes no focus and no input, and
+hides itself after Done. Disable it with `[ui] overlay = false`.
 
 A bare `dictate --type` without the config entry fails with an error —
 typing is deliberately not enableable from the command line, so no script,
@@ -202,7 +203,7 @@ format = true
 
 [ui]
 overlay = true         # bottom-center status bar (X11)
-done_flash_ms = 2000    # how long done/error stays visible
+done_flash_ms = 1200    # how long done/error stays visible
 ```
 
 ## How it works
