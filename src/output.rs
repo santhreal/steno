@@ -14,18 +14,73 @@ pub enum OutputMode {
     Type,
 }
 
-pub fn emit(text: &str, mode: OutputMode) -> Result<()> {
-    if text.is_empty() {
-        log::debug!("empty transcript, nothing to emit");
-        return Ok(());
+/// Progressive emitter for streaming decode: receives FINAL (post-pipeline)
+/// text chunks as whisper finalizes segments, joins them with correct
+/// spacing, and writes each one out immediately — stdout flushes per chunk,
+/// typing happens per chunk. The clipboard is never involved, so it can
+/// never be clobbered.
+pub struct Emitter {
+    mode: OutputMode,
+    /// Last character actually written, for join decisions.
+    last: Option<char>,
+}
+
+impl Emitter {
+    pub fn new(mode: OutputMode) -> Self {
+        Self { mode, last: None }
     }
-    match mode {
-        OutputMode::Stdout => {
-            println!("{text}");
-            Ok(())
+
+    /// Emit one processed chunk. Empty chunks are skipped.
+    pub fn push(&mut self, chunk: &str) -> Result<()> {
+        if chunk.is_empty() {
+            return Ok(());
         }
-        OutputMode::Type => type_text(text),
+        let piece = join(self.last, chunk);
+        match self.mode {
+            OutputMode::Stdout => {
+                use std::io::Write;
+                print!("{piece}");
+                std::io::stdout().flush().context("failed to flush stdout")?;
+            }
+            OutputMode::Type => type_text(&piece)?,
+        }
+        self.last = piece.chars().last();
+        Ok(())
     }
+
+    /// True once at least one chunk has been written.
+    pub fn started(&self) -> bool {
+        self.last.is_some()
+    }
+
+    /// Finish the stream: trailing newline on stdout, nothing to do for typing.
+    pub fn finish(&mut self) -> Result<()> {
+        if self.mode == OutputMode::Stdout && self.last.is_some() {
+            println!();
+        }
+        Ok(())
+    }
+}
+
+/// Join a chunk onto the stream: insert one space when the previous chunk
+/// ended on a word/punctuation and the next begins on a word character.
+/// Chunks arrive pre-formatted, so no other spacing fixups happen here.
+fn join(last: Option<char>, chunk: &str) -> String {
+    let first = chunk.chars().next().expect("chunk is non-empty");
+    let space = match last {
+        None => false,
+        Some(l) => {
+            first.is_alphanumeric()
+                && (l.is_alphanumeric()
+                    || matches!(l, '.' | '!' | '?' | ',' | ';' | ':' | '%' | ')' | '"'))
+        }
+    };
+    let mut piece = String::with_capacity(chunk.len() + 1);
+    if space {
+        piece.push(' ');
+    }
+    piece.push_str(chunk);
+    piece
 }
 
 fn type_text(text: &str) -> Result<()> {
@@ -102,8 +157,27 @@ mod tests {
     }
 
     #[test]
+    fn join_inserts_space_between_words() {
+        assert_eq!(join(None, "Hello"), "Hello");
+        assert_eq!(join(Some('d'), "world"), " world");
+        assert_eq!(join(Some('.'), "Next"), " Next");
+        assert_eq!(join(Some(','), "main"), " main");
+        assert_eq!(join(Some('"'), "quoted"), " quoted");
+    }
+
+    #[test]
+    fn join_adds_no_space_before_punctuation_or_newlines() {
+        assert_eq!(join(Some('d'), ","), ",");
+        assert_eq!(join(Some('d'), "."), ".");
+        assert_eq!(join(Some('d'), "\nnext"), "\nnext");
+        assert_eq!(join(Some('\n'), "Next"), "Next");
+    }
+
+    #[test]
     fn stdout_emit_of_plain_text_succeeds() {
-        emit("hello", OutputMode::Stdout).unwrap();
-        emit("", OutputMode::Stdout).unwrap();
+        let mut e = Emitter::new(OutputMode::Stdout);
+        e.push("hello").unwrap();
+        e.finish().unwrap();
+        Emitter::new(OutputMode::Stdout).finish().unwrap();
     }
 }

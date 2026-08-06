@@ -39,7 +39,16 @@ impl Transcriber {
     }
 
     /// Transcribe 16 kHz mono f32 samples to raw (unformatted) text.
-    pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
+    /// Decode and invoke `sink` with each segment's raw text AS IT
+    /// FINALIZES, so callers can stream output while decoding continues.
+    /// Segments arrive in order; concatenating them equals the full
+    /// transcript. Errors from the sink cannot propagate through the FFI
+    /// callback — the caller records them in captured state.
+    pub fn transcribe_streaming(
+        &self,
+        samples: &[f32],
+        mut sink: impl FnMut(&str) + 'static,
+    ) -> Result<()> {
         ensure!(
             !samples.is_empty(),
             "no audio to transcribe — the capture was empty; check the microphone level and VAD settings"
@@ -72,22 +81,14 @@ impl Transcriber {
         params.set_temperature(0.0);
         params.set_temperature_inc(0.2);
 
+        params.set_segment_callback_safe(move |data: whisper_rs::SegmentCallbackData| {
+            sink(&data.text);
+        });
+
         state
             .full(params, samples)
             .map_err(|e| anyhow!("transcription failed: {e}"))?;
-
-        let n = state.full_n_segments();
-        let mut out = String::new();
-        for i in 0..n {
-            let seg = state
-                .get_segment(i)
-                .with_context(|| format!("segment {i} of {n} vanished"))?;
-            let text = seg
-                .to_str_lossy()
-                .map_err(|e| anyhow!("segment {i} is not valid text: {e}"))?;
-            out.push_str(&text);
-        }
-        Ok(out.trim().to_string())
+        Ok(())
     }
 }
 

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::dsp::{DspConfig, VadConfig};
+use crate::overlay::UiConfig;
 use crate::text::TextConfig;
 
 // deny_unknown_fields: a typo'd key must fail loudly, not be silently
@@ -36,6 +37,7 @@ pub struct Config {
     pub vad: VadConfig,
     pub dsp: DspConfig,
     pub text: TextConfig,
+    pub ui: UiConfig,
 }
 
 impl Default for Config {
@@ -54,6 +56,7 @@ impl Default for Config {
             vad: VadConfig::default(),
             dsp: DspConfig::default(),
             text: TextConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }

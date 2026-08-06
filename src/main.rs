@@ -9,6 +9,7 @@ mod audio;
 mod config;
 mod dsp;
 mod output;
+mod overlay;
 mod stt;
 mod text;
 
@@ -95,6 +96,8 @@ fn main() -> Result<()> {
     // microphone opens, the model loads, or xdotool is ever spawned.
     let mode = output_mode(cli.r#type, cli.stdout, cfg.type_output)?;
 
+    let overlay = overlay::Overlay::start(&cfg.ui);
+
     // Warn about flags that have no effect in the chosen mode; silently
     // ignoring them would look like they worked.
     if cli.raw && cli.dictionary.is_some() {
@@ -118,34 +121,79 @@ fn main() -> Result<()> {
             dsp::normalize(&mut s, cfg.dsp.target_rms, cfg.dsp.max_gain);
             s
         }
-        None => audio::record(&audio::RecordConfig {
-            device: cli.device.clone(),
-            max_duration: Duration::from_secs(cfg.max_record_secs),
-            vad: cfg.vad,
-            target_rms: cfg.dsp.target_rms,
-            max_gain: cfg.dsp.max_gain,
-        })?,
+        None => {
+            overlay.set(overlay::Stage::Recording);
+            audio::record(&audio::RecordConfig {
+                device: cli.device.clone(),
+                max_duration: Duration::from_secs(cfg.max_record_secs),
+                vad: cfg.vad,
+                target_rms: cfg.dsp.target_rms,
+                max_gain: cfg.dsp.max_gain,
+            })?
+        }
     };
     log::info!(
         "{:.1}s of audio captured",
         samples.len() as f32 / dsp::WHISPER_RATE as f32
     );
+    overlay.set(overlay::Stage::Transcribing);
 
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
     let transcriber = stt::Transcriber::load(&model, language, cfg.n_threads)?;
-    let transcript = transcriber.transcribe(&samples)?;
-    log::debug!("raw transcript: {transcript:?}");
 
-    let out = if cli.raw {
-        transcript
-    } else {
-        let dict = text::Dictionary::load(
-            config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
-        )?;
-        text::TextPipeline::new(cfg.text, dict).process(&transcript)
+    // Stream: each finalized whisper segment goes through the pipeline
+    // and out to the user immediately, while decode continues.
+    let dict = text::Dictionary::load(
+        config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
+    )?;
+    let pipeline = text::TextPipeline::new(cfg.text, dict);
+
+    struct StreamCtx {
+        emitter: output::Emitter,
+        capitalize: bool,
+        /// Sink errors cannot cross the FFI callback; the first one lands here.
+        error: Option<String>,
+    }
+    let ctx = std::rc::Rc::new(std::cell::RefCell::new(StreamCtx {
+        emitter: output::Emitter::new(mode),
+        capitalize: true,
+        error: None,
+    }));
+    let ctx2 = ctx.clone();
+    let run_pipeline = move |raw: &str| {
+        let mut c = ctx2.borrow_mut();
+        if c.error.is_some() {
+            return; // a dead emitter must not spam further errors
+        }
+        let (text, cap) = if cli.raw {
+            (raw.trim().to_string(), c.capitalize)
+        } else {
+            pipeline.process_stream(raw, c.capitalize)
+        };
+        c.capitalize = cap;
+        if let Err(e) = c.emitter.push(&text) {
+            log::error!("emit failed: {e}");
+            c.error = Some(e.to_string());
+        }
     };
+    transcriber.transcribe_streaming(&samples, run_pipeline)?;
 
-    output::emit(&out, mode)
+    // whisper-rs owns the callback after full(); borrow, don't unwrap.
+    let mut ctx = ctx.borrow_mut();
+    if let Some(e) = ctx.error.take() {
+        overlay.set(overlay::Stage::Error);
+        anyhow::bail!("{e}");
+    }
+    let started = ctx.emitter.started();
+    ctx.emitter.finish()?;
+    if !started {
+        log::debug!("empty transcript, nothing emitted");
+    }
+    overlay.set(overlay::Stage::Done);
+    if overlay.active() {
+        std::thread::sleep(Duration::from_millis(cfg.ui.done_flash_ms));
+    }
+    Ok(())
 }
 
 /// Decide where the transcript goes. Typing is fail-closed: the ONLY way

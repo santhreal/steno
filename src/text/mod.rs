@@ -42,17 +42,20 @@ impl TextPipeline {
         Self { cfg, dict }
     }
 
-    /// Raw whisper output → final text. Order is fixed: commands, then
-    /// dictionary, then formatting.
-    pub fn process(&self, raw: &str) -> String {
+    /// Streaming: process one decoded segment, carrying sentence
+    /// capitalization state across segments (pass the returned bool to
+    /// the next call). `scratch that` can only delete within the current
+    /// segment — earlier segments are already emitted.
+    pub fn process_stream(&self, raw: &str, capitalize: bool) -> (String, bool) {
         let mut s = raw.to_string();
         if self.cfg.commands {
             s = commands::apply(&s);
         }
         s = self.dict.apply(&s);
         if self.cfg.format {
-            s = format::format(&s);
+            format::format_with(&s, capitalize)
+        } else {
+            (s.trim().to_string(), capitalize)
         }
-        s.trim().to_string()
     }
 }

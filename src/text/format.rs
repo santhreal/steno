@@ -27,11 +27,16 @@ fn is_closing(c: char) -> bool {
     matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '%' | ')' | ']' | '}')
 }
 
-pub fn format(input: &str) -> String {
+/// Streaming entry point: `capitalize_first` carries sentence state across
+/// chunks (false = continuing mid-sentence, so the first letter is NOT
+/// forced uppercase). Returns the formatted text and the capitalization
+/// state to feed the next chunk — true when the text ends at a sentence
+/// boundary ('.', '!', '?', newline).
+pub fn format_with(input: &str, capitalize_first: bool) -> (String, bool) {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut pending_space = false;
-    let mut capitalize_next = true;
+    let mut capitalize_next = capitalize_first;
     let mut in_dquote = false;
     let mut in_squote = false;
     let mut last_open = false;
@@ -106,12 +111,42 @@ pub fn format(input: &str) -> String {
         last_open =
             matches!(c, '(' | '[' | '{') || (c == '"' && in_dquote) || (squote && in_squote);
     }
-    out
+    // A trailing newline also means the next chunk starts a sentence.
+    let cap_next = capitalize_next || out.ends_with('\n');
+    (out, cap_next)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format;
+    use super::format_with;
+
+    /// One-shot convenience for tests: format a whole string at once.
+    fn format(input: &str) -> String {
+        format_with(input, true).0
+    }
+
+    #[test]
+    fn stream_state_carries_across_chunks() {
+        // Mid-sentence continuation: no forced capital, state stays false.
+        let (a, cap) = format_with("the quick", true);
+        assert_eq!(a, "The quick");
+        assert!(!cap);
+        let (b, cap) = format_with("brown fox.", cap);
+        assert_eq!(b, "brown fox.");
+        assert!(cap, "sentence-final period must set next-chunk capital");
+        let (c, _) = format_with("done here", cap);
+        assert_eq!(c, "Done here");
+    }
+
+    #[test]
+    fn stream_pronoun_and_newline_state() {
+        // The pronoun rule applies mid-sentence too.
+        let (a, _) = format_with("then i left", false);
+        assert_eq!(a, "then I left");
+        // A trailing newline means the next chunk starts a sentence.
+        let (_, cap) = format_with("first line\n", false);
+        assert!(cap);
+    }
 
     #[test]
     fn collapses_space_runs_but_not_newlines() {

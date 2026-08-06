@@ -60,7 +60,9 @@ fn speak(dir: &Path, name: &str, text: &str) -> PathBuf {
 fn hermetic_config(dir: &Path) -> PathBuf {
     let cfg = dir.join("empty-config.toml");
     if !cfg.exists() {
-        std::fs::write(&cfg, "").unwrap();
+        // Overlay explicitly off: tests must never pop windows on the
+        // user's live desktop either.
+        std::fs::write(&cfg, "[ui]\noverlay = false\n").unwrap();
     }
     cfg
 }
