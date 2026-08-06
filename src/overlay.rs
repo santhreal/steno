@@ -247,6 +247,22 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
     let screen = &conn.setup().roots[screen_num];
     let (visual, depth) = find_argb_visual(&conn, screen)
         .ok_or_else(|| anyhow::anyhow!("no 32-bit ARGB visual — compositor required for pill"))?;
+    // Without a compositor the ARGB window renders as an opaque black
+    // box. Check the compositor selection owner and refuse instead.
+    let cm_atom = conn
+        .intern_atom(false, format!("_NET_WM_CM_S{screen_num}").as_bytes())?
+        .reply()?
+        .atom;
+    if conn
+        .get_selection_owner(cm_atom)?
+        .reply()?
+        .owner
+        == x11rb::NONE
+    {
+        anyhow::bail!(
+            "no compositor owns _NET_WM_CM_S{screen_num} — the pill needs one (e.g. picom) or it renders as an opaque box"
+        );
+    }
 
     let geo = Geo::new(detect_scale(&conn, screen.root));
     let (ox, oy, ow, oh) = primary_rect(&conn, screen.root).unwrap_or((
@@ -309,6 +325,8 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cannot allocate overlay pixmap"))?;
     let mut shadow_mask = SkPixmap::new(geo.win_w, geo.win_h)
         .ok_or_else(|| anyhow::anyhow!("cannot allocate shadow mask"))?;
+    // Reused across frames (ReviewOverlayX #4): no per-frame allocation.
+    let mut bgra: Vec<u8> = Vec::with_capacity((geo.win_w * geo.win_h * 4) as usize);
     let mut mapped = false;
     let mut stage = Stage::Hidden;
     let mut stage_since = Instant::now();
@@ -375,14 +393,14 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
                     )?;
                     mapped = true;
                 }
-                put_argb(&conn, win, gc, &pixmap)?;
+                put_argb(&conn, win, gc, &pixmap, &mut bgra)?;
             }
             last_frame = now;
         }
 
         match conn.poll_for_event() {
             Ok(Some(x11rb::protocol::Event::Expose(_))) if mapped && stage != Stage::Hidden => {
-                put_argb(&conn, win, gc, &pixmap)?;
+                put_argb(&conn, win, gc, &pixmap, &mut bgra)?;
             }
             Ok(_) => thread::sleep(Duration::from_millis(if stage == Stage::Hidden {
                 50
@@ -440,29 +458,46 @@ fn put_argb<C: x11rb::connection::Connection>(
     win: u32,
     gc: u32,
     pixmap: &SkPixmap,
+    scratch: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
     use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
     // X expects native-endian 32-bit BGRA for ARGB visuals on little-endian.
     let rgba = pixmap.data();
-    let mut bgra = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
-        bgra.push(px[2]);
-        bgra.push(px[1]);
-        bgra.push(px[0]);
-        bgra.push(px[3]);
+    let width = pixmap.width() as u16;
+    let height = pixmap.height() as u16;
+    // Core protocol caps one request at maximum_request_length 4-byte
+    // units (often 65535 → 262140 bytes). A full 2x frame exceeds that,
+    // so upload in horizontal bands (ReviewOverlayX #5).
+    let max_payload = (u64::from(conn.setup().maximum_request_length) * 4)
+        .saturating_sub(64)
+        .min(262_140) as usize;
+    let row_bytes = width as usize * 4;
+    let band_rows = (max_payload / row_bytes).max(1).min(height as usize);
+    let mut y = 0usize;
+    while y < height as usize {
+        let rows = band_rows.min(height as usize - y);
+        scratch.clear();
+        scratch.reserve(rows * row_bytes);
+        for px in rgba[y * row_bytes..(y + rows) * row_bytes].chunks_exact(4) {
+            scratch.push(px[2]);
+            scratch.push(px[1]);
+            scratch.push(px[0]);
+            scratch.push(px[3]);
+        }
+        conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            win,
+            gc,
+            width,
+            rows as u16,
+            0,
+            y as i16,
+            0,
+            32,
+            scratch,
+        )?;
+        y += rows;
     }
-    conn.put_image(
-        ImageFormat::Z_PIXMAP,
-        win,
-        gc,
-        pixmap.width() as u16,
-        pixmap.height() as u16,
-        0,
-        0,
-        0,
-        32,
-        &bgra,
-    )?;
     conn.flush()?;
     Ok(())
 }
@@ -889,9 +924,9 @@ fn draw_text(
     size: f32,
     color: Color,
 ) {
-    // Vertically center the em box on center_y.
+    // Vertically center the ascent/descent band on center_y.
     let baseline = if let Some(m) = font.horizontal_line_metrics(size) {
-        center_y - (m.ascent + m.descent) * 0.5 + m.ascent
+        center_y + (m.ascent + m.descent) * 0.5
     } else {
         center_y + size * 0.35
     };
@@ -921,7 +956,9 @@ fn draw_text(
                 }
                 pixmap.draw_pixmap(
                     (pen_x + metrics.xmin as f32).round() as i32,
-                    (baseline + metrics.ymin as f32).round() as i32,
+                    // fontdue: ymin is the bitmap's BOTTOM edge in y-up
+                    // outline space; convert to a y-down top edge.
+                    (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32,
                     glyph.as_ref(),
                     &PixmapPaint::default(),
                     Transform::identity(),
@@ -1045,5 +1082,45 @@ mod tests {
             b = (b + a) % 65521;
         }
         (b << 16) | a
+    }
+}
+
+#[cfg(test)]
+mod probe {
+    use super::*;
+
+    /// Regression: glyphs must land centered on center_y. fontdue's ymin
+    /// is the bitmap's bottom edge in y-up outline space — using it as a
+    /// y-down top edge shifted every label ~its cap height downward
+    /// (caught by review; verified by this probe).
+    #[test]
+    fn glyph_placement_probe() {
+        let font = load_font().unwrap();
+        let size = 26.0_f32;
+        let mut pm = SkPixmap::new(200, 200).unwrap();
+        draw_text(
+            &mut pm,
+            &font,
+            "Tg",
+            20.0,
+            100.0,
+            size,
+            Color::from_rgba8(0, 0, 0, 255),
+        );
+        let mut top = 200u32;
+        let mut bottom = 0u32;
+        for (i, px) in pm.pixels().iter().enumerate() {
+            if px.alpha() > 0 {
+                let y = (i / 200) as u32;
+                top = top.min(y);
+                bottom = bottom.max(y);
+            }
+        }
+        assert!(top > 0 && bottom > top, "no ink rendered");
+        let center = (top + bottom) as f32 / 2.0;
+        assert!(
+            (center - 100.0).abs() <= 4.0,
+            "text center {center} is more than 4px from center_y=100 (rows {top}..={bottom})"
+        );
     }
 }
