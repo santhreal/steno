@@ -69,6 +69,8 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_log(cli.verbose);
+    // Route whisper.cpp/ggml chatter through `log` (quiet by default, -v shows it).
+    whisper_rs::install_logging_hooks();
 
     if cli.list_commands {
         for c in text::COMMANDS {
