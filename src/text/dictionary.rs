@@ -11,7 +11,10 @@
 //! Matching is case-insensitive, whole-word, longest phrase first.
 //! Replacement text is inserted literally (case as written).
 
-use anyhow::Result;
+use super::commands::{Tok, match_at, tokenize};
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Default, Clone)]
@@ -20,12 +23,32 @@ pub struct Dictionary {
     entries: Vec<(String, String)>,
 }
 
+/// On-disk shape: a required `[overrides]` table of phrase → replacement.
+#[derive(Deserialize)]
+struct DictFile {
+    overrides: HashMap<String, String>,
+}
+
 impl Dictionary {
     /// `None` → empty dictionary. A missing explicit file is an error;
     /// a malformed one is an error naming the file.
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let _ = path;
-        todo!()
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "cannot read dictionary file '{}'; fix the path or create the file",
+                path.display()
+            )
+        })?;
+        let parsed: DictFile = toml::from_str(&text).with_context(|| {
+            format!(
+                "invalid dictionary file '{}'; expected an [overrides] table of phrase = \"replacement\" entries",
+                path.display()
+            )
+        })?;
+        Ok(Self::from_entries(parsed.overrides))
     }
 
     /// Also construct from an in-memory table (tests, defaults).
@@ -35,18 +58,217 @@ impl Dictionary {
         K: Into<String>,
         V: Into<String>,
     {
-        let _ = entries;
-        todo!()
+        let mut entries: Vec<(String, String)> = entries
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        // Longest phrase first (by word count) so greedy matching never
+        // lets a short phrase shadow a longer one; tie-break on the
+        // phrase text so ordering stays deterministic.
+        entries.sort_by(|a, b| {
+            b.0.split_whitespace()
+                .count()
+                .cmp(&a.0.split_whitespace().count())
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Self { entries }
     }
 
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.entries.is_empty()
     }
 
     /// Apply overrides to `input`. Whole-word matching: a phrase never
     /// matches inside a larger word.
     pub fn apply(&self, input: &str) -> String {
-        let _ = input;
-        todo!()
+        if self.is_empty() {
+            return input.to_string();
+        }
+        // Pre-split and lowercase every phrase once, longest first.
+        let phrases: Vec<(Vec<&str>, &str)> = self
+            .entries
+            .iter()
+            .map(|(p, r)| (p.split_whitespace().collect(), r.as_str()))
+            .collect();
+
+        let toks = tokenize(input);
+        let mut out = String::with_capacity(input.len());
+        let mut first = true;
+        let emit = |out: &mut String, text: &str, first: &mut bool| {
+            // An empty replacement deletes the phrase; emitting nothing
+            // and joining survivors with single spaces collapses the
+            // gap it leaves.
+            if !text.is_empty() {
+                if !*first {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                *first = false;
+            }
+        };
+        let mut i = 0;
+        while i < toks.len() {
+            match toks[i] {
+                Tok::Newline => {
+                    out.push('\n');
+                    first = true;
+                    i += 1;
+                }
+                Tok::Punct(c) => {
+                    let mut buf = [0u8; 4];
+                    let c = c.encode_utf8(&mut buf).to_owned();
+                    emit(&mut out, &c, &mut first);
+                    i += 1;
+                }
+                Tok::Word(w) => {
+                    let mut found: Option<(&str, usize)> = None;
+                    for (pw, r) in &phrases {
+                        if let Some(end) = match_at(&toks, i, pw) {
+                            found = Some((r, end));
+                            break;
+                        }
+                    }
+                    match found {
+                        // Unlike commands, a replacement never absorbs
+                        // punctuation after the phrase.
+                        Some((r, end)) => {
+                            emit(&mut out, r, &mut first);
+                            i = end;
+                        }
+                        None => {
+                            emit(&mut out, w, &mut first);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Write `contents` to a unique temp file and return its path.
+    fn temp_toml(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "dictate-dict-test-{}-{}.toml",
+            std::process::id(),
+            name
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_none_is_empty() {
+        let d = Dictionary::load(None).unwrap();
+        assert!(d.is_empty());
+        // Empty dictionary returns input byte-for-byte.
+        assert_eq!(d.apply("leave  me\nalone"), "leave  me\nalone");
+    }
+
+    #[test]
+    fn load_missing_file_errors_naming_path() {
+        let path = std::env::temp_dir().join("dictate-dict-test-definitely-missing.toml");
+        let err = Dictionary::load(Some(&path)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(path.to_str().unwrap()), "error must name path: {msg}");
+    }
+
+    #[test]
+    fn load_valid_file() {
+        let path = temp_toml(
+            "valid",
+            "[overrides]\n\"hypr whisper\" = \"hyprwhspr\"\n\"mukund\" = \"Mukund\"\n\"um\" = \"\"\n",
+        );
+        let d = Dictionary::load(Some(&path)).unwrap();
+        assert!(!d.is_empty());
+        assert_eq!(d.apply("i use hypr whisper daily"), "i use hyprwhspr daily");
+        assert_eq!(d.apply("say mukund said so"), "say Mukund said so");
+        assert_eq!(d.apply("well um okay"), "well okay");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_malformed_toml_errors_naming_file() {
+        let path = temp_toml("malformed", "[overrides\nnot toml");
+        let err = Dictionary::load(Some(&path)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(path.to_str().unwrap()), "error must name file: {msg}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_missing_overrides_table_errors() {
+        let path = temp_toml("no-overrides", "[other]\nx = 1\n");
+        let err = Dictionary::load(Some(&path)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("overrides"), "error must mention overrides: {msg}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn phrase_override_applies() {
+        let d = Dictionary::from_entries([("new york", "New York")]);
+        assert_eq!(d.apply("i live in new york"), "i live in New York");
+    }
+
+    #[test]
+    fn empty_replacement_deletes_and_collapses_spaces() {
+        let d = Dictionary::from_entries([("um", "")]);
+        assert_eq!(d.apply("well um okay"), "well okay");
+        // Deletion at the edges leaves no stray spaces.
+        assert_eq!(d.apply("um okay"), "okay");
+        assert_eq!(d.apply("okay um"), "okay");
+    }
+
+    #[test]
+    fn longest_phrase_wins_over_overlapping_shorter() {
+        let d = Dictionary::from_entries([("new york", "NY"), ("new york city", "NYC")]);
+        assert_eq!(d.apply("new york city"), "NYC");
+        assert_eq!(d.apply("new york state"), "NY state");
+        assert_eq!(d.apply("i love new york city and new york"), "i love NYC and NY");
+    }
+
+    #[test]
+    fn matching_is_case_insensitive_replacement_case_preserved() {
+        let d = Dictionary::from_entries([("mukund", "Mukund")]);
+        assert_eq!(d.apply("MUKUND spoke"), "Mukund spoke");
+        assert_eq!(d.apply("Mukund spoke"), "Mukund spoke");
+    }
+
+    #[test]
+    fn matching_is_whole_word() {
+        let d = Dictionary::from_entries([("cat", "dog")]);
+        // "cat" must not rewrite inside "catch" or "bobcat".
+        assert_eq!(d.apply("catch the cat"), "catch the dog");
+        assert_eq!(d.apply("bobcat"), "bobcat");
+    }
+
+    #[test]
+    fn phrases_do_not_span_newlines_and_newlines_survive() {
+        let d = Dictionary::from_entries([("new york", "NY")]);
+        assert_eq!(d.apply("hello\nnew york"), "hello\nNY");
+        assert_eq!(d.apply("new\n\nyork"), "new\n\nyork");
+    }
+
+    #[test]
+    fn from_entries_is_empty_reflects_table() {
+        assert!(Dictionary::from_entries(Vec::<(String, String)>::new()).is_empty());
+        assert!(!Dictionary::from_entries([("a", "b")]).is_empty());
+    }
+
+    #[test]
+    fn transcript_punctuation_does_not_block_matching() {
+        let d = Dictionary::from_entries([("new york", "New York")]);
+        // Trailing punctuation is kept, not absorbed by the replacement.
+        assert_eq!(d.apply("i love new york."), "i love New York .");
+        let d = Dictionary::from_entries([("um", "")]);
+        assert_eq!(d.apply("well, um, okay"), "well , , okay");
     }
 }
