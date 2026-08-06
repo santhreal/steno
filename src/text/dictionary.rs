@@ -400,8 +400,8 @@ mod tests {
         assert_eq!(d.apply_marked("well um okay"), "well okay");
     }
 
-    /// Regression ("Vayon" bug): whisper hears the brand "veyyon" as
-    /// "Vayon". An entry for the misspelling must match case-insensitively
+    /// Regression ("Vayon" bug): the recognizer hears the brand
+    /// "veyyon" as "Vayon". An entry for the misspelling must match case-insensitively
     /// and insert the brand's exact lowercase form — even at a sentence
     /// start, where the formatter used to re-capitalize the replacement
     /// to "Veyyon".

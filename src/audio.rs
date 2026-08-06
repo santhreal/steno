@@ -11,7 +11,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::dsp::{self, Endpoint, VadConfig, VadEvent, WHISPER_RATE};
+use crate::dsp::{self, Endpoint, VadConfig, VadEvent, STT_RATE};
 
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
@@ -113,10 +113,10 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         );
     }
 
-    let mut samples = dsp::resample(&captured, dev_rate, WHISPER_RATE).with_context(|| {
-        format!("failed to resample recording from {dev_rate} Hz to {WHISPER_RATE} Hz")
+    let mut samples = dsp::resample(&captured, dev_rate, STT_RATE).with_context(|| {
+        format!("failed to resample recording from {dev_rate} Hz to {STT_RATE} Hz")
     })?;
-    let mut dc = dsp::DcBlock::new(WHISPER_RATE);
+    let mut dc = dsp::DcBlock::new(STT_RATE);
     dc.process(&mut samples);
     dsp::normalize(&mut samples, cfg.target_rms, cfg.max_gain);
     trim_leading_silence(&mut samples, cfg.vad.speech_threshold);
@@ -195,10 +195,10 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
         return Ok(Vec::new());
     }
 
-    let mut samples = dsp::resample(&captured, dev_rate, WHISPER_RATE).with_context(|| {
-        format!("failed to resample recording from {dev_rate} Hz to {WHISPER_RATE} Hz")
+    let mut samples = dsp::resample(&captured, dev_rate, STT_RATE).with_context(|| {
+        format!("failed to resample recording from {dev_rate} Hz to {STT_RATE} Hz")
     })?;
-    let mut dc = dsp::DcBlock::new(WHISPER_RATE);
+    let mut dc = dsp::DcBlock::new(STT_RATE);
     dc.process(&mut samples);
     dsp::normalize(&mut samples, cfg.target_rms, cfg.max_gain);
     trim_leading_silence(&mut samples, cfg.vad.speech_threshold);
@@ -446,7 +446,7 @@ fn capture_deadline(max_duration: Duration) -> Option<Instant> {
 
 /// Drop leading windows whose RMS stays under `threshold`.
 fn trim_leading_silence(samples: &mut Vec<f32>, threshold: f32) {
-    let hop = (WHISPER_RATE as usize / 100).max(1); // 10 ms windows
+    let hop = (STT_RATE as usize / 100).max(1); // 10 ms windows
     let mut cut = 0;
     while cut + hop <= samples.len() {
         let w = &samples[cut..cut + hop];

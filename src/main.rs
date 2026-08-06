@@ -1,4 +1,5 @@
-//! light-dictate — minimal offline speech-to-text dictation CLI (whisper.cpp).
+//! light-dictate — minimal offline speech-to-text dictation CLI
+//! (sherpa-onnx Parakeet TDT, GPU-resident).
 //!
 //! Binary name: `dictate`.
 //!
@@ -31,17 +32,13 @@ pub struct Cli {
     /// Transcribe this WAV file instead of recording from the microphone.
     input: Option<PathBuf>,
 
-    /// Path to a ggml whisper model (.bin). Overrides config.
+    /// Path to a sherpa-onnx model directory. Overrides config.
     #[arg(short, long, global = true)]
     pub model: Option<PathBuf>,
 
     /// Path to a dictionary TOML with an [overrides] table.
     #[arg(short, long, global = true)]
     pub dictionary: Option<PathBuf>,
-
-    /// Spoken language code (e.g. "en") or "auto".
-    #[arg(short, long, global = true)]
-    pub language: Option<String>,
 
     /// Type the result into the focused window via xdotool (X11) instead
     /// of printing. SAFETY: requires `type_output = true` in the config
@@ -104,8 +101,6 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_log(cli.verbose);
-    // Route whisper.cpp/ggml chatter through `log` (quiet by default, -v shows it).
-    whisper_rs::install_logging_hooks();
 
     match cli.command {
         Some(Command::Start { foreground }) => return daemon::start(&cli, foreground),
@@ -130,7 +125,6 @@ fn main() -> Result<()> {
     }
 
     let cfg = config::Config::load(cli.config.as_deref())?;
-    let language = cli.language.as_deref().unwrap_or(&cfg.language);
     // Fail closed and fail FAST: a disarmed --type must error before the
     // microphone opens, the model loads, or xdotool is ever spawned.
     let mode = output_mode(cli.r#type, cli.stdout, cfg.type_output)?;
@@ -154,8 +148,8 @@ fn main() -> Result<()> {
                 path.display()
             );
             let (raw, rate) = dsp::read_wav(path)?;
-            let mut s = dsp::resample(&raw, rate, dsp::WHISPER_RATE)?;
-            let mut dc = dsp::DcBlock::new(dsp::WHISPER_RATE);
+            let mut s = dsp::resample(&raw, rate, dsp::STT_RATE)?;
+            let mut dc = dsp::DcBlock::new(dsp::STT_RATE);
             dc.process(&mut s);
             dsp::normalize(&mut s, cfg.dsp.target_rms, cfg.dsp.max_gain);
             s
@@ -173,12 +167,12 @@ fn main() -> Result<()> {
     };
     log::info!(
         "{:.1}s of audio captured",
-        samples.len() as f32 / dsp::WHISPER_RATE as f32
+        samples.len() as f32 / dsp::STT_RATE as f32
     );
     overlay.set(overlay::Stage::Transcribing);
 
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
-    let transcriber = stt::Transcriber::load(&model, language, cfg.n_threads)?;
+    let transcriber = stt::Transcriber::load(&model, cfg.n_threads)?;
     let dict = text::Dictionary::load(
         config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
     )?;
@@ -234,7 +228,7 @@ pub(crate) fn emit_transcript(
     };
     transcriber.transcribe_streaming(samples, run_pipeline)?;
 
-    // whisper-rs owns the callback after full(); borrow, don't unwrap.
+    // The sink closure records its own errors; borrow, don't unwrap.
     let mut ctx = ctx.borrow_mut();
     if let Some(e) = ctx.error.take() {
         overlay.set(overlay::Stage::Error);

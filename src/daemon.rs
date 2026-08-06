@@ -1,4 +1,4 @@
-//! Background dictation daemon: keep the whisper model resident, grab
+//! Background dictation daemon: keep the STT model resident in VRAM, grab
 //! Caps Lock, hold-to-talk → type into the focused window.
 //!
 //! Lifecycle mirrors the old `speak` helper:
@@ -292,9 +292,6 @@ fn forward_flags(cmd: &mut Command, cli: &Cli) {
     if let Some(d) = &cli.dictionary {
         cmd.arg("--dictionary").arg(d);
     }
-    if let Some(l) = &cli.language {
-        cmd.arg("--language").arg(l);
-    }
     if let Some(d) = &cli.device {
         cmd.arg("--device").arg(d);
     }
@@ -362,14 +359,13 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         );
     }
     let mode = OutputMode::Type;
-    let language = cli.language.as_deref().unwrap_or(&cfg.language);
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
 
     eprintln!(
         "dictate: loading model {} …",
         model.display()
     );
-    let transcriber = Transcriber::load(&model, language, cfg.n_threads)?;
+    let transcriber = Transcriber::load(&model, cfg.n_threads)?;
     let dict_path = config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?;
     let dict = text::Dictionary::load(dict_path.as_deref())?;
     if let Some(p) = &dict_path {

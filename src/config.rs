@@ -15,14 +15,13 @@ use crate::text::TextConfig;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Path to a ggml whisper model. Falls back to the first `*.bin` in
+    /// Path to a sherpa-onnx model DIRECTORY (encoder/decoder/joiner
+    /// ONNX + tokens.txt). Falls back to the single model directory in
     /// `~/.local/share/dictate/models/`.
     pub model_path: Option<PathBuf>,
     /// Dictionary TOML with an `[overrides]` table. Falls back to
     /// `~/.config/dictate/dictionary.toml` when present.
     pub dictionary_path: Option<PathBuf>,
-    /// Spoken language code ("en", "de", ...) or "auto".
-    pub language: String,
     /// Decode threads. Defaults to half the logical CPUs.
     pub n_threads: u32,
     /// Hard cap on one recording.
@@ -44,7 +43,6 @@ impl Default for Config {
         Self {
             model_path: None,
             dictionary_path: None,
-            language: "auto".into(),
             n_threads: (std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
                 .unwrap_or(4)
@@ -97,7 +95,7 @@ impl Config {
     }
 
     /// Reject values that parse but break downstream (integer truncation
-    /// at the whisper boundary, a zero recording cap).
+    /// at the STT boundary, a zero recording cap).
     fn validate(&self, path: &Path) -> Result<()> {
         ensure!(
             (1..=(i32::MAX as u32)).contains(&self.n_threads),
@@ -133,84 +131,60 @@ pub fn default_model_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("dictate/models"))
 }
 
-/// Model resolution order: CLI flag, config file, first `*.bin` in the
-/// default model directory. Fails with the exact download command.
+/// Model resolution order: CLI flag, config file, the single sherpa-onnx
+/// model directory under the default model directory. A model is a
+/// DIRECTORY holding encoder/decoder/joiner ONNX files + tokens.txt.
+/// Fails with the exact download command.
 pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
-    let candidate = if let Some(p) = cli {
-        expand_tilde(p)?
-    } else if let Some(p) = &cfg.model_path {
-        expand_tilde(p)?
-    } else {
-        let dir = default_model_dir()?;
-        let mut found = None;
-        if dir.is_dir() {
-            let mut bins: Vec<PathBuf> = fs::read_dir(&dir)
-                .with_context(|| {
-                    format!(
-                        "cannot list model directory '{}' — check its permissions",
-                        dir.display()
-                    )
-                })?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|e| e == "bin"))
-                .collect();
-            bins.sort();
-            found = bins.into_iter().next();
-        }
-        match found {
-            Some(first) => first,
-            None => bail!(
-                "no whisper model found. Download one, e.g.:\n  \
-                 mkdir -p {dir} && curl -L -o {dir}/ggml-base.en.bin \\\n    \
-                 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin\n\
-                 or pass --model /path/to/ggml-model.bin",
-                dir = dir.display()
-            ),
-        }
-    };
-    check_model_file(&candidate)?;
-    Ok(candidate)
+    const DOWNLOAD_HINT: &str = "download a model, e.g.:\n  \
+        cd ~/.local/share/dictate/models && \\\n        curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \\\n        tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+    if let Some(p) = cli.or(cfg.model_path.as_ref()) {
+        let dir = expand_tilde(p)?;
+        ensure!(
+            dir.is_dir(),
+            "model path '{}' is not a sherpa-onnx model directory — {DOWNLOAD_HINT}\n\
+             or pass --model /path/to/model-dir",
+            dir.display()
+        );
+        return Ok(dir);
+    }
+    let dir = default_model_dir()?;
+    let mut models: Vec<PathBuf> = Vec::new();
+    if dir.is_dir() {
+        models = fs::read_dir(&dir)
+            .with_context(|| {
+                format!(
+                    "cannot list model directory '{}' — check its permissions",
+                    dir.display()
+                )
+            })?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir() && looks_like_model(p))
+            .collect();
+        models.sort();
+    }
+    match models.len() {
+        1 => Ok(models.into_iter().next().unwrap()),
+        0 => bail!("no sherpa-onnx model found in '{}' — {DOWNLOAD_HINT}", dir.display()),
+        _ => bail!(
+            "multiple models in '{}': {} — set model_path in the config to pick one",
+            dir.display(),
+            models
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
-/// A chosen model path must be a readable, non-empty regular file.
-/// whisper's own load errors are cryptic; say exactly what to fix.
-/// Symlinks are fine (metadata follows them); broken ones report as missing.
-fn check_model_file(path: &Path) -> Result<()> {
-    let meta = match fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
-            "whisper model '{}' does not exist — fix the path, or download a model, e.g.:\n  \
-             curl -L -o {} \
-             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-            path.display(),
-            path.display()
-        ),
-        Err(e) => {
-            return Err(e).with_context(|| {
-                format!(
-                    "cannot access whisper model '{}' — check its permissions",
-                    path.display()
-                )
-            });
-        }
-    };
-    ensure!(
-        meta.is_file(),
-        "whisper model '{}' is not a regular file — pass the path to a .bin model file",
-        path.display()
-    );
-    ensure!(
-        meta.len() > 0,
-        "whisper model '{}' is empty — the download likely failed; delete it and download again",
-        path.display()
-    );
-    fs::File::open(path).with_context(|| {
-        format!(
-            "whisper model '{}' is not readable — fix its permissions (chmod +r)",
-            path.display()
-        )
-    })?;
-    Ok(())
+/// A directory counts as a model when it holds tokens.txt and an encoder
+/// ONNX — the full per-file check happens at load (stt::model_files).
+fn looks_like_model(dir: &Path) -> bool {
+    dir.join("tokens.txt").is_file()
+        && ["encoder.int8.onnx", "encoder.onnx", "encoder.fp16.onnx"]
+            .iter()
+            .any(|n| dir.join(n).is_file())
 }
 
 /// Dictionary resolution order: CLI flag, config file, default path if it
@@ -268,8 +242,8 @@ mod tests {
     //! Regression tests for config parsing, validation, and path
     //! resolution. WHY: these guards exist because a typo'd config key was
     //! silently ignored, `n_threads` could truncate to a negative i32 at
-    //! the whisper boundary, and a missing/empty model produced a cryptic
-    //! whisper load error instead of an actionable message.
+    //! the STT boundary, and a missing/empty model produced a cryptic
+    //! load error instead of an actionable message.
     use super::*;
     use std::io::Write;
 
@@ -297,11 +271,10 @@ mod tests {
     fn known_keys_still_parse() {
         let path = temp_file(
             "known-keys.toml",
-            b"language = \"en\"\nn_threads = 4\nmax_record_secs = 30\ntype_output = true\n",
+            b"n_threads = 4\nmax_record_secs = 30\ntype_output = true\n",
         );
         let cfg = Config::load(Some(&path)).unwrap();
         fs::remove_file(&path).ok();
-        assert_eq!(cfg.language, "en");
         assert_eq!(cfg.n_threads, 4);
         assert_eq!(cfg.max_record_secs, 30);
         assert!(cfg.type_output);
@@ -325,7 +298,7 @@ mod tests {
 
     #[test]
     fn zero_n_threads_is_rejected_with_fix() {
-        // WHY: n_threads = 0 reaches whisper as 0 decode threads.
+        // WHY: n_threads = 0 would reach the recognizer as 0 threads.
         let path = temp_file("zero-threads.toml", b"n_threads = 0\n");
         let err = error_of(Config::load(Some(&path)));
         fs::remove_file(&path).ok();
@@ -335,8 +308,8 @@ mod tests {
 
     #[test]
     fn huge_n_threads_is_rejected_before_i32_truncation() {
-        // WHY: 3_000_000_000 as i32 wraps negative; whisper would get a
-        // negative thread count.
+        // WHY: 3_000_000_000 as i32 wraps negative; the recognizer would
+        // get a negative thread count.
         let path = temp_file("huge-threads.toml", b"n_threads = 3000000000\n");
         let err = error_of(Config::load(Some(&path)));
         fs::remove_file(&path).ok();
@@ -366,54 +339,37 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_missing_file_says_what_to_do() {
+    fn resolve_model_missing_path_says_what_to_do() {
+        // WHY: an explicit path that does not exist must fail with the
+        // download command, not an ONNX runtime error at load time.
         let cfg = Config::default();
-        let path = PathBuf::from("/nonexistent/ggml-nope.bin");
+        let path = PathBuf::from("/nonexistent/no-such-model-dir");
         let err = error_of(resolve_model(Some(&path), &cfg));
-        assert!(err.contains("does not exist"), "{err}");
-        assert!(err.contains("curl"), "{err}");
+        assert!(err.contains("not a sherpa-onnx model directory"), "{err}");
+        assert!(err.contains("sherpa-onnx-nemo-parakeet"), "{err}");
     }
 
     #[test]
-    fn resolve_model_directory_is_rejected() {
+    fn resolve_model_rejects_plain_file() {
+        // WHY: a whisper-era ggml .bin pin must fail loudly at resolve
+        // time with migration guidance, not deep inside onnxruntime.
         let cfg = Config::default();
-        let dir = std::env::temp_dir();
-        let err = error_of(resolve_model(Some(&dir), &cfg));
-        assert!(err.contains("not a regular file"), "{err}");
-    }
-
-    #[test]
-    fn resolve_model_empty_bin_is_rejected() {
-        // WHY: a failed curl leaves a 0-byte .bin; whisper's load error
-        // for it does not say the file is empty or to re-download.
-        let cfg = Config::default();
-        let path = temp_file("empty.bin", b"");
+        let path = temp_file("ggml-base.en.bin", b"old whisper model");
         let err = error_of(resolve_model(Some(&path), &cfg));
         fs::remove_file(&path).ok();
-        assert!(err.contains("is empty"), "{err}");
-        assert!(err.contains("download again"), "{err}");
+        assert!(err.contains("not a sherpa-onnx model directory"), "{err}");
     }
 
     #[test]
-    fn resolve_model_accepts_nonempty_file() {
+    fn resolve_model_accepts_model_dir() {
         let cfg = Config::default();
-        let path = temp_file("ok.bin", b"not a real model, but nonempty");
-        let got = resolve_model(Some(&path), &cfg).unwrap();
-        fs::remove_file(&path).ok();
-        assert_eq!(got, path);
-    }
-
-    #[test]
-    fn resolve_model_accepts_symlinked_model() {
-        let cfg = Config::default();
-        let target = temp_file("real.bin", b"nonempty");
-        let link =
-            std::env::temp_dir().join(format!("dictate-test-{}-link.bin", std::process::id()));
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let got = resolve_model(Some(&link), &cfg).unwrap();
-        fs::remove_file(&link).ok();
-        fs::remove_file(&target).ok();
-        assert_eq!(got, link);
+        let dir = std::env::temp_dir().join("dictate-cfg-model-dir");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tokens.txt"), b"x").unwrap();
+        fs::write(dir.join("encoder.int8.onnx"), b"x").unwrap();
+        let got = resolve_model(Some(&dir), &cfg).unwrap();
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(got, dir);
     }
 
     #[test]

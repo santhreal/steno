@@ -14,11 +14,10 @@ pub enum OutputMode {
     Type,
 }
 
-/// Progressive emitter for streaming decode: receives FINAL (post-pipeline)
-/// text chunks as whisper finalizes segments, joins them with correct
-/// spacing, and writes each one out immediately — stdout flushes per chunk,
-/// typing happens per chunk. The clipboard is never involved, so it can
-/// never be clobbered.
+/// Progressive emitter: receives FINAL (post-pipeline) text chunks, joins
+/// them with correct spacing, and writes each one out immediately — stdout
+/// flushes per chunk, typing happens per chunk. The clipboard is never
+/// involved, so it can never be clobbered.
 pub struct Emitter {
     mode: OutputMode,
     /// Last character actually written, for join decisions.
@@ -32,9 +31,8 @@ impl Emitter {
 
     /// Emit one processed chunk. Empty chunks are skipped.
     ///
-    /// This runs inside whisper-rs's FFI callback, where a panic would
-    /// cross an `extern "C"` boundary and ABORT the process — every error
-    /// path here MUST return `Err`, never panic (no print!()/unwrap()).
+    /// Every error path returns `Err`, never panics (no print!()/unwrap()):
+    /// the caller records emitter errors and reports them after decode.
     pub fn push(&mut self, chunk: &str) -> Result<()> {
         if chunk.is_empty() {
             return Ok(());

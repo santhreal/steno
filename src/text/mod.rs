@@ -7,11 +7,6 @@
 //! punctuates around them but never re-cases them, so a lowercase-branded
 //! entry ("veyyon") stays lowercase even at a sentence start.
 //!
-//! Streaming limit: each whisper segment is processed on its own, so a
-//! multi-word dictionary phrase split across two segments never matches.
-//! Keep overrides to phrases whisper emits within one breath, or make each
-//! half its own entry.
-//!
 //! Pure string logic; no I/O except dictionary file loading.
 
 mod commands;

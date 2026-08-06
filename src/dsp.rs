@@ -9,14 +9,14 @@ use rubato::Resampler;
 use serde::Deserialize;
 use std::path::Path;
 
-/// whisper.cpp's required input rate.
-pub const WHISPER_RATE: u32 = 16_000;
+/// Input rate expected by the STT engine (16 kHz mono).
+pub const STT_RATE: u32 = 16_000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DspConfig {
     /// Normalize recordings toward this RMS (0..1). Quiet mics are the top
-    /// cause of bad whisper decodes.
+    /// cause of bad decodes.
     pub target_rms: f32,
     /// Never boost more than this factor, so silence is not amplified into
     /// noise.
@@ -495,13 +495,13 @@ mod tests {
     #[test]
     fn resample_22050_to_16000_preserves_sine_frequency() {
         let input = sine(440.0, 22_050, 22_050, 0.8);
-        let out = resample(&input, 22_050, WHISPER_RATE).unwrap();
+        let out = resample(&input, 22_050, STT_RATE).unwrap();
         assert!(
             (out.len() as i64 - 16_000).abs() <= 4,
             "1s at 22050 Hz should become ~16000 samples, got {}",
             out.len()
         );
-        let f = zero_crossing_freq(&out, WHISPER_RATE);
+        let f = zero_crossing_freq(&out, STT_RATE);
         assert!(
             (430.0..=450.0).contains(&f),
             "440 Hz sine resampled to {f} Hz dominant frequency"
@@ -801,7 +801,7 @@ mod tests {
     fn resample_extreme_ratios_preserve_sine() {
         for from_rate in [8_000u32, 192_000] {
             let input = sine(440.0, from_rate, from_rate as usize, 0.8);
-            let out = resample(&input, from_rate, WHISPER_RATE).unwrap();
+            let out = resample(&input, from_rate, STT_RATE).unwrap();
             assert!(
                 (out.len() as i64 - 16_000).abs() <= 4,
                 "1s at {from_rate} Hz should become ~16000 samples, got {}",
@@ -811,7 +811,7 @@ mod tests {
                 out.iter().all(|s| s.is_finite()),
                 "resampled output must be finite at {from_rate} Hz input"
             );
-            let f = zero_crossing_freq(&out, WHISPER_RATE);
+            let f = zero_crossing_freq(&out, STT_RATE);
             assert!(
                 (430.0..=450.0).contains(&f),
                 "440 Hz sine from {from_rate} Hz resampled to {f} Hz dominant frequency"

@@ -6,8 +6,8 @@
 //! - exactly one space after sentence punctuation (unless end of text)
 //! - capitalize the first letter of the text and after ., !, ?, newline
 //! - the pronoun "i" becomes "I"
-//! - duplicate pause punctuation (, ; : ! ? %) collapses to one (whisper
-//!   inserts its own punctuation around spoken command words: "bank,
+//! - duplicate pause punctuation (, ; : ! ? %) collapses to one (the
+//!   recognizer inserts its own punctuation around spoken commands: "bank,
 //!   comma," must not become "bank,,"). Runs of '.' are kept ("..."),
 //!   intentional stutters like "!!" are lost.
 //! - text between the dictionary's verbatim markers is copied through
@@ -331,8 +331,8 @@ mod tests {
 
     #[test]
     fn duplicate_pause_punctuation_collapses() {
-        // The real case: whisper writes "bank, comma," around the spoken
-        // command; the command supplies "," and the transcript one must go.
+        // The real case: the recognizer writes "bank, comma," around the
+        // spoken command; the command supplies "," and the transcript one must go.
         assert_eq!(format("bank , , main street"), "Bank, main street");
         assert_eq!(format("yes ! ! no ? ?"), "Yes! No?");
         // Runs of dots survive (ellipsis intent); the sentence-boundary

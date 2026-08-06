@@ -3,9 +3,9 @@
 Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
 out. No cloud, no GPU required. One-shot or a background daemon.
 
-`dictate` records from your microphone, transcribes locally with
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp), cleans the text up,
-and prints it — or types it into whatever window is focused.
+`dictate` records from your microphone, transcribes locally on your GPU with
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Parakeet TDT), cleans
+the text up, and prints it — or types it into whatever window is focused.
 
 Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
 keeps the model loaded and listens for **Caps Lock** (hold to talk).
@@ -68,7 +68,7 @@ resident model:
 ```toml
 # ~/.config/dictate/config.toml
 type_output = true
-model_path = "~/.local/share/dictate/models/ggml-small.en.bin"
+model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 ```
 
 ```
@@ -120,7 +120,7 @@ any PCM or 32-bit float WAV, resampled to 16 kHz mono internally —
 also useful for testing your setup without a microphone.
 
 Useful flags: `--list-devices` and `--device <name>` pick a microphone,
-`--language en` skips language detection, `--raw` skips all text processing,
+`--raw` skips all text processing,
 `--model`/`--dictionary`/`--config <path>` override auto-resolution,
 `-v`/`-vv` shows what the pipeline is doing.
 
@@ -152,14 +152,14 @@ table:
 | new paragraph | blank line |
 | scratch that / delete that | delete back to the last sentence boundary |
 
-Commands match whole words only. whisper often adds its own punctuation
-around spoken commands ("bank, comma,"); duplicate punctuation is collapsed
-during formatting, so you get "bank, " and not "bank,, ".
+Commands match whole words only. The recognizer often adds its own
+punctuation around spoken commands ("bank, comma,"); duplicate punctuation
+is collapsed during formatting, so you get "bank, " and not "bank,, ".
 
 ## Dictionary
 
 The dictionary rewrites phrases after commands run — names, jargon, product
-terms whisper gets wrong. Create `~/.config/dictate/dictionary.toml`
+terms the recognizer gets wrong. Create `~/.config/dictate/dictionary.toml`
 (picked up automatically when it exists; `--dictionary <path>` points
 elsewhere):
 
@@ -180,10 +180,9 @@ flags override the file (`--config <path>` loads a different file). A full
 config looks like:
 
 ```toml
-model_path = "~/.local/share/dictate/models/ggml-small.en.bin"
+model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 dictionary_path = "~/.config/dictate/dictionary.toml"
-language = "auto"        # or "en", "de", ...
-n_threads = 8            # decode threads; default: half your CPUs
+n_threads = 8            # CPU threads for feature extraction; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
 type_output = false      # arm typing (xdotool); the ONLY way to enable it
 
@@ -211,8 +210,8 @@ done_flash_ms = 1200    # how long done/error stays visible
 ```
 mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
-    ── whisper.cpp decode (greedy, temperature fallback)
-    ── voice commands → dictionary → formatter, per decoded segment
+    ── sherpa-onnx decode on the GPU (Parakeet TDT)
+    ── voice commands → dictionary → formatter
     ── streamed to stdout, or synthetic keystrokes (xdotool, when armed)
 ```
 
@@ -231,5 +230,5 @@ fresh decode state — nothing leaks between them.
   with an error, so scripts can tell silence apart from an empty result.
 - X11 only for typing (xdotool). On Wayland, use stdout mode with your
   compositor's tooling.
-- English `.en` models ignore `language`; multilingual models need it
-  (`--language de`) or auto-detection kicks in.
+- Parakeet TDT v3 covers 25 languages and detects them on its own; there
+  is no language flag.
