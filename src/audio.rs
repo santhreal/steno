@@ -132,7 +132,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
 /// Record while `stop` is clear. Ends on `stop`, `max_duration`, or capture
 /// failure. Returns processed 16 kHz mono samples, or an empty `Vec` when
 /// the hold produced no usable speech (caller should skip transcription).
-pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool) -> Result<Vec<f32>> {
+pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool) -> Result<Vec<f32>> {
     let host = cpal::default_host();
     let device = select_device(&host, cfg.device.as_deref())?;
     let dev_name = device.to_string();
@@ -189,7 +189,9 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool) -> Result<Vec<f32>> {
     let result = capture_until_stop(&rx, &stream, cfg, dev_rate, &dev_name, stop);
     drop(stream);
     let captured = result?;
-    if captured.is_empty() {
+    // A cancelled utterance skips all DSP and returns empty immediately —
+    // seconds of sinc resampling must not delay the cancel.
+    if discard.load(Ordering::Relaxed) || captured.is_empty() {
         return Ok(Vec::new());
     }
 

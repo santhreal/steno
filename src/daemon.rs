@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, bail};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -39,6 +40,10 @@ fn pid_path() -> Result<PathBuf> {
     Ok(cache_dir()?.join("dictate.pid"))
 }
 
+fn ready_path() -> Result<PathBuf> {
+    Ok(cache_dir()?.join("dictate.ready"))
+}
+
 fn log_path() -> Result<PathBuf> {
     Ok(cache_dir()?.join("dictate.log"))
 }
@@ -49,8 +54,60 @@ fn read_pid(path: &Path) -> Option<u32> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // signal 0: existence check, no delivery.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    // signal 0: existence check, no delivery. EPERM means the process
+    // exists but belongs to another user — that is alive, not dead.
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || unsafe { *libc::__errno_location() } == libc::EPERM
+}
+
+/// True only when the pid is actually a dictate process. Without this a
+/// recycled pid from a stale pidfile would get our signals.
+fn pid_is_dictate(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .is_some_and(|name| name == "dictate")
+}
+
+/// Serialize start/stop/restart across processes: two concurrent starts
+/// must not race the pidfile and orphan an armed daemon.
+fn lifecycle_lock() -> Result<File> {
+    let path = cache_dir()?.join("dictate.lock");
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open lifecycle lock {}", path.display()))?;
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot lock {}", path.display()));
+    }
+    Ok(f)
+}
+
+/// Last ~8 KiB of the append-only daemon log (never slurps the whole file).
+fn log_tail() -> String {
+    let Ok(path) = log_path() else { return String::new() };
+    let Ok(mut f) = File::open(&path) else {
+        return String::new();
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(8192);
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut buf = String::new();
+    let _ = f.read_to_string(&mut buf);
+    let last: Vec<&str> = buf.lines().collect();
+    last.into_iter()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn is_running() -> Result<Option<u32>> {
@@ -58,7 +115,7 @@ pub fn is_running() -> Result<Option<u32>> {
     let Some(pid) = read_pid(&path) else {
         return Ok(None);
     };
-    if pid_alive(pid) {
+    if pid_alive(pid) && pid_is_dictate(pid) {
         Ok(Some(pid))
     } else {
         let _ = fs::remove_file(&path);
@@ -70,7 +127,7 @@ pub fn status() -> Result<()> {
     match is_running()? {
         Some(pid) => {
             println!("Dictation running (PID {pid}).");
-            println!("Hotkey: hold Ctrl+Space to speak.");
+            println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
             println!("Log: {}", log_path()?.display());
         }
         None => println!("Dictation not running."),
@@ -79,11 +136,18 @@ pub fn status() -> Result<()> {
 }
 
 pub fn stop() -> Result<()> {
+    let _lock = lifecycle_lock()?;
     let path = pid_path()?;
     match is_running()? {
         Some(pid) => {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
+            if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EPERM) {
+                    anyhow::bail!(
+                        "cannot signal PID {pid}: permission denied — it is not your process; remove {} by hand if it is stale",
+                        path.display()
+                    );
+                }
             }
             // Wait briefly for a clean exit; escalate once.
             for _ in 0..20 {
@@ -92,10 +156,22 @@ pub fn stop() -> Result<()> {
                 }
                 thread::sleep(Duration::from_millis(50));
             }
-            if pid_alive(pid) {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
+            if pid_alive(pid)
+                && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
+            {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EPERM) {
+                    anyhow::bail!(
+                        "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
+                        path.display()
+                    );
                 }
+            }
+            if pid_alive(pid) {
+                anyhow::bail!(
+                    "PID {pid} is still alive after SIGKILL — investigate manually; the pidfile {} was left in place",
+                    path.display()
+                );
             }
             let _ = fs::remove_file(&path);
             println!("Dictation stopped.");
@@ -110,9 +186,10 @@ pub fn stop() -> Result<()> {
 
 /// Spawn the daemon worker (or run it in-process when `foreground`).
 pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
+    let _lock = lifecycle_lock()?;
     if let Some(pid) = is_running()? {
         println!("Dictation already running (PID {pid}).");
-        println!("Hotkey: hold Ctrl+Space to speak.");
+        println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
         return Ok(());
     }
 
@@ -120,9 +197,6 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     preflight(cli)?;
 
     if foreground {
-        // Write pid for `dictate stop` even in foreground mode.
-        write_pid(std::process::id())?;
-        let _guard = PidGuard;
         return run_daemon(cli);
     }
 
@@ -155,40 +229,43 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         });
     }
 
+    // Readiness handshake: the worker writes the ready file only after
+    // the model is loaded AND the hotkey is grabbed. A fixed sleep would
+    // report "running" for a daemon about to die.
+    let ready = ready_path()?;
+    let _ = fs::remove_file(&ready);
     let child = cmd.spawn().context("failed to spawn dictate daemon")?;
-    write_pid(child.id())?;
-    // Give it a moment to fail fast (missing model / grab conflict).
-    thread::sleep(Duration::from_millis(300));
-    if !pid_alive(child.id()) {
-        let log = log_path()?;
-        let _ = fs::remove_file(pid_path()?);
-        let tail = fs::read_to_string(&log).unwrap_or_default();
-        let last: String = tail
-            .lines()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("
-");
-        if last.is_empty() {
-            bail!("daemon exited immediately — see {}", log.display());
+    let mut ok = false;
+    for _ in 0..600 {
+        if read_pid(&ready) == Some(child.id()) {
+            ok = true;
+            break;
         }
-        bail!("daemon exited immediately — see {}:
-{}", log.display(), last);
+        if !pid_alive(child.id()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
     }
+    if !ok {
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGKILL);
+        }
+        let tail = log_tail();
+        if tail.is_empty() {
+            bail!("daemon failed to become ready in 60s — see {}", log_file.display());
+        }
+        bail!("daemon failed to become ready — see {}:\n{tail}", log_file.display());
+    }
+    let _ = fs::remove_file(&ready);
 
     println!("Dictation running (PID {}).", child.id());
-    println!("Hotkey: hold Ctrl+Space to speak.");
+    println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
     println!("Log: {}", log_path()?.display());
     Ok(())
 }
 
 pub fn restart(cli: &Cli, foreground: bool) -> Result<()> {
-    let _ = stop();
-    thread::sleep(Duration::from_millis(200));
+    stop()?;
     start(cli, foreground)
 }
 
@@ -248,12 +325,27 @@ fn preflight(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Set on SIGTERM: the event loop checks it and exits gracefully so
+/// Drop impls (grab release, pidfile removal) run.
+pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigterm(_sig: libc::c_int) {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
 /// Foreground worker: load model once, grab hotkey, loop utterances.
 pub fn run_daemon(cli: &Cli) -> Result<()> {
     // Ignore SIGHUP in case we were started without setsid.
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
     }
+
+    // The worker owns its pidfile: the parent must not publish the pid
+    // before grab + model load succeed, and a second worker must not
+    // clobber a live one's entry.
+    write_pid(std::process::id())?;
+    let _pid_guard = PidGuard;
 
     let cfg = Config::load(cli.config.as_deref())?;
     // Daemon's job is to type into the focused window. Fail closed: must
@@ -280,6 +372,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     let overlay = Overlay::start(&cfg.ui);
 
     let mut hotkey = Hotkey::grab_ctrl_space()?;
+    // Ready: model loaded AND hotkey grabbed. Tell the parent.
+    if let Ok(ready) = ready_path() {
+        let _ = fs::write(&ready, format!("{}", std::process::id()));
+    }
     println!(
         "Dictation running (PID {}). Hold Ctrl+Space to speak.",
         std::process::id()
@@ -296,25 +392,39 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
 
     let mut held = false;
     loop {
-        match hotkey.next_event(&mut held)? {
+        match hotkey.next_event_debug(&mut held, false, &SHUTDOWN)? {
             HotkeyEvent::Press => {
                 overlay.set(Stage::Recording);
                 let stop = Arc::new(AtomicBool::new(false));
+                let discard = Arc::new(AtomicBool::new(false));
                 let stop2 = stop.clone();
+                let discard2 = discard.clone();
                 let cfg2 = record_cfg.clone();
                 let handle = thread::Builder::new()
                     .name("dictate-ptt".into())
-                    .spawn(move || audio::record_while(&cfg2, &stop2))
+                    .spawn(move || audio::record_while(&cfg2, &stop2, &discard2))
                     .context("cannot spawn push-to-talk capture thread")?;
 
-                // Wait for release (or another press path shouldn't happen).
+                // Wait for release (normal end) or any other key (cancel).
+                let mut cancelled = false;
                 loop {
-                    match hotkey.next_event(&mut held)? {
+                    match hotkey.next_event_debug(&mut held, false, &SHUTDOWN)? {
                         HotkeyEvent::Release => break,
                         HotkeyEvent::Press => continue,
+                        HotkeyEvent::Cancel => {
+                            cancelled = true;
+                            break;
+                        }
+                        HotkeyEvent::Shutdown => {
+                            cancelled = true;
+                            break;
+                        }
                     }
                 }
                 stop.store(true, Ordering::Relaxed);
+                if cancelled {
+                    discard.store(true, Ordering::Relaxed);
+                }
                 let samples = match handle.join() {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
@@ -332,6 +442,15 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         continue;
                     }
                 };
+                if cancelled {
+                    // Drop the utterance: no transcription, no typing.
+                    log::info!("utterance cancelled by keypress");
+                    overlay.set(Stage::Hidden);
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 if samples.is_empty() {
                     log::debug!("empty hold — skipped");
                     overlay.set(Stage::Hidden);
@@ -353,10 +472,14 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     overlay.flash(cfg.ui.done_flash_ms);
                     overlay.set(Stage::Hidden);
                 }
+                // Typing just injected keys: drop any late raw events so
+                // they cannot cancel the next utterance.
+                hotkey.drain_pending();
             }
-            HotkeyEvent::Release => {
-                // Spurious release with no press — ignore.
+            HotkeyEvent::Release | HotkeyEvent::Cancel => {
+                // Spurious release/cancel with no press — ignore.
             }
+            HotkeyEvent::Shutdown => return Ok(()),
         }
     }
 }
