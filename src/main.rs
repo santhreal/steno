@@ -1,4 +1,6 @@
-//! dictate — minimal offline speech-to-text dictation CLI (whisper.cpp).
+//! light-dictate — minimal offline speech-to-text dictation CLI (whisper.cpp).
+//!
+//! Binary name: `dictate`.
 //!
 //! `dictate` records one utterance from the microphone (stopping at the end
 //! of speech), transcribes it locally, applies the text pipeline, and prints

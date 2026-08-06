@@ -1,4 +1,4 @@
-# dictate
+# light-dictate
 
 Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
 out. No daemon, no cloud, no GPU required.
