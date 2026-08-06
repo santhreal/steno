@@ -11,11 +11,12 @@ mod format;
 
 pub use commands::COMMANDS;
 pub use dictionary::Dictionary;
+pub use format::FmtState;
 
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TextConfig {
     /// Apply the voice command table.
     pub commands: bool,
@@ -42,20 +43,20 @@ impl TextPipeline {
         Self { cfg, dict }
     }
 
-    /// Streaming: process one decoded segment, carrying sentence
-    /// capitalization state across segments (pass the returned bool to
-    /// the next call). `scratch that` can only delete within the current
-    /// segment — earlier segments are already emitted.
-    pub fn process_stream(&self, raw: &str, capitalize: bool) -> (String, bool) {
+    /// Streaming: process one decoded segment, carrying formatter state
+    /// (capitalization, quote state) across segments — pass the returned
+    /// state to the next call. `scratch that` can only delete within the
+    /// current segment — earlier segments are already emitted.
+    pub fn process_stream(&self, raw: &str, state: format::FmtState) -> (String, format::FmtState) {
         let mut s = raw.to_string();
         if self.cfg.commands {
             s = commands::apply(&s);
         }
         s = self.dict.apply(&s);
         if self.cfg.format {
-            format::format_with(&s, capitalize)
+            format::format_with(&s, state)
         } else {
-            (s.trim().to_string(), capitalize)
+            (s.trim().to_string(), state)
         }
     }
 }

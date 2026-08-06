@@ -335,11 +335,11 @@ mod tests {
         ]);
         let pipe = crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
         // "period" fired as a command; the override is dead.
-        assert_eq!(pipe.process_stream("wait period", true).0, "Wait.");
+        assert_eq!(pipe.process_stream("wait period", Default::default()).0, "Wait.");
         // "scratch that" fired as a command, not replaced with KEPT.
-        assert_eq!(pipe.process_stream("oops scratch that", true).0, "");
+        assert_eq!(pipe.process_stream("oops scratch that", Default::default()).0, "");
         // Non-colliding overrides still apply to command output.
-        assert_eq!(pipe.process_stream("new york period", true).0, "NY.");
+        assert_eq!(pipe.process_stream("new york period", Default::default()).0, "NY.");
     }
 
     #[test]

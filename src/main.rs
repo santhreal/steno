@@ -150,13 +150,13 @@ fn main() -> Result<()> {
 
     struct StreamCtx {
         emitter: output::Emitter,
-        capitalize: bool,
+        state: text::FmtState,
         /// Sink errors cannot cross the FFI callback; the first one lands here.
         error: Option<String>,
     }
     let ctx = std::rc::Rc::new(std::cell::RefCell::new(StreamCtx {
         emitter: output::Emitter::new(mode),
-        capitalize: true,
+        state: text::FmtState::default(),
         error: None,
     }));
     let ctx2 = ctx.clone();
@@ -165,12 +165,12 @@ fn main() -> Result<()> {
         if c.error.is_some() {
             return; // a dead emitter must not spam further errors
         }
-        let (text, cap) = if cli.raw {
-            (raw.trim().to_string(), c.capitalize)
+        let (text, state) = if cli.raw {
+            (raw.trim().to_string(), c.state)
         } else {
-            pipeline.process_stream(raw, c.capitalize)
+            pipeline.process_stream(raw, c.state)
         };
-        c.capitalize = cap;
+        c.state = state;
         if let Err(e) = c.emitter.push(&text) {
             log::error!("emit failed: {e}");
             c.error = Some(e.to_string());
@@ -182,6 +182,7 @@ fn main() -> Result<()> {
     let mut ctx = ctx.borrow_mut();
     if let Some(e) = ctx.error.take() {
         overlay.set(overlay::Stage::Error);
+        overlay.flash(cfg.ui.done_flash_ms); // keep the error stage visible
         anyhow::bail!("{e}");
     }
     let started = ctx.emitter.started();
@@ -190,9 +191,7 @@ fn main() -> Result<()> {
         log::debug!("empty transcript, nothing emitted");
     }
     overlay.set(overlay::Stage::Done);
-    if overlay.active() {
-        std::thread::sleep(Duration::from_millis(cfg.ui.done_flash_ms));
-    }
+    overlay.flash(cfg.ui.done_flash_ms);
     Ok(())
 }
 

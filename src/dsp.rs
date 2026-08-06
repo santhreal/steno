@@ -13,7 +13,7 @@ use std::path::Path;
 pub const WHISPER_RATE: u32 = 16_000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DspConfig {
     /// Normalize recordings toward this RMS (0..1). Quiet mics are the top
     /// cause of bad whisper decodes.
@@ -33,7 +33,7 @@ impl Default for DspConfig {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VadConfig {
     /// Stop after this much continuous trailing silence.
     pub silence_ms: u32,

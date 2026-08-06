@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     /// Show the bottom-center status overlay (X11 only).
     pub overlay: bool,
@@ -48,23 +48,27 @@ fn label(stage: Stage) -> &'static str {
 
 pub struct Overlay {
     tx: Option<Sender<Stage>>,
+    /// Set when the overlay thread failed (no X, no font, X error).
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Overlay {
     /// Start the overlay thread, or a no-op handle when disabled/unavailable.
     pub fn start(cfg: &UiConfig) -> Self {
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if !cfg.overlay || std::env::var_os("DISPLAY").is_none() {
-            return Self { tx: None };
+            return Self { tx: None, failed };
         }
         let (tx, rx) = channel::<Stage>();
+        let failed2 = failed.clone();
         match thread::Builder::new()
             .name("dictate-overlay".into())
-            .spawn(move || run(rx))
+            .spawn(move || run(rx, failed2))
         {
-            Ok(_) => Self { tx: Some(tx) },
+            Ok(_) => Self { tx: Some(tx), failed },
             Err(e) => {
                 log::debug!("overlay disabled: cannot spawn thread: {e}");
-                Self { tx: None }
+                Self { tx: None, failed }
             }
         }
     }
@@ -76,24 +80,35 @@ impl Overlay {
         }
     }
 
-    /// True when the overlay window actually exists.
+    /// True unless the overlay is disabled or already known-dead. (The
+    /// thread starts before recording, so by the first stage change it has
+    /// had ample time to map the window or fail.)
     pub fn active(&self) -> bool {
-        self.tx.is_some()
+        self.tx.is_some() && !self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Keep the final stage visible briefly before exit tears the window down.
+    pub fn flash(&self, ms: u64) {
+        if self.active() {
+            thread::sleep(Duration::from_millis(ms));
+        }
     }
 }
 
 // Dropping the Overlay closes the channel; the thread notices and
 // destroys the window before exiting.
 
-fn run(rx: Receiver<Stage>) {
+fn run(rx: Receiver<Stage>, failed: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     if let Err(e) = run_inner(&rx) {
         log::debug!("overlay disabled: {e}");
+        failed.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
+    use x11rb::wrapper::ConnectionExt as _; // change_property8; must not shadow xproto::ConnectionExt
 
     let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
@@ -104,8 +119,8 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
     const W: i32 = 320;
     const H: i32 = 34;
     const MARGIN: i32 = 80;
-    let x = ((sw - W) / 2) as i16;
-    let y = (sh - H - MARGIN) as i16;
+    let x = ((sw - W) / 2).clamp(0, i32::from(i16::MAX)) as i16;
+    let y = (sh - H - MARGIN).clamp(0, i32::from(i16::MAX)) as i16;
 
     let win = conn.generate_id()?;
     conn.create_window(
@@ -129,12 +144,26 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
         win,
         &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
     )?;
+    // Name the window so tests/debuggers can find it.
+    conn.change_property8(
+        PropMode::REPLACE,
+        win,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        b"dictate",
+    )?;
 
-    // Core X font: no fontconfig/freetype dependency. Try a few common ones.
+    // Core X font: no fontconfig/freetype dependency. Try a few common
+    // ones; check() forces the round-trip so a BadName actually fails
+    // here instead of surfacing asynchronously mid-draw.
     let font = conn.generate_id()?;
     let mut opened = false;
     for name in [&b"9x15bold"[..], b"9x15", b"fixed"] {
-        if conn.open_font(font, name).is_ok() {
+        let ok = conn
+            .open_font(font, name)
+            .map(|cookie| cookie.check().is_ok())
+            .unwrap_or(false);
+        if ok {
             opened = true;
             break;
         }

@@ -31,6 +31,10 @@ impl Emitter {
     }
 
     /// Emit one processed chunk. Empty chunks are skipped.
+    ///
+    /// This runs inside whisper-rs's FFI callback, where a panic would
+    /// cross an `extern "C"` boundary and ABORT the process — every error
+    /// path here MUST return `Err`, never panic (no print!()/unwrap()).
     pub fn push(&mut self, chunk: &str) -> Result<()> {
         if chunk.is_empty() {
             return Ok(());
@@ -39,12 +43,20 @@ impl Emitter {
         match self.mode {
             OutputMode::Stdout => {
                 use std::io::Write;
-                print!("{piece}");
-                std::io::stdout().flush().context("failed to flush stdout")?;
+                let mut out = std::io::stdout().lock();
+                out.write_all(piece.as_bytes())
+                    .and_then(|()| out.flush())
+                    .context("failed to write transcript to stdout")?;
+                self.last = piece.chars().last();
             }
-            OutputMode::Type => type_text(&piece)?,
+            OutputMode::Type => {
+                // Track the last character ACTUALLY typed (sanitized), so
+                // a trailing stripped control char can't skew the next join.
+                let typed = sanitize_for_typing(&piece);
+                type_text(&typed)?;
+                self.last = typed.chars().last();
+            }
         }
-        self.last = piece.chars().last();
         Ok(())
     }
 
@@ -56,7 +68,11 @@ impl Emitter {
     /// Finish the stream: trailing newline on stdout, nothing to do for typing.
     pub fn finish(&mut self) -> Result<()> {
         if self.mode == OutputMode::Stdout && self.last.is_some() {
-            println!();
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            out.write_all(b"\n")
+                .and_then(|()| out.flush())
+                .context("failed to write transcript to stdout")?;
         }
         Ok(())
     }

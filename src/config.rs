@@ -11,8 +11,7 @@ use crate::overlay::UiConfig;
 use crate::text::TextConfig;
 
 // deny_unknown_fields: a typo'd key must fail loudly, not be silently
-// ignored (this only covers top-level keys; nested tables live in
-// dsp.rs/text/mod.rs).
+// ignored. Every nested table sets it too.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -110,6 +109,12 @@ impl Config {
         ensure!(
             self.max_record_secs >= 1,
             "invalid max_record_secs = 0 in {} — set it to at least 1 second",
+            path.display()
+        );
+        ensure!(
+            self.ui.done_flash_ms <= 10_000,
+            "invalid done_flash_ms = {} in {} — set it to at most 10000 (10 seconds)",
+            self.ui.done_flash_ms,
             path.display()
         );
         Ok(())

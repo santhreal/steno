@@ -27,19 +27,44 @@ fn is_closing(c: char) -> bool {
     matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '%' | ')' | ']' | '}')
 }
 
-/// Streaming entry point: `capitalize_first` carries sentence state across
-/// chunks (false = continuing mid-sentence, so the first letter is NOT
-/// forced uppercase). Returns the formatted text and the capitalization
-/// state to feed the next chunk — true when the text ends at a sentence
-/// boundary ('.', '!', '?', newline).
-pub fn format_with(input: &str, capitalize_first: bool) -> (String, bool) {
+/// Formatter state carried across streamed chunks. Quote and bracket
+/// state must survive segment boundaries — otherwise a closing quote that
+/// lands in the NEXT chunk is misread as an opening one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FmtState {
+    /// Next alphabetic char starts a sentence (begin forced uppercase).
+    pub capitalize_next: bool,
+    pub in_dquote: bool,
+    pub in_squote: bool,
+    /// Last emitted char was an opener (`(`, `[`, `{`, or opening quote):
+    /// suppresses the space before the next char.
+    pub last_open: bool,
+}
+
+impl Default for FmtState {
+    /// Fresh text: start of a sentence, outside any quote.
+    fn default() -> Self {
+        Self {
+            capitalize_next: true,
+            in_dquote: false,
+            in_squote: false,
+            last_open: false,
+        }
+    }
+}
+
+/// Streaming entry point: pass [`FmtState::default`] for the first chunk,
+/// then feed each returned state into the next call.
+pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     let mut pending_space = false;
-    let mut capitalize_next = capitalize_first;
-    let mut in_dquote = false;
-    let mut in_squote = false;
-    let mut last_open = false;
+    let FmtState {
+        mut capitalize_next,
+        mut in_dquote,
+        mut in_squote,
+        mut last_open,
+    } = state;
 
     while let Some(c) = chars.next() {
         match c {
@@ -112,40 +137,72 @@ pub fn format_with(input: &str, capitalize_first: bool) -> (String, bool) {
             matches!(c, '(' | '[' | '{') || (c == '"' && in_dquote) || (squote && in_squote);
     }
     // A trailing newline also means the next chunk starts a sentence.
-    let cap_next = capitalize_next || out.ends_with('\n');
-    (out, cap_next)
+    if out.ends_with('\n') {
+        capitalize_next = true;
+    }
+    (
+        out,
+        FmtState {
+            capitalize_next,
+            in_dquote,
+            in_squote,
+            last_open,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_with;
+    use super::{FmtState, format_with};
 
     /// One-shot convenience for tests: format a whole string at once.
     fn format(input: &str) -> String {
-        format_with(input, true).0
+        format_with(input, FmtState::default()).0
     }
 
     #[test]
     fn stream_state_carries_across_chunks() {
         // Mid-sentence continuation: no forced capital, state stays false.
-        let (a, cap) = format_with("the quick", true);
+        let (a, st) = format_with("the quick", FmtState::default());
         assert_eq!(a, "The quick");
-        assert!(!cap);
-        let (b, cap) = format_with("brown fox.", cap);
+        assert!(!st.capitalize_next);
+        let (b, st) = format_with("brown fox.", st);
         assert_eq!(b, "brown fox.");
-        assert!(cap, "sentence-final period must set next-chunk capital");
-        let (c, _) = format_with("done here", cap);
+        assert!(st.capitalize_next, "sentence-final period must set next-chunk capital");
+        let (c, _) = format_with("done here", st);
         assert_eq!(c, "Done here");
     }
 
     #[test]
     fn stream_pronoun_and_newline_state() {
         // The pronoun rule applies mid-sentence too.
-        let (a, _) = format_with("then i left", false);
+        let mid = FmtState { capitalize_next: false, ..FmtState::default() };
+        let (a, _) = format_with("then i left", mid);
         assert_eq!(a, "then I left");
         // A trailing newline means the next chunk starts a sentence.
-        let (_, cap) = format_with("first line\n", false);
-        assert!(cap);
+        let (_, st) = format_with("first line\n", mid);
+        assert!(st.capitalize_next);
+    }
+
+    #[test]
+    fn stream_quote_state_survives_segment_boundary() {
+        // Regression: a quote opened in one chunk must close in the next.
+        // Before FmtState carried quote state, the closing quote was
+        // misread as an opening one, mangling spacing.
+        let (a, st) = format_with("say \"hello", FmtState::default());
+        assert_eq!(a, "Say \"hello");
+        assert!(st.in_dquote);
+        let (b, st) = format_with(" world\" now", st);
+        // The leading space is stripped (the Emitter's joiner re-adds it).
+        assert_eq!(b, "world\" now");
+        assert!(!st.in_dquote);
+        assert_eq!(format("say \"hello world\" now"), format!("{a} {b}"));
+
+        // Single quotes: same boundary behavior.
+        let (a, st) = format_with("the ' red", FmtState::default());
+        assert!(st.in_squote);
+        let (b, _) = format_with(" one ' here", st);
+        assert_eq!(format!("{a} {b}"), format("the ' red one ' here"));
     }
 
     #[test]
