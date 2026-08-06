@@ -61,8 +61,9 @@ set `model_path` in the config) to choose.
 ## Use it
 
 **Record and print.** Run `dictate`, speak, pause. Recording stops after
-about a second of silence (configurable). The text is printed, so it
-composes: `dictate | xclip -selection clipboard`.
+about a second of silence (configurable). Text streams to stdout segment
+by segment as it is decoded, so it composes: `dictate | xclip -selection
+clipboard`.
 
 **Record and type.** Typing is fail-closed: it works only after you arm it
 once in `~/.config/dictate/config.toml`:
@@ -73,10 +74,15 @@ type_output = true
 
 Then `dictate` (or `dictate --type`) types the result into the currently
 focused window via `xdotool` (X11; install with `sudo apt install
-xdotool`), and `dictate --stdout` prints instead for one run. Bind it to a
+xdotool`), and `dictate --stdout` prints instead for one run. Typed text
+streams in as it is decoded; the clipboard is never touched. Bind it to a
 global shortcut for real dictation: GNOME Settings → Keyboard → Custom
 Shortcuts, command `/path/to/dictate`, e.g. Ctrl+Space. Click into any
 text field, press the shortcut, speak.
+
+**Status bar.** While running, a small borderless bar at the bottom center
+of your primary monitor shows the stage: recording, transcribing, done.
+It takes no focus and no input. Disable it with `[ui] overlay = false`.
 
 A bare `dictate --type` without the config entry fails with an error —
 typing is deliberately not enableable from the command line, so no script,
@@ -170,6 +176,10 @@ max_gain = 8.0           # ...but never boost more than this
 [text]
 commands = true
 format = true
+
+[ui]
+overlay = true         # bottom-center status bar (X11)
+done_flash_ms = 600    # how long done/error stays visible
 ```
 
 ## How it works
@@ -178,8 +188,8 @@ format = true
 mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── whisper.cpp decode (greedy, temperature fallback)
-    ── voice commands → dictionary → formatter
-    ── stdout, or synthetic keystrokes (xdotool, when armed)
+    ── voice commands → dictionary → formatter, per decoded segment
+    ── streamed to stdout, or synthetic keystrokes (xdotool, when armed)
 ```
 
 Recording ends on an energy-VAD endpoint (silence after speech), so there is

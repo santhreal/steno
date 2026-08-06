@@ -65,7 +65,10 @@ impl Overlay {
             .name("dictate-overlay".into())
             .spawn(move || run(rx, failed2))
         {
-            Ok(_) => Self { tx: Some(tx), failed },
+            Ok(_) => Self {
+                tx: Some(tx),
+                failed,
+            },
             Err(e) => {
                 log::debug!("overlay disabled: cannot spawn thread: {e}");
                 Self { tx: None, failed }
@@ -98,6 +101,37 @@ impl Overlay {
 // Dropping the Overlay closes the channel; the thread notices and
 // destroys the window before exiting.
 
+/// Geometry of the primary monitor's active CRTC, or None when RandR or
+/// a primary output is unavailable.
+fn primary_rect<C: x11rb::connection::Connection>(
+    conn: &C,
+    root: u32,
+) -> Option<(i32, i32, i32, i32)> {
+    use x11rb::protocol::randr;
+    let output = randr::get_output_primary(conn, root)
+        .ok()?
+        .reply()
+        .ok()?
+        .output;
+    if output == 0 {
+        return None;
+    }
+    let info = randr::get_output_info(conn, output, 0).ok()?.reply().ok()?;
+    if info.crtc == 0 {
+        return None;
+    }
+    let c = randr::get_crtc_info(conn, info.crtc, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some((
+        i32::from(c.x),
+        i32::from(c.y),
+        i32::from(c.width),
+        i32::from(c.height),
+    ))
+}
+
 fn run(rx: Receiver<Stage>, failed: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     if let Err(e) = run_inner(&rx) {
         log::debug!("overlay disabled: {e}");
@@ -112,15 +146,19 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
 
     let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
-    let (sw, sh) = (
-        i32::from(screen.width_in_pixels),
-        i32::from(screen.height_in_pixels),
-    );
     const W: i32 = 320;
     const H: i32 = 34;
     const MARGIN: i32 = 80;
-    let x = ((sw - W) / 2).clamp(0, i32::from(i16::MAX)) as i16;
-    let y = (sh - H - MARGIN).clamp(0, i32::from(i16::MAX)) as i16;
+    // Center on the PRIMARY monitor; fall back to the whole root (which
+    // on multi-monitor setups would straddle the bezel between screens).
+    let (ox, oy, ow, oh) = primary_rect(&conn, screen.root).unwrap_or((
+        0,
+        0,
+        i32::from(screen.width_in_pixels),
+        i32::from(screen.height_in_pixels),
+    ));
+    let x = (ox + (ow - W) / 2).clamp(0, i32::from(i16::MAX)) as i16;
+    let y = (oy + oh - H - MARGIN).clamp(0, i32::from(i16::MAX)) as i16;
 
     let win = conn.generate_id()?;
     conn.create_window(
@@ -140,10 +178,7 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
             .event_mask(EventMask::EXPOSURE),
     )?;
     conn.map_window(win)?;
-    conn.configure_window(
-        win,
-        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-    )?;
+    conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
     // Name the window so tests/debuggers can find it.
     conn.change_property8(
         PropMode::REPLACE,
