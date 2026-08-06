@@ -1,5 +1,5 @@
 //! Background dictation daemon: keep the whisper model resident, grab
-//! Ctrl+Space, hold-to-talk → type into the focused window.
+//! Caps Lock, hold-to-talk → type into the focused window.
 //!
 //! Lifecycle mirrors the old `speak` helper:
 //!   dictate start   — spawn daemon, print "running" + hotkey
@@ -127,7 +127,7 @@ pub fn status() -> Result<()> {
     match is_running()? {
         Some(pid) => {
             println!("Dictation running (PID {pid}).");
-            println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
+            println!("Hotkey: hold Caps Lock to speak; any other key cancels.");
             println!("Log: {}", log_path()?.display());
         }
         None => println!("Dictation not running."),
@@ -189,7 +189,7 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     let _lock = lifecycle_lock()?;
     if let Some(pid) = is_running()? {
         println!("Dictation already running (PID {pid}).");
-        println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
+        println!("Hotkey: hold Caps Lock to speak; any other key cancels.");
         return Ok(());
     }
 
@@ -259,7 +259,7 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     let _ = fs::remove_file(&ready);
 
     println!("Dictation running (PID {}).", child.id());
-    println!("Hotkey: hold Ctrl+Space to speak; any other key cancels.");
+    println!("Hotkey: hold Caps Lock to speak; any other key cancels.");
     println!("Log: {}", log_path()?.display());
     Ok(())
 }
@@ -320,7 +320,7 @@ fn preflight(cli: &Cli) -> Result<()> {
     }
     let _ = config::resolve_model(cli.model.as_ref(), &cfg)?;
     if std::env::var_os("DISPLAY").is_none() {
-        bail!("DISPLAY is unset — the daemon needs X11 for Ctrl+Space and typing");
+        bail!("DISPLAY is unset — the daemon needs X11 for Caps Lock and typing");
     }
     Ok(())
 }
@@ -371,16 +371,16 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     let text_cfg = cfg.text;
     let overlay = Overlay::start(&cfg.ui);
 
-    let mut hotkey = Hotkey::grab_ctrl_space()?;
+    let mut hotkey = Hotkey::grab_caps_lock()?;
     // Ready: model loaded AND hotkey grabbed. Tell the parent.
     if let Ok(ready) = ready_path() {
         let _ = fs::write(&ready, format!("{}", std::process::id()));
     }
     println!(
-        "Dictation running (PID {}). Hold Ctrl+Space to speak.",
+        "Dictation running (PID {}). Hold Caps Lock to speak.",
         std::process::id()
     );
-    eprintln!("dictate: model ready. Hotkey: hold Ctrl+Space.");
+    eprintln!("dictate: model ready. Hotkey: hold Caps Lock.");
 
     let record_cfg = audio::RecordConfig {
         device: cli.device.clone(),

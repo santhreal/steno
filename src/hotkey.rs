@@ -1,13 +1,17 @@
-//! Global Ctrl+Space grab via X11 (`XGrabKey` on the root window).
+//! Global Caps Lock grab via X11 (`XGrabKey` on the root window).
 //!
 //! Hold = record, release = stop. While recording, ANY other key cancels
 //! the utterance (listened passively via XInput2 raw key events — the
 //! key still reaches the focused app, nothing is swallowed). Modifier
-//! keys and Space itself never cancel: pressing Ctrl+Space must not
-//! instantly cancel the recording it starts.
+//! keys never cancel.
+//!
+//! Caps Lock is fully swallowed while the daemon runs: the keycode is
+//! remapped to NoSymbol for the daemon's lifetime (restored on exit),
+//! so the Lock modifier can never latch and caps state never toggles —
+//! a passive grab alone would NOT stop XKB from locking caps on press.
 //!
 //! Failures are loud: if another client already owns the grab (e.g. a
-//! GNOME custom shortcut on the same combo), we say so instead of
+//! GNOME custom shortcut on the same key), we say so instead of
 //! silently never firing.
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -21,8 +25,11 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
-/// X11 keysym for Space (`XK_space`).
-const XK_SPACE: Keysym = 0x0020;
+/// X11 keysym for Caps Lock (`XK_Caps_Lock`).
+const XK_CAPS_LOCK: Keysym = 0xffe5;
+/// `NoSymbol` — remapping the Caps Lock keycode to this disables the
+/// caps toggle entirely while keeping the raw key events.
+const NO_SYMBOL: Keysym = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
@@ -38,11 +45,14 @@ pub enum HotkeyEvent {
 pub struct Hotkey {
     conn: RustConnection,
     root: Window,
-    space: Keycode,
+    /// Caps Lock keycode — the push-to-talk trigger.
+    trigger: Keycode,
+    /// Keysyms the trigger keycode had before we remapped it to
+    /// NoSymbol; restored on Drop. Synthesized as plain Caps_Lock when
+    /// a previous crashed daemon left it unmapped.
+    orig_keysyms: Vec<Keysym>,
     /// Modifier keycodes (Shift/Ctrl/Alt/Super/Lock/Mod*): never cancel.
     modifiers: Vec<Keycode>,
-    /// Control keycodes specifically (releasing one ends the hold).
-    control: Vec<Keycode>,
     /// Device id of the "Virtual core XTEST keyboard" slave: its fake key
     /// events (xdotool — including the daemon's OWN typing) must never
     /// cancel an utterance.
@@ -51,7 +61,7 @@ pub struct Hotkey {
     press_at: Option<Instant>,
     /// One peeked event held back from auto-repeat coalescing.
     pending: Option<Event>,
-    /// Modifier masks we grabbed (plain Ctrl + Caps/NumLock variants).
+    /// Modifier masks we grabbed (plain + Caps/NumLock variants).
     masks: Vec<ModMask>,
 }
 
@@ -61,22 +71,43 @@ pub struct Hotkey {
 const CANCEL_GRACE: Duration = Duration::from_millis(150);
 
 impl Hotkey {
-    /// Grab Ctrl+Space system-wide on the default display.
-    pub fn grab_ctrl_space() -> Result<Self> {
+    /// Grab Caps Lock system-wide on the default display, and remap the
+    /// keycode to NoSymbol so the caps toggle is dead while we run.
+    pub fn grab_caps_lock() -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None)
             .context("cannot connect to X11 — is DISPLAY set?")?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
-        let space = keycode_for_keysym(&conn, XK_SPACE)?
-            .ok_or_else(|| anyhow!("keyboard has no Space keycode — cannot bind Ctrl+Space"))?;
+        let trigger = keycode_for_keysym(&conn, XK_CAPS_LOCK)?
+            .ok_or_else(|| anyhow!("keyboard has no Caps Lock keycode — cannot bind it"))?;
 
-        // CapsLock (Lock) and NumLock (Mod2) are sticky; grab every combo
-        // so the hotkey still fires when those are on.
+        // Swallow caps: remap the keycode to NoSymbol for our lifetime.
+        // A passive grab alone does NOT stop XKB from latching Lock on
+        // press; with NoSymbol the key gets no action and the toggle can
+        // never fire. Key events still flow, so our grab still works.
+        let mapping = conn
+            .get_keyboard_mapping(trigger, 1)?
+            .reply()
+            .context("GetKeyboardMapping(Caps Lock) failed")?;
+        let per_slot = mapping.keysyms_per_keycode as usize;
+        let mut orig_keysyms = mapping.keysyms;
+        if orig_keysyms.iter().all(|&k| k == NO_SYMBOL) {
+            // A previous daemon died without restoring. The conventional
+            // mapping for this keycode is plain Caps_Lock.
+            orig_keysyms = vec![XK_CAPS_LOCK];
+        }
+        let dead: Vec<Keysym> = vec![NO_SYMBOL; per_slot.max(1)];
+        conn.change_keyboard_mapping(1, trigger, dead.len() as u8, &dead)?
+            .check()
+            .context("cannot remap Caps Lock to NoSymbol")?;
+
+        // NumLock (Mod2) and friends are sticky; grab every combo so the
+        // hotkey still fires when they are on.
         let masks = [
-            ModMask::CONTROL,
-            ModMask::CONTROL | ModMask::LOCK,
-            ModMask::CONTROL | ModMask::M2,
-            ModMask::CONTROL | ModMask::LOCK | ModMask::M2,
+            ModMask::from(0u16),
+            ModMask::LOCK,
+            ModMask::M2,
+            ModMask::LOCK | ModMask::M2,
         ];
 
         for mask in masks {
@@ -85,15 +116,23 @@ impl Hotkey {
                     false, // owner_events: we alone get the events
                     root,
                     mask,
-                    space,
+                    trigger,
                     GrabMode::ASYNC,
                     GrabMode::ASYNC,
                 )
-                .with_context(|| format!("XGrabKey(Ctrl+Space, mask={mask:?}) request failed"))?;
+                .with_context(|| format!("XGrabKey(CapsLock, mask={mask:?}) request failed"))?;
             if let Err(e) = cookie.check() {
+                // Restore the mapping before reporting failure.
+                let _ = conn.change_keyboard_mapping(
+                    1,
+                    trigger,
+                    orig_keysyms.len() as u8,
+                    &orig_keysyms,
+                );
+                let _ = conn.flush();
                 bail!(
-                    "XGrabKey(Ctrl+Space) failed ({e}). Another client may already own that \
-                     shortcut — remove any GNOME/KDE custom shortcut on Ctrl+Space and retry."
+                    "XGrabKey(CapsLock) failed ({e}). Another client may already own that \
+                     shortcut — remove any GNOME/KDE binding on Caps Lock and retry."
                 );
             }
         }
@@ -126,12 +165,6 @@ impl Hotkey {
             .reply()
             .context("GetModifierMapping failed")?;
         let modifiers = modifier_reply.keycodes;
-        // Slot order: Shift, Lock, Control, Mod1..Mod5.
-        let per_slot = (modifiers.len() / 8).max(1);
-        let control: Vec<Keycode> = modifiers
-            .get(2 * per_slot..3 * per_slot)
-            .unwrap_or(&[])
-            .to_vec();
         // Find the XTEST slave so its synthetic keys can't cancel.
         let xtest_device = xinput::xi_query_device(&conn, xinput::Device::ALL)
             .ok()
@@ -151,9 +184,9 @@ impl Hotkey {
         Ok(Self {
             conn,
             root,
-            space,
+            trigger,
+            orig_keysyms,
             modifiers,
-            control,
             xtest_device,
             press_at: None,
             pending: None,
@@ -171,10 +204,10 @@ impl Hotkey {
         while let Ok(Some(_)) = self.conn.poll_for_event() {}
     }
 
-    /// The resolved Space keycode (used by the off-host test harness).
+    /// The resolved trigger keycode (used by the off-host test harness).
     #[allow(dead_code)]
-    pub fn space_keycode(&self) -> Keycode {
-        self.space
+    pub fn trigger_keycode(&self) -> Keycode {
+        self.trigger
     }
 
     /// Block until the next Press or Release of the grabbed combo.
@@ -206,7 +239,7 @@ impl Hotkey {
             }
             self.conn
                 .flush()
-                .context("X11 flush failed while waiting for Ctrl+Space")?;
+                .context("X11 flush failed while waiting for Caps Lock")?;
             let ev = match self.pending.take() {
                 Some(e) => Some(e),
                 None => self.conn.poll_for_event().context("X11 poll failed")?,
@@ -232,8 +265,8 @@ impl Hotkey {
                     continue;
                 }
                 Some(Event::KeyPress(ev)) => {
-                    if ev.detail != self.space {
-                        // While the grab is active (combo held), other keys
+                    if ev.detail != self.trigger {
+                        // While the grab is active (key held), other keys
                         // are delivered to us: that is the user cancelling.
                         if *held
                             && !self.modifiers.contains(&ev.detail)
@@ -244,9 +277,6 @@ impl Hotkey {
                         }
                         continue;
                     }
-                    if u16::from(ev.state) & u16::from(ModMask::CONTROL) == 0 {
-                        continue;
-                    }
                     if *held {
                         continue; // auto-repeat
                     }
@@ -255,12 +285,7 @@ impl Hotkey {
                     return Ok(HotkeyEvent::Press);
                 }
                 Some(Event::KeyRelease(ev)) => {
-                    if !*held {
-                        continue;
-                    }
-                    let space_up = ev.detail == self.space;
-                    let ctrl_up = self.control.contains(&ev.detail);
-                    if !space_up && !ctrl_up {
+                    if !*held || ev.detail != self.trigger {
                         continue;
                     }
                     // X auto-repeat emits a release+press pair with the
@@ -295,7 +320,7 @@ impl Hotkey {
                     if u32::from(key) != ev.detail {
                         continue; // out-of-range keycode: not a cancel candidate
                     }
-                    if key == self.space || self.modifiers.contains(&key) || !self.past_grace() {
+                    if key == self.trigger || self.modifiers.contains(&key) || !self.past_grace() {
                         continue;
                     }
                     *held = false;
@@ -310,8 +335,16 @@ impl Hotkey {
 impl Drop for Hotkey {
     fn drop(&mut self) {
         for mask in &self.masks {
-            let _ = self.conn.ungrab_key(self.space, self.root, *mask);
+            let _ = self.conn.ungrab_key(self.trigger, self.root, *mask);
         }
+        // Hand Caps Lock back: restore the keycode's original keysyms so
+        // the caps toggle works again once the daemon exits.
+        let _ = self.conn.change_keyboard_mapping(
+            1,
+            self.trigger,
+            self.orig_keysyms.len() as u8,
+            &self.orig_keysyms,
+        );
         let _ = self.conn.flush();
     }
 }

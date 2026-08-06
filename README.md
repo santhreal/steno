@@ -8,7 +8,7 @@ out. No cloud, no GPU required. One-shot or a background daemon.
 and prints it — or types it into whatever window is focused.
 
 Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
-keeps the model loaded and listens for **Ctrl+Space** (hold to talk).
+keeps the model loaded and listens for **Caps Lock** (hold to talk).
 
 ```
 $ dictate
@@ -74,22 +74,22 @@ model_path = "~/.local/share/dictate/models/ggml-small.en.bin"
 ```
 $ dictate start
 Dictation running (PID 12345).
-Hotkey: hold Ctrl+Space to speak.
+Hotkey: hold Caps Lock to speak.
 Log: /home/you/.cache/dictate/dictate.log
 
 $ dictate status
 Dictation running (PID 12345).
-Hotkey: hold Ctrl+Space to speak.
+Hotkey: hold Caps Lock to speak.
 
 $ dictate stop
 Dictation stopped.
 ```
 
-Hold **Ctrl+Space**, speak, release. The daemon already has the model in
+Hold **Caps Lock**, speak, release. The daemon already has the model in
 memory, so there is no cold-start per utterance. `dictate restart` bounces
 it; `dictate start --foreground` runs in the terminal for debugging.
 Make sure no other app (GNOME custom shortcut, etc.) already owns
-Ctrl+Space.
+Caps Lock.
 
 **Record and print (one-shot).** Run `dictate`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to
@@ -217,7 +217,7 @@ mic ── capture (cpal/ALSA)
 ```
 
 One-shot mode ends on an energy-VAD endpoint (silence after speech). Daemon
-mode ends when you release Ctrl+Space. Either way each utterance gets a
+mode ends when you release Caps Lock. Either way each utterance gets a
 fresh decode state — nothing leaks between them.
 
 ## Notes and limits

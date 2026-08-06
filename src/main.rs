@@ -5,7 +5,7 @@
 //! One-shot: `dictate` records one utterance (VAD endpoint), transcribes it
 //! locally, and prints or types the result. `dictate clip.wav` transcribes a
 //! file. Daemon: `dictate start` keeps the model loaded system-wide; hold
-//! Ctrl+Space to dictate into the focused window; `dictate stop` tears it down.
+//! Caps Lock to dictate into the focused window; `dictate stop` tears it down.
 
 mod audio;
 mod config;
@@ -80,7 +80,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Load the model system-wide and listen for Ctrl+Space (hold to talk).
+    /// Load the model system-wide and listen for Caps Lock (hold to talk).
     Start {
         /// Run in this terminal instead of detaching.
         #[arg(long)]
