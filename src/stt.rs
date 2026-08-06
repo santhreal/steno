@@ -81,6 +81,11 @@ impl Transcriber {
         params.set_temperature(0.0);
         params.set_temperature_inc(0.2);
 
+        // Upstream whisper-rs 0.16 notes (ReviewPipeline #4/#5): the
+        // callback thunk is Box::into_raw'd per decode and never
+        // reclaimed (~48 bytes per utterance — a slow leak, fixed
+        // upstream only when we upgrade), and non-UTF-8 segments are
+        // silently skipped (we would produce no text, not garbage).
         params.set_segment_callback_safe(move |data: whisper_rs::SegmentCallbackData| {
             sink(&data.text);
         });
