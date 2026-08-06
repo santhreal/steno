@@ -10,6 +10,15 @@
 //!
 //! Matching is case-insensitive, whole-word, longest phrase first.
 //! Replacement text is inserted literally (case as written).
+//!
+//! An override whose phrase collides with a voice command phrase (say
+//! "period") is dead: commands run first (see `mod.rs`) and consume the
+//! spoken words before the dictionary sees them. Entries with an empty
+//! or whitespace-only phrase are dropped at load; they could never match
+//! a real token and would otherwise match everywhere without consuming
+//! input. Entries whose phrase is or ends in punctuation ("...", "e.g.")
+//! silently never match, because the tokenizer splits edge punctuation
+//! off words; write such overrides without the punctuation.
 
 use super::commands::{Tok, match_at, tokenize};
 use anyhow::{Context, Result};
@@ -62,6 +71,10 @@ impl Dictionary {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
+        // Drop phrases with no words (empty or whitespace-only keys,
+        // both legal in TOML). A zero-word phrase matches at every word
+        // without consuming a token, looping `apply` forever.
+        entries.retain(|(k, _)| k.split_whitespace().next().is_some());
         // Longest phrase first (by word count) so greedy matching never
         // lets a short phrase shadow a longer one; tie-break on the
         // phrase text so ordering stays deterministic.
@@ -261,6 +274,64 @@ mod tests {
     fn from_entries_is_empty_reflects_table() {
         assert!(Dictionary::from_entries(Vec::<(String, String)>::new()).is_empty());
         assert!(!Dictionary::from_entries([("a", "b")]).is_empty());
+    }
+
+    /// Regression: empty and whitespace-only keys (both legal TOML) used
+    /// to make `apply` loop forever: a zero-word phrase matches at every
+    /// word position without consuming a token. They are dropped at
+    /// construction, so `is_empty` reflects the usable table.
+    #[test]
+    fn empty_and_whitespace_keys_are_dropped() {
+        assert!(Dictionary::from_entries([("", "x")]).is_empty());
+        assert!(Dictionary::from_entries([("  \t ", "x")]).is_empty());
+        let d = Dictionary::from_entries([("", "boom"), ("a", "b")]);
+        assert_eq!(d.apply("a cat"), "b cat");
+    }
+
+    /// A TOML file with an empty quoted key loads, and the entry is
+    /// ignored rather than hanging the first `apply` call.
+    #[test]
+    fn load_toml_with_empty_key_does_not_hang() {
+        let path = temp_toml("empty-key", "[overrides]\n\"\" = \"boom\"\n\"a\" = \"b\"\n");
+        let d = Dictionary::load(Some(&path)).unwrap();
+        assert_eq!(d.apply("a cat"), "b cat");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn single_character_and_three_way_overlap() {
+        let d = Dictionary::from_entries([("a", "A!")]);
+        assert_eq!(d.apply("a cat sat"), "A! cat sat");
+        let d = Dictionary::from_entries([
+            ("new york", "NY"),
+            ("new york city", "NYC"),
+            ("york", "Y"),
+        ]);
+        assert_eq!(d.apply("a trip to new york city"), "a trip to NYC");
+        assert_eq!(d.apply("new york state"), "NY state");
+        // "york" fires only where no longer phrase starts earlier.
+        assert_eq!(d.apply("yorkshire york"), "yorkshire Y");
+    }
+
+    /// Commands run before the dictionary (fixed pipeline order), so an
+    /// override whose phrase collides with a command phrase never sees
+    /// the spoken words: the command consumes them first. Pins the
+    /// documented winner via the real pipeline.
+    #[test]
+    fn command_phrases_win_over_colliding_dictionary_entries() {
+        let dict = Dictionary::from_entries([
+            ("period", "PERIOD"),
+            ("scratch that", "KEPT"),
+            ("new york", "NY"),
+        ]);
+        let pipe =
+            crate::text::TextPipeline::new(crate::text::TextConfig::default(), dict);
+        // "period" fired as a command; the override is dead.
+        assert_eq!(pipe.process("wait period"), "Wait.");
+        // "scratch that" fired as a command, not replaced with KEPT.
+        assert_eq!(pipe.process("oops scratch that"), "");
+        // Non-colliding overrides still apply to command output.
+        assert_eq!(pipe.process("new york period"), "NY.");
     }
 
     #[test]

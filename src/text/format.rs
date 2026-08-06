@@ -82,7 +82,7 @@ pub fn format(input: &str) -> String {
 
         // Collapse duplicate pause punctuation (see module docs).
         // Dots are excluded: "..." is meaningful.
-        if matches!(c, ',' | ';' | ':' | '!' | '?' | '%') && out.chars().last() == Some(c) {
+        if matches!(c, ',' | ';' | ':' | '!' | '?' | '%') && out.ends_with(c) {
             continue;
         }
 
@@ -212,6 +212,55 @@ mod tests {
         // rule still applies after the final dot.
         assert_eq!(format("wait ... ok"), "Wait... Ok");
         assert_eq!(format("..."), "...");
+    }
+
+    #[test]
+    fn unbalanced_quotes_and_mid_quote_endings() {
+        assert_eq!(format("say \"hi"), "Say \"hi");
+        assert_eq!(format("she said \"stop"), "She said \"stop");
+        assert_eq!(format("\"oops"), "\"Oops");
+    }
+
+    #[test]
+    fn quotes_adjacent_to_newlines() {
+        assert_eq!(format("a\n\" b\"\nc"), "A\n\"B\"\nC");
+    }
+
+    #[test]
+    fn pronoun_i_at_every_boundary() {
+        assert_eq!(format("i i, i. i\ni"), "I I, I. I\nI");
+        assert_eq!(format("\"i\" said (i)"), "\"I\" said (I)");
+    }
+
+    #[test]
+    fn unicode_passthrough() {
+        // Emoji are not alphanumerics; they pass through without spacing
+        // or capitalization side effects. CJK needs no spaces.
+        assert_eq!(format("hello 👋 world"), "Hello 👋 world");
+        assert_eq!(format("你好世界"), "你好世界");
+        assert_eq!(format("你好 世界"), "你好 世界");
+        assert_eq!(format("café — résumé"), "Café — résumé");
+    }
+
+    #[test]
+    fn idempotent_on_adversarial_inputs() {
+        let cases = [
+            "say \"hi",
+            "a\n\" b\"\nc",
+            "i i, i. i\ni",
+            "hello 👋 world … next",
+            "\"'\"",
+            "你好世界 3.14 e.g. wait ... ok",
+            "! ,, ;; ?? %%",
+        ];
+        for x in cases {
+            let once = format(x);
+            assert_eq!(format(&once), once, "not idempotent for {x:?}");
+        }
+        // Long input stays correct and idempotent.
+        let long = "hello world, i said \"quote me\". ".repeat(5_000);
+        let once = format(&long);
+        assert_eq!(format(&once), once);
     }
 
     #[test]

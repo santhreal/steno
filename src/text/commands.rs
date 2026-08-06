@@ -11,7 +11,10 @@ pub enum Action {
     /// Paragraph break (two newlines).
     Paragraph,
     /// Delete everything written since the previous sentence boundary
-    /// (or the whole utterance when there is none).
+    /// ('.', '!', '?', '…', newline), or the whole utterance when there
+    /// is none. When the output already ends at a boundary, the sentence
+    /// that boundary closes is the one deleted, so "done. scratch that"
+    /// and repeated "scratch that" keep deleting whole sentences.
     Scratch,
 }
 
@@ -236,10 +239,20 @@ pub fn apply(input: &str) -> String {
                         }
                     }
                     Action::Scratch => {
-                        // Keep the boundary punctuation itself; delete
-                        // everything written after it.
-                        match out.rfind(['.', '!', '?', '\n']) {
-                            Some(idx) => out.truncate(idx + 1),
+                        // A trailing boundary belongs to the sentence being
+                        // deleted ("done. scratch that" removes "done."),
+                        // so search before any trailing boundary run. Keep
+                        // the boundary found; cut past the whole char: '…'
+                        // is three bytes and `idx + 1` would panic.
+                        const BOUNDARY: [char; 5] = ['.', '!', '?', '\n', '…'];
+                        let cut = out
+                            .trim_end_matches(BOUNDARY)
+                            .char_indices()
+                            .rev()
+                            .find(|&(_, c)| BOUNDARY.contains(&c))
+                            .map(|(i, c)| i + c.len_utf8());
+                        match cut {
+                            Some(n) => out.truncate(n),
                             None => out.clear(),
                         }
                     }
@@ -353,6 +366,8 @@ mod tests {
         assert_eq!(apply("hello new line world"), "hello\nworld");
     }
 
+    /// A dangling sentence gets cleared; the boundary punctuation of a
+    /// completed sentence before it is kept.
     #[test]
     fn scratch_with_prior_sentence_boundary_keeps_boundary() {
         assert_eq!(
@@ -385,6 +400,72 @@ mod tests {
             apply("first line new line second line scratch that"),
             "first line\n"
         );
+    }
+
+    /// Regression: when the output ends exactly at a sentence boundary,
+    /// scratch must delete the sentence that boundary closes, not no-op.
+    /// Previously `rfind` located the trailing boundary itself and
+    /// `truncate(idx + 1)` was an identity, so "period scratch that" kept
+    /// the whole sentence and a second "scratch that" could never delete
+    /// anything more.
+    #[test]
+    fn scratch_after_completed_sentence_deletes_it() {
+        assert_eq!(apply("hello world period scratch that"), "");
+        assert_eq!(apply("one period two period scratch that"), "one .");
+        assert_eq!(apply("sure? strike that"), "");
+        assert_eq!(apply("wow! no delete that"), "wow !");
+    }
+
+    /// Regression: repeated scratch walks back sentence by sentence.
+    #[test]
+    fn repeated_scratch_deletes_one_sentence_each_time() {
+        assert_eq!(
+            apply("one period two period scratch that scratch that"),
+            ""
+        );
+        assert_eq!(
+            apply("a period b period c period scratch that scratch that"),
+            "a ."
+        );
+    }
+
+    /// Regression: the ellipsis the table inserts is sentence-final, so
+    /// scratch must treat it as a boundary. It is also three bytes; the
+    /// truncation must step over the whole char, not `idx + 1`.
+    #[test]
+    fn scratch_treats_ellipsis_as_sentence_boundary() {
+        assert_eq!(apply("wait dot dot dot no nevermind scratch that"), "wait …");
+    }
+
+    /// Command phrases must never match across a newline.
+    #[test]
+    fn phrases_do_not_span_newlines() {
+        assert_eq!(apply("scratch\nthat"), "scratch\nthat");
+        assert_eq!(apply("full\nstop"), "full\nstop");
+        assert_eq!(apply("new\nline"), "new\nline");
+    }
+
+    /// Phrases at the very start and end of the token stream, and input
+    /// that is nothing but punctuation tokens.
+    #[test]
+    fn token_stream_edges_and_punctuation_only() {
+        assert_eq!(apply("period wait"), ". wait");
+        assert_eq!(apply("wait period"), "wait .");
+        assert_eq!(apply("ok full stop"), "ok .");
+        assert_eq!(apply("!?,"), "! ? ,");
+        assert_eq!(apply("..."), ". . .");
+    }
+
+    /// The tokenizer slices with byte offsets; every cut must land on a
+    /// char boundary. Multi-byte punctuation and CJK/emoji words exercise
+    /// the lead/core/tail arithmetic.
+    #[test]
+    fn tokenizer_respects_multibyte_char_boundaries() {
+        assert_eq!(apply("wait… what"), "wait … what");
+        assert_eq!(apply("hi 👋 there"), "hi 👋 there");
+        assert_eq!(apply("你好 世界"), "你好 世界");
+        assert_eq!(apply("你好世界"), "你好世界");
+        assert_eq!(apply("café — résumé"), "café — résumé");
     }
 
     #[test]
