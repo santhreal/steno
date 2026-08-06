@@ -2,19 +2,24 @@
 name = "dictate"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Minimal offline speech-to-text dictation CLI powered by whisper.cpp"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+# Minimal CLI: skip colorized help; keep help/usage/error context/typo suggestions.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 cpal = "0.18"
-env_logger = "0.11"
+# RUST_LOG regex filters and jiff timestamps are unused; keep terminal colors.
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 hound = "3"
 log = "0.4"
-rubato = "4"
+# Only the sinc resampler is used; the default fft_resampler feature pulls in rustfft.
+rubato = { version = "4", default-features = false }
 serde = { version = "1", features = ["derive"] }
-toml = "1"
+# Config and dictionary are only parsed, never serialized; skip the display feature.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 whisper-rs = { version = "0.16", features = ["log_backend"] }
 
 [features]

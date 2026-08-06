@@ -1,2 +1,11 @@
 /target/
+
+# Whisper model files
 *.bin
+
+# Editor and OS files
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
