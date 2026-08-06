@@ -49,6 +49,8 @@ pub struct Hotkey {
     xtest_device: Option<u16>,
     /// When the current hold started (auto-repeat grace for cancels).
     press_at: Option<Instant>,
+    /// One peeked event held back from auto-repeat coalescing.
+    pending: Option<Event>,
     /// Modifier masks we grabbed (plain Ctrl + Caps/NumLock variants).
     masks: Vec<ModMask>,
 }
@@ -154,6 +156,7 @@ impl Hotkey {
             control,
             xtest_device,
             press_at: None,
+            pending: None,
             masks: masks.to_vec(),
         })
     }
@@ -204,7 +207,10 @@ impl Hotkey {
             self.conn
                 .flush()
                 .context("X11 flush failed while waiting for Ctrl+Space")?;
-            let ev = self.conn.poll_for_event().context("X11 poll failed")?;
+            let ev = match self.pending.take() {
+                Some(e) => Some(e),
+                None => self.conn.poll_for_event().context("X11 poll failed")?,
+            };
             if debug {
                 match &ev {
                     Some(Event::KeyPress(e)) => {
@@ -256,6 +262,22 @@ impl Hotkey {
                     let ctrl_up = self.control.contains(&ev.detail);
                     if !space_up && !ctrl_up {
                         continue;
+                    }
+                    // X auto-repeat emits a release+press pair with the
+                    // SAME timestamp for a held key. Peek: a matching press
+                    // means the key never went up — swallow both and stay
+                    // held. Without this every hold longer than the repeat
+                    // delay (~600ms) looked like a release and cut the
+                    // utterance.
+                    if let Ok(Some(peeked)) = self.conn.poll_for_event() {
+                        let is_repeat = matches!(
+                            &peeked,
+                            Event::KeyPress(p) if p.detail == ev.detail && p.time == ev.time
+                        );
+                        if is_repeat {
+                            continue;
+                        }
+                        self.pending = Some(peeked);
                     }
                     *held = false;
                     return Ok(HotkeyEvent::Release);
