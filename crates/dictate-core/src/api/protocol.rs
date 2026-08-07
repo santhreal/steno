@@ -95,6 +95,10 @@ pub enum Event {
         #[serde(rename = "final")]
         final_: bool,
     },
+    /// Final text for a completed `utterance.*` session (fan-out reserved;
+    /// `utterance.stop` also returns the same text in the `Response` result).
+    #[serde(rename = "utterance.done")]
+    UtteranceDone { text: String },
 }
 
 /// Serialize `value` as a single NDJSON line (trailing `\n`).
@@ -251,6 +255,22 @@ mod tests {
         assert_eq!(
             t_v,
             json!({"event":"transcript","text":"hello","final":true})
+        );
+    }
+
+    #[test]
+    fn event_utterance_done_round_trip() {
+        let done = Event::UtteranceDone {
+            text: "hello world".into(),
+        };
+        assert_eq!(
+            decode_line::<Event>(&encode_line(&done).unwrap()).unwrap(),
+            done
+        );
+        let v: Value = serde_json::from_str(encode_line(&done).unwrap().trim_end()).unwrap();
+        assert_eq!(
+            v,
+            json!({"event":"utterance.done","text":"hello world"})
         );
     }
 

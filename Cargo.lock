@@ -384,6 +384,7 @@ dependencies = [
  "base64",
  "cpal",
  "hound",
+ "libc",
  "log",
  "rubato",
  "serde",

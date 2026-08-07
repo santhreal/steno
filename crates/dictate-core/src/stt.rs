@@ -1,6 +1,6 @@
-//! Speech-to-text via sherpa-onnx (Parakeet TDT) on CUDA. One
-//! `Transcriber` per model; the daemon keeps it resident in VRAM for its
-//! whole lifetime, so per-utterance decode is a hot GPU call.
+//! Speech-to-text via sherpa-onnx (Parakeet TDT). One `Transcriber` per
+//! model; the daemon keeps it resident for its whole lifetime. Provider is
+//! `"cuda"` (default) or `"cpu"` — chosen by config, never silently swapped.
 //!
 //! The model is a DIRECTORY with encoder/decoder/joiner ONNX files plus
 //! tokens.txt (e.g. sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8).
@@ -16,14 +16,20 @@ pub struct Transcriber {
 }
 
 impl Transcriber {
-    /// Load a sherpa-onnx transducer model directory onto the GPU.
-    /// Fails closed: a CUDA build that cannot init the GPU errors here
-    /// rather than silently decoding on CPU for the daemon's lifetime.
-    pub fn load(model_dir: &Path, n_threads: u32) -> Result<Self> {
+    /// Load a sherpa-onnx transducer model directory with the given
+    /// execution `provider` (`"cuda"` or `"cpu"`).
+    ///
+    /// Fails closed: if CUDA cannot init, this errors with a corrective
+    /// hint to set `provider = "cpu"` — it never silently falls back.
+    pub fn load(model_dir: &Path, n_threads: u32, provider: &str) -> Result<Self> {
         ensure!(
             (1..=(i32::MAX as u32)).contains(&n_threads),
             "invalid n_threads = {n_threads} — set it between 1 and {}",
             i32::MAX
+        );
+        ensure!(
+            matches!(provider, "cuda" | "cpu"),
+            "invalid provider = {provider:?} — set it to \"cuda\" or \"cpu\" in config.toml"
         );
         let files = model_files(model_dir)?;
 
@@ -33,15 +39,26 @@ impl Transcriber {
         config.model_config.transducer.joiner = Some(path_str(&files.joiner)?);
         config.model_config.tokens = Some(path_str(&files.tokens)?);
         config.model_config.model_type = Some("nemo_transducer".into());
-        config.model_config.provider = Some("cuda".into());
+        config.model_config.provider = Some(provider.to_string());
         config.model_config.num_threads = n_threads as i32;
 
         let recognizer = OfflineRecognizer::create(&config).ok_or_else(|| {
-            anyhow!(
-                "sherpa-onnx failed to load the model from {} — check that the CUDA build is \
-                 installed (SHERPA_ONNX_LIB_DIR), the GPU is free, and the model files are intact",
-                model_dir.display()
-            )
+            if provider == "cuda" {
+                anyhow!(
+                    "sherpa-onnx failed to load the model from {} with provider = \"cuda\" — \
+                     check that the CUDA build is installed (SHERPA_ONNX_LIB_DIR), the GPU is free, \
+                     and the model files are intact. For CI/headless hosts without NVIDIA, set \
+                     provider = \"cpu\" in ~/.config/dictate/config.toml (no silent fallback)",
+                    model_dir.display()
+                )
+            } else {
+                anyhow!(
+                    "sherpa-onnx failed to load the model from {} with provider = \"cpu\" — \
+                     check that sherpa-onnx is installed (SHERPA_ONNX_LIB_DIR) and the model \
+                     files are intact",
+                    model_dir.display()
+                )
+            }
         })?;
         Ok(Self { recognizer })
     }
@@ -163,6 +180,42 @@ mod tests {
         fs::write(dir.join("joiner.onnx"), b"x").unwrap();
         let files = model_files(&dir).unwrap();
         assert!(files.encoder.ends_with("encoder.onnx"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_unknown_provider_before_model_io() {
+        // WHY: provider typos must fail with a config hint, not an ONNX /
+        // CUDA init error. Use a missing path so we never touch the GPU.
+        let missing = std::env::temp_dir().join("dictate-stt-missing-model-dir");
+        let err = Transcriber::load(&missing, 1, "gpu")
+            .err()
+            .expect("unknown provider must error")
+            .to_string();
+        assert!(err.contains("provider"), "got: {err}");
+        assert!(err.contains("gpu"), "got: {err}");
+        assert!(err.contains("cuda") && err.contains("cpu"), "got: {err}");
+    }
+
+    #[test]
+    fn load_accepts_cpu_and_cuda_provider_strings() {
+        // WHY: signature must accept both allowed providers. Incomplete
+        // model dirs fail at model_files — never reaches GPU decode.
+        let dir = std::env::temp_dir().join("dictate-stt-test-provider-partial");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tokens.txt"), b"x").unwrap();
+        for provider in ["cuda", "cpu"] {
+            let err = Transcriber::load(&dir, 1, provider)
+                .err()
+                .expect("incomplete model must error")
+                .to_string();
+            assert!(
+                err.contains("encoder") || err.contains("decoder") || err.contains("joiner"),
+                "provider={provider} should reach model_files: {err}"
+            );
+            assert!(!err.contains("invalid provider"), "got: {err}");
+        }
         fs::remove_dir_all(&dir).ok();
     }
 }

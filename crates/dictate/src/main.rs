@@ -8,6 +8,7 @@
 //! file. Daemon: `dictate start` keeps the model loaded system-wide; hold
 //! Caps Lock to dictate into the focused window; `dictate stop` tears it down.
 
+mod api_cmd;
 mod daemon;
 
 use anyhow::Result;
@@ -76,7 +77,7 @@ enum Command {
     },
     /// Stop the background dictation daemon.
     Stop,
-    /// Show whether the daemon is running.
+    /// Show whether the daemon is running (pidfile check).
     Status,
     /// Restart the background daemon.
     Restart {
@@ -84,9 +85,30 @@ enum Command {
         #[arg(long)]
         foreground: bool,
     },
+    /// Probe the daemon NDJSON API socket (pong + latency).
+    Ping {
+        /// Override API socket path (default: config / XDG runtime).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Daemon NDJSON API helpers (`dictate api status`).
+    Api {
+        #[command(subcommand)]
+        command: ApiCommand,
+    },
     /// Internal worker process started by `dictate start`.
     #[command(hide = true)]
     Daemon,
+}
+
+#[derive(Subcommand, Debug)]
+enum ApiCommand {
+    /// Print daemon API status JSON (stage, pid, model, …).
+    Status {
+        /// Override API socket path (default: config / XDG runtime).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -98,6 +120,14 @@ fn main() -> Result<()> {
         Some(Command::Stop) => return daemon::stop(),
         Some(Command::Status) => return daemon::status(),
         Some(Command::Restart { foreground }) => return daemon::restart(&cli, foreground),
+        Some(Command::Ping { socket }) => {
+            return api_cmd::ping(cli.config.as_deref(), socket);
+        }
+        Some(Command::Api {
+            command: ApiCommand::Status { socket },
+        }) => {
+            return api_cmd::api_status(cli.config.as_deref(), socket);
+        }
         Some(Command::Daemon) => return daemon::run_daemon(&cli),
         None => {}
     }
@@ -339,6 +369,34 @@ mod tests {
         assert!(matches!(
             output_mode(true, true, false).unwrap(),
             OutputMode::Stdout
+        ));
+    }
+
+    #[test]
+    fn clap_parses_ping_and_api_status() {
+        // WHY: --help and subcommand wiring must expose ping / api status
+        // without requiring a live daemon — parse-only regression.
+        let ping = Cli::try_parse_from(["dictate", "ping"]).expect("ping");
+        assert!(matches!(
+            ping.command,
+            Some(Command::Ping { socket: None })
+        ));
+
+        let ping_sock =
+            Cli::try_parse_from(["dictate", "ping", "--socket", "/tmp/x.sock"]).expect("ping sock");
+        assert!(matches!(
+            ping_sock.command,
+            Some(Command::Ping {
+                socket: Some(ref p)
+            }) if p == std::path::Path::new("/tmp/x.sock")
+        ));
+
+        let status = Cli::try_parse_from(["dictate", "api", "status"]).expect("api status");
+        assert!(matches!(
+            status.command,
+            Some(Command::Api {
+                command: ApiCommand::Status { socket: None }
+            })
         ));
     }
 }

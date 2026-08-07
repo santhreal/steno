@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::dsp::{DspConfig, VadConfig};
-use crate::text::{Dictionary, TextConfig};
+use crate::text::{Dictionary, RefineConfig, TextConfig};
 
 /// Status overlay section (`[ui]`).
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +57,10 @@ pub struct Config {
     pub model_path: Option<PathBuf>,
     /// Decode threads. Defaults to half the logical CPUs.
     pub n_threads: u32,
+    /// sherpa-onnx execution provider: `"cuda"` (default) or `"cpu"`.
+    /// CPU is for CI/headless hosts without NVIDIA. Unknown values fail
+    /// closed at load — there is no silent fallback between providers.
+    pub provider: String,
     /// Hard cap on one recording.
     pub max_record_secs: u64,
     /// ARMS typing: when true, results are typed into the focused window
@@ -71,6 +75,8 @@ pub struct Config {
     pub ui: UiConfig,
     /// Phrase overrides applied after voice commands.
     pub dict: DictConfig,
+    /// Post-format ASR cleanup (`[refine]`).
+    pub refine: RefineConfig,
     /// Unix-socket NDJSON API (daemon only).
     pub api: ApiConfig,
 }
@@ -93,6 +99,9 @@ pub struct ApiConfig {
     pub path: Option<PathBuf>,
     /// If set (non-empty), every request must carry a matching `token`.
     pub token: Option<String>,
+    /// When true (default), Linux `SO_PEERCRED` rejects peers whose uid
+    /// differs from the daemon's. Fail closed if credentials cannot be read.
+    pub require_same_uid: bool,
 }
 
 impl Default for ApiConfig {
@@ -101,6 +110,7 @@ impl Default for ApiConfig {
             enabled: true,
             path: None,
             token: None,
+            require_same_uid: true,
         }
     }
 }
@@ -126,6 +136,7 @@ impl Default for Config {
                 .unwrap_or(4)
                 / 2)
             .max(1),
+            provider: "cuda".to_string(),
             max_record_secs: 120,
             type_output: false,
             vad: VadConfig::default(),
@@ -133,6 +144,7 @@ impl Default for Config {
             text: TextConfig::default(),
             ui: UiConfig::default(),
             dict: DictConfig::default(),
+            refine: RefineConfig::default(),
             api: ApiConfig::default(),
         }
     }
@@ -217,6 +229,12 @@ impl Config {
             self.n_threads,
             path.display(),
             i32::MAX
+        );
+        ensure!(
+            matches!(self.provider.as_str(), "cuda" | "cpu"),
+            "invalid provider = {:?} in {} — set it to \"cuda\" or \"cpu\"",
+            self.provider,
+            path.display()
         );
         ensure!(
             self.max_record_secs >= 1,
@@ -417,16 +435,94 @@ mod tests {
         assert!(cfg.type_output);
         assert!(cfg.dict.overrides.is_empty());
         assert!(cfg.model_path.is_none());
+        assert_eq!(cfg.provider, "cuda");
+    }
+
+    #[test]
+    fn provider_defaults_to_cuda() {
+        // WHY: omitted provider must stay cuda so existing configs keep
+        // GPU decode; CPU is opt-in for CI/headless.
+        let cfg = Config::default();
+        assert_eq!(cfg.provider, "cuda");
+        let path = temp_file("provider-default.toml", b"n_threads = 2\n");
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(cfg.provider, "cuda");
+    }
+
+    #[test]
+    fn provider_cuda_and_cpu_parse() {
+        for value in ["cuda", "cpu"] {
+            let path = temp_file(
+                &format!("provider-{value}.toml"),
+                format!("provider = \"{value}\"\n").as_bytes(),
+            );
+            let cfg = load_without_legacy(Some(&path)).unwrap();
+            fs::remove_file(&path).ok();
+            assert_eq!(cfg.provider, value);
+        }
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected() {
+        // WHY: a typo like "gpu" must fail closed with a fix hint — never
+        // silently map onto cuda or cpu.
+        let path = temp_file("provider-bad.toml", b"provider = \"gpu\"\n");
+        let err = error_of(load_without_legacy(Some(&path)));
+        fs::remove_file(&path).ok();
+        assert!(err.contains("provider"), "{err}");
+        assert!(err.contains("gpu"), "{err}");
+        assert!(
+            err.contains("\"cuda\"") || err.contains("cuda"),
+            "error must name allowed values: {err}"
+        );
+        assert!(
+            err.contains("\"cpu\"") || err.contains("cpu"),
+            "error must name allowed values: {err}"
+        );
+    }
+
+    #[test]
+    fn refine_config_defaults_enabled_rules() {
+        // WHY: [refine] defaults on with rules so post-STT cleanup is
+        // active without config; disable via enabled = false.
+        let cfg = Config::default();
+        assert!(cfg.refine.enabled);
+        assert_eq!(cfg.refine.backend, "rules");
+    }
+
+    #[test]
+    fn refine_section_parses_and_unknown_key_rejected() {
+        let path = temp_file(
+            "refine-ok.toml",
+            br#"
+[refine]
+enabled = false
+backend = "rules"
+"#,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(!cfg.refine.enabled);
+        assert_eq!(cfg.refine.backend, "rules");
+        assert_eq!(cfg.refine.make_backend().refine("the the"), "the the");
+
+        let bad = temp_file("refine-bad.toml", b"[refine]\nextra = true\n");
+        let err = error_of(load_without_legacy(Some(&bad)));
+        fs::remove_file(&bad).ok();
+        assert!(err.contains("extra") || err.contains("unknown"), "{err}");
     }
 
     #[test]
     fn api_config_defaults_enabled() {
         // WHY: daemon usefulness — [api] defaults to enabled so `dictate start`
-        // exposes the socket without extra config.
+        // exposes the socket without extra config. require_same_uid defaults true
+        // (fail-closed peer uid gate).
         let cfg = Config::default();
         assert!(cfg.api.enabled);
         assert!(cfg.api.path.is_none());
         assert!(cfg.api.token.is_none());
+        assert!(cfg.api.require_same_uid);
         assert!(cfg.api.required_token().is_none());
         assert!(cfg.api.configured_path().is_none());
     }
@@ -440,11 +536,13 @@ mod tests {
 enabled = false
 path = "/tmp/dictate-test.sock"
 token = "s3cret"
+require_same_uid = false
 "#,
         );
         let cfg = load_without_legacy(Some(&path)).unwrap();
         fs::remove_file(&path).ok();
         assert!(!cfg.api.enabled);
+        assert!(!cfg.api.require_same_uid);
         assert_eq!(
             cfg.api.configured_path().map(|p| p.to_string_lossy().into_owned()),
             Some("/tmp/dictate-test.sock".into())
@@ -470,6 +568,7 @@ token = ""
         let cfg = load_without_legacy(Some(&path)).unwrap();
         fs::remove_file(&path).ok();
         assert!(cfg.api.enabled);
+        assert!(cfg.api.require_same_uid);
         assert!(cfg.api.configured_path().is_none());
         assert!(cfg.api.required_token().is_none());
     }

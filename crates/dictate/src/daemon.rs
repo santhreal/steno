@@ -8,7 +8,6 @@
 //!   dictate restart — stop then start
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -21,12 +20,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use dictate_core::api::{self, ApiError, ApiHandler, ApiResult};
+use dictate_core::api::{self, ApiError, ApiHandler, ApiResult, ServeOptions, UtteranceBuffer, decode_pcm_f32_le_b64};
 use dictate_core::audio;
 use dictate_core::config::{self, ApiConfig, Config};
 use dictate_core::dsp::{self, DspConfig};
 use dictate_core::stt::Transcriber;
-use dictate_core::text::{self, TextConfig, TextPipeline};
+use dictate_core::text::{self, RefineConfig, TextConfig, TextPipeline};
 use dictate_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay};
 use crate::{Cli, emit_transcript};
 
@@ -355,9 +354,14 @@ fn resolve_api_socket(api: &ApiConfig) -> Result<PathBuf> {
 
 /// NDJSON handler backed by the resident model. Typing is never armed here —
 /// API clients only receive text; `type_output` stays config-only.
+///
+/// `utterance.*` and `transcribe` return JSON text only. The daemon process
+/// still requires `type_output = true` to start (hotkey PTT path), but the
+/// Emitter/typer is never invoked from these API ops — fail-closed for API.
 struct DaemonHandler {
     transcriber: Arc<Transcriber>,
     text_cfg: TextConfig,
+    refine: RefineConfig,
     dict: text::Dictionary,
     dsp: DspConfig,
     model: PathBuf,
@@ -365,16 +369,10 @@ struct DaemonHandler {
     token: Option<String>,
     raw: bool,
     stage: Arc<Mutex<String>>,
+    utterance: Mutex<UtteranceBuffer>,
 }
 
 impl DaemonHandler {
-    fn utterance_nyi(op: &str) -> ApiResult {
-        Err(ApiError::new(
-            format!("{op} is not implemented"),
-            Some("use hotkey PTT or transcribe op".into()),
-        ))
-    }
-
     fn load_wav(&self, path: &Path) -> Result<Vec<f32>, ApiError> {
         let (raw, rate) = dsp::read_wav(path).map_err(|e| {
             ApiError::new(
@@ -395,27 +393,7 @@ impl DaemonHandler {
     }
 
     fn decode_pcm_b64(&self, b64: &str) -> Result<Vec<f32>, ApiError> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64.trim().as_bytes())
-            .map_err(|e| {
-                ApiError::new(
-                    format!("invalid pcm_f32_b64: {e}"),
-                    Some("send standard base64 of little-endian f32 PCM at 16 kHz mono".into()),
-                )
-            })?;
-        if bytes.len() % 4 != 0 {
-            return Err(ApiError::new(
-                format!(
-                    "pcm_f32_b64 length {} is not a multiple of 4",
-                    bytes.len()
-                ),
-                Some("encode little-endian f32 samples (4 bytes each) before base64".into()),
-            ));
-        }
-        let mut samples = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
+        let mut samples = decode_pcm_f32_le_b64(b64)?;
         dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
         Ok(samples)
     }
@@ -442,7 +420,11 @@ impl DaemonHandler {
         if self.raw {
             return Ok(raw.trim().to_string());
         }
-        let pipeline = TextPipeline::new(self.text_cfg, self.dict.clone());
+        let pipeline = TextPipeline::with_refine(
+            self.text_cfg,
+            self.dict.clone(),
+            self.refine.make_backend(),
+        );
         let (text, _) = pipeline.process_stream(&raw, text::FmtState::default());
         Ok(text)
     }
@@ -513,16 +495,51 @@ impl ApiHandler for DaemonHandler {
     }
 
     fn utterance_start(&self) -> ApiResult {
-        Self::utterance_nyi("utterance.start")
+        let mut g = self
+            .utterance
+            .lock()
+            .map_err(|_| ApiError::new("utterance lock poisoned", None))?;
+        g.start();
+        Ok(Some(json!({"started": true})))
     }
-    fn utterance_audio(&self, _pcm_f32_b64: String) -> ApiResult {
-        Self::utterance_nyi("utterance.audio")
+
+    fn utterance_audio(&self, pcm_f32_b64: String) -> ApiResult {
+        let mut g = self
+            .utterance
+            .lock()
+            .map_err(|_| ApiError::new("utterance lock poisoned", None))?;
+        g.append_b64(&pcm_f32_b64)?;
+        Ok(Some(json!({"buffered_samples": g.len()})))
     }
+
     fn utterance_stop(&self) -> ApiResult {
-        Self::utterance_nyi("utterance.stop")
+        let mut samples = {
+            let mut g = self
+                .utterance
+                .lock()
+                .map_err(|_| ApiError::new("utterance lock poisoned", None))?;
+            g.stop()?
+        };
+        if samples.is_empty() {
+            return Err(ApiError::new(
+                "utterance is empty",
+                Some("send utterance.audio with pcm_f32_b64 before utterance.stop".into()),
+            ));
+        }
+        dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
+        // Return text only — never type from API utterance ops (Emitter stays
+        // on the hotkey path, which is gated by config type_output at daemon start).
+        let text = self.decode_samples(&samples)?;
+        Ok(Some(json!({ "text": text })))
     }
+
     fn utterance_cancel(&self) -> ApiResult {
-        Self::utterance_nyi("utterance.cancel")
+        let mut g = self
+            .utterance
+            .lock()
+            .map_err(|_| ApiError::new("utterance lock poisoned", None))?;
+        g.cancel();
+        Ok(Some(json!({"cancelled": true})))
     }
 
     fn shutdown(&self) -> ApiResult {
@@ -564,7 +581,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         "dictate: loading model {} …",
         model.display()
     );
-    let transcriber = Arc::new(Transcriber::load(&model, cfg.n_threads)?);
+    let transcriber = Arc::new(Transcriber::load(&model, cfg.n_threads, &cfg.provider)?);
     let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
     if !dict.is_empty() {
         eprintln!(
@@ -585,9 +602,11 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     if cfg.api.enabled {
         let sock = resolve_api_socket(&cfg.api)?;
         let api_stop = Arc::new(AtomicBool::new(false));
+        let require_same_uid = cfg.api.require_same_uid;
         let handler = DaemonHandler {
             transcriber: Arc::clone(&transcriber),
             text_cfg,
+            refine: cfg.refine.clone(),
             dict: dict.clone(),
             dsp: cfg.dsp,
             model: model.clone(),
@@ -595,13 +614,19 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
             token: cfg.api.required_token().map(str::to_owned),
             raw: cli.raw,
             stage: Arc::clone(&stage),
+            utterance: Mutex::new(UtteranceBuffer::default()),
         };
         let serve_path = sock.clone();
         let stop2 = Arc::clone(&api_stop);
         thread::Builder::new()
             .name("dictate-api".into())
             .spawn(move || {
-                if let Err(e) = api::serve_unix_until(&serve_path, handler, Some(stop2)) {
+                if let Err(e) = api::serve_unix_with(
+                    &serve_path,
+                    handler,
+                    Some(stop2),
+                    ServeOptions { require_same_uid },
+                ) {
                     log::error!("api server exited: {e:#}");
                 }
             })
@@ -715,7 +740,11 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     *g = "transcribing".into();
                 }
                 overlay.set(Stage::Transcribing);
-                let pipeline = TextPipeline::new(text_cfg, dict.clone());
+                let pipeline = TextPipeline::with_refine(
+                    text_cfg,
+                    dict.clone(),
+                    cfg.refine.make_backend(),
+                );
                 if let Err(e) = emit_transcript(
                     &samples,
                     &transcriber,
@@ -794,6 +823,26 @@ mod api_handler_tests {
     #[test]
     fn api_config_enabled_by_default() {
         assert!(ApiConfig::default().enabled);
+        assert!(ApiConfig::default().require_same_uid);
+    }
+
+    #[test]
+    fn utterance_ops_are_wired_not_nyi() {
+        // WHY: DaemonHandler must implement utterance.* (buffer + decode path).
+        // We cannot construct DaemonHandler without a GPU model here, so assert
+        // the shared UtteranceBuffer contract the handler embeds.
+        let mut buf = UtteranceBuffer::default();
+        buf.start();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        let b64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        };
+        buf.append_b64(&b64).unwrap();
+        buf.cancel();
+        let err = buf.stop().expect_err("stop after cancel");
+        assert!(err.error.contains("no active utterance"));
     }
 }
 

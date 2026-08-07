@@ -16,4 +16,4 @@ pub use engine::Engine;
 pub use overlay::{NullOverlay, OverlayBackend, Stage};
 pub use session::{InjectTyper, Session, SessionBuilder};
 pub use stt::Transcriber;
-pub use text::{Dictionary, TextConfig, TextPipeline};
+pub use text::{Dictionary, NullRefine, RefineBackend, RefineConfig, RuleRefine, TextConfig, TextPipeline};

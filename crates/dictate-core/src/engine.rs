@@ -20,13 +20,13 @@ pub struct Engine {
 
 impl Engine {
     /// Resolve the model path, load STT onto the configured provider, and
-    /// build the text pipeline from `cfg.dict` / `cfg.text`.
+    /// build the text pipeline from `cfg.dict` / `cfg.text` / `cfg.refine`.
     pub fn load(cfg: &Config) -> Result<Self> {
         let model = config::resolve_model(None, cfg)?;
-        let transcriber = Transcriber::load(&model, cfg.n_threads)
+        let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)
             .with_context(|| format!("failed to load STT model from {}", model.display()))?;
         let dict = Dictionary::from_map(cfg.dict.overrides.clone());
-        let pipeline = TextPipeline::new(cfg.text, dict);
+        let pipeline = TextPipeline::with_refine(cfg.text, dict, cfg.refine.make_backend());
         Ok(Self {
             transcriber,
             pipeline,
@@ -35,7 +35,7 @@ impl Engine {
     }
 
     /// Decode `pcm_16k` (16 kHz mono f32) and run the text pipeline
-    /// (commands → dictionary → format), unless this engine was built
+    /// (commands → dictionary → format → refine), unless this engine was built
     /// with raw-default (not currently exposed).
     pub fn transcribe_f32(&self, pcm_16k: &[f32]) -> Result<String> {
         if self.raw_default {
@@ -48,7 +48,7 @@ impl Engine {
         Ok(text)
     }
 
-    /// Decode only — skip commands, dictionary, and formatting.
+    /// Decode only — skip commands, dictionary, formatting, and refine.
     pub fn transcribe_f32_raw(&self, pcm_16k: &[f32]) -> Result<String> {
         self.decode_raw(pcm_16k)
     }
