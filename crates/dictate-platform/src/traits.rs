@@ -1,5 +1,6 @@
-//! Cross-platform capability traits. Linux X11 implements these today;
-//! Windows/macOS backends will follow the same surface.
+//! Cross-platform capability traits. Linux X11 implements these today
+//! (`Hotkey`: [`HotkeySource`], `Emitter` in Type mode: [`Typer`]);
+//! Windows/macOS backends follow the same surface.
 
 use anyhow::Result;
 

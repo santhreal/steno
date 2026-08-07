@@ -6,6 +6,9 @@
 //! smuggle Tab/Escape/CR keystrokes into the target.
 
 use anyhow::{Context, Result, bail, ensure};
+
+use crate::traits::Typer;
+use dictate_core::InjectTyper;
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,22 @@ impl Emitter {
                 .context("failed to write transcript to stdout")?;
         }
         Ok(())
+    }
+}
+
+impl Typer for Emitter {
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        ensure!(
+            self.mode == OutputMode::Type,
+            "Emitter is in Stdout mode; typing is refused (fail-closed). Construct Emitter::new(OutputMode::Type) to enable keystrokes.",
+        );
+        type_text(text)
+    }
+}
+
+impl InjectTyper for Emitter {
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        <Self as Typer>::type_text(self, text)
     }
 }
 
@@ -193,5 +212,15 @@ mod tests {
         e.push("hello").unwrap();
         e.finish().unwrap();
         Emitter::new(OutputMode::Stdout).finish().unwrap();
+    }
+
+    #[test]
+    fn typer_refuses_stdout_mode() {
+        let mut e = Emitter::new(OutputMode::Stdout);
+        let err = Typer::type_text(&mut e, "hi").expect_err("stdout must refuse");
+        assert!(
+            err.to_string().contains("Stdout mode") || err.to_string().contains("fail-closed"),
+            "{err}"
+        );
     }
 }

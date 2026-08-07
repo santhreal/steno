@@ -18,8 +18,8 @@
 - [ ] Null backends for headless
 
 ## Phase 4 — cross-platform
-- [ ] Windows stubs compile → SendInput + RegisterHotKey + layered window
-- [ ] macOS stubs compile → CGEvent + CGEventTap + NSPanel
+- [x] Windows stubs compile → SendInput + RegisterHotKey + layered window
+- [x] macOS stubs compile → CGEvent + CGEventTap + NSPanel
 - [ ] provider = cuda|cpu config; CPU CI path
 
 ## Phase 5 — harden

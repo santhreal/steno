@@ -107,9 +107,9 @@ pub const COMMANDS: &[VoiceCommand] = &[
         doc: "new paragraph → blank line",
     },
     VoiceCommand {
-        phrases: &["scratch that", "delete that", "strike that"],
+        phrases: &["scratch that", "delete that", "strike that", "scratch"],
         action: Action::Scratch,
-        doc: "scratch that / delete that → delete back to the last sentence boundary",
+        doc: "scratch that / delete that / scratch → delete back to the last sentence boundary",
     },
 ];
 
@@ -393,6 +393,14 @@ mod tests {
     #[test]
     fn scratch_without_boundary_clears_everything() {
         assert_eq!(apply("one two three scratch that"), "");
+    }
+
+    #[test]
+    fn bare_scratch_alias_matches() {
+        // STT often punctuates "scratch that" as "scratch." — bare "scratch"
+        // must still delete.
+        assert_eq!(apply("one two three scratch"), "");
+        assert_eq!(apply("hello world period bad scratch"), "hello world .");
     }
 
     #[test]

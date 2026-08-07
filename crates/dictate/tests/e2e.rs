@@ -268,10 +268,13 @@ fn e2e_scratch_and_dictionary() {
     // phrase. In particular "went to the store" must be audible in raw —
     // otherwise "store is gone from the output" passes vacuously even if
     // scratch that is broken.
+    // Parakeet sometimes punctuates "scratch that" as "scratch." — require
+    // the command stem + both clauses; the processed path still asserts
+    // scratch deleted "store".
     anchor_raw!(
         raw_lower,
         "went to the store",
-        "scratch that",
+        "scratch",
         "went to the bank",
         "comma",
         "main street",

@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::traits::{HotkeySource, Typer};
+use dictate_core::InjectTyper;
 use crate::HotkeyEvent;
 
 pub use dictate_core::overlay::NullOverlay;
@@ -30,3 +31,10 @@ impl Typer for NullTyper {
         Ok(())
     }
 }
+
+impl InjectTyper for NullTyper {
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        <Self as Typer>::type_text(self, text)
+    }
+}
+

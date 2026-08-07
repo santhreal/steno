@@ -63,6 +63,9 @@ pub struct Hotkey {
     pending: Option<Event>,
     /// Modifier masks we grabbed (plain + Caps/NumLock variants).
     masks: Vec<ModMask>,
+    /// Hold state for [`crate::HotkeySource::next_event`]. The daemon still
+    /// passes its own `held` into the inherent methods.
+    source_held: bool,
 }
 
 /// A cancel keypress within this window after the activating press is
@@ -191,6 +194,7 @@ impl Hotkey {
             press_at: None,
             pending: None,
             masks: masks.to_vec(),
+            source_held: false,
         })
     }
 
@@ -346,6 +350,20 @@ impl Drop for Hotkey {
             &self.orig_keysyms,
         );
         let _ = self.conn.flush();
+    }
+}
+
+
+impl crate::HotkeySource for Hotkey {
+    fn next_event(&mut self) -> Result<HotkeyEvent> {
+        let mut held = self.source_held;
+        let ev = Hotkey::next_event(self, &mut held)?;
+        self.source_held = held;
+        Ok(ev)
+    }
+
+    fn drain_pending(&mut self) {
+        Hotkey::drain_pending(self);
     }
 }
 
