@@ -26,9 +26,11 @@ pub enum HotkeyEvent { Press, Release, Cancel, Shutdown }
 pub enum Stage { Hidden, Recording, Transcribing, Done, Error }
 ```
 
-Linux X11: `linux_x11::{hotkey, overlay, output}` — real Caps Lock grab, pill
-overlay (`create(&UiConfig)`), xdotool typing via `Emitter` in `OutputMode::Type`.
-`Emitter` implements both `Typer` and `dictate_core::InjectTyper`.
+Linux: `linux` facade selects X11 vs Wayland. X11 path
+`linux_x11::{hotkey, overlay, output}` — real Caps Lock grab, pill overlay
+(`create(&UiConfig)`), xdotool typing via `Emitter` in `OutputMode::Type`.
+`Emitter` implements both `Typer` and `dictate_core::InjectTyper`. Pure Wayland
+uses `linux_wayland::Emitter` (`wtype` / `ydotool`); see below.
 
 #### Overlay themes (all platforms)
 
@@ -61,6 +63,25 @@ xmodmap -e 'keycode 66 = Caps_Lock'
 Restore helpers (`recover_orig_keysyms`, `nosymbol_mapping`,
 `caps_lock_restore_keysyms`) are unit-tested without a live display.
 
+
+### Linux Wayland (`linux_wayland` + `linux` facade)
+
+Runtime selection (`linux::selection`):
+
+- **`DISPLAY` set** (X11 or hybrid XWayland): X11 remains primary — Caps Lock
+  grab, xdotool typing, X11 pill overlay (unchanged).
+- **Pure Wayland** (`WAYLAND_DISPLAY` set, `DISPLAY` unset/empty):
+  - **Typing** — `wtype` (preferred) with optional `ydotool` fallback; same
+    sanitize + fail-closed `Emitter`/`Typer`/`InjectTyper` surface as X11.
+    Missing binaries error with `sudo apt install wtype` / `ydotool` hints.
+  - **Hotkey** — fails loudly with corrective action (enable XWayland /
+    set `DISPLAY`, or use stdout mode). No silent no-op.
+  - **Overlay** — `NullOverlay` + warn; layer-shell status pill is a
+    follow-up (avoided heavy Wayland client deps for this MVP).
+
+Public re-exports on Linux still come from the `linux` facade:
+`Hotkey`, `Emitter`, `OutputMode`, `Overlay`, `create`, `HotkeyEvent`.
+
 Null*: `NullHotkey` / `NullTyper` / `NullOverlay` — no-ops for tests and
 headless embedders.
 
@@ -79,16 +100,16 @@ Real minimal backends via `windows-sys`:
   `overlay = true` and theme is not `null|none|off`; those cases (and
   `overlay = false`) still select `NullOverlay`. Stage labels and palette
   come from `resolve_ui` (defaults match Linux: `Recording` → "Transcribing",
-  `Transcribing` → "Processing"). Honors `pulse_ms` (0 disables). **Visual
-  delta vs Linux X11 pill:** simplified rounded chip (stage label + basic
-  icon animation: waveform / spinner / check / x), flat offset shadow only
-  (no soft CSS blur), recording timer honors `show_timer` (flat shadow still, no soft blur),
-  no DPI scale factor beyond primary work-area placement. Fail-open on
-  HWND/font/GDI errors. Not live-session verified on this Linux host
-  (no local UI soak). Full `cargo check -p dictate-platform --target
-  x86_64-pc-windows-gnu` is blocked by `dictate-core` Unix-socket API
-  (`std::os::unix`); `windows.rs` itself typechecks green for that target
-  in isolation.
+  `Transcribing` → "Processing"). Honors `show_timer` and `pulse_ms`
+  (0 disables pulse). **Visual delta vs Linux X11 pill:** same soft
+  `box_blur_alpha` drop shadow (rounded-rect mask, 3-pass box blur) and
+  icon animation (waveform / spinner / check / x), but not pixel-perfect —
+  no Xft DPI scale factor beyond primary work-area placement; motion/timing
+  remain coarser than the Linux mock. Fail-open on HWND/font/GDI errors.
+  Not live-session verified on this Linux host (no local UI soak). Full
+  `cargo check -p dictate-platform --target x86_64-pc-windows-gnu` is
+  blocked by `dictate-core` Unix-socket API (`std::os::unix`); `windows.rs`
+  itself typechecks green for that target in isolation.
 
 Same public surface as Linux. Not live-session verified on this Linux host.
 
@@ -104,13 +125,14 @@ Real minimal backends (Accessibility required):
   `CGEventKeyboardSetUnicodeString` (no clipboard). `'\n'` uses Return;
   other control characters are stripped. `OutputMode::Type` only; stdout
   mode refuses typing (fail-closed). Arming stays in core/session.
-- **Overlay** — minimal AppKit `NSPanel` status chip (`create(&UiConfig)`).
-  `overlay = false` or `theme` `null`/`none`/`off` → `NullOverlay`; otherwise
-  the chip. Labels/colors from `resolve_ui` (same defaults as Linux).
-  **Visual delta:** Linux pill is an animated tiny-skia capsule (icon +
-  waveform/spinner/check, shadow, recording timer); macOS is a simpler
-  floating `NSPanel` + `NSTextField` label (bg/fg from palette; optional
-  recording timer via `show_timer`; no icon animation / pulse). Fail-open.
+- **Overlay** — AppKit `NSPanel` + tiny-skia `NSImageView` status chip
+  (`create(&UiConfig)`). `overlay = false` or `theme` `null`/`none`/`off` →
+  `NullOverlay`; otherwise the chip. Labels/colors from `resolve_ui` (same
+  defaults as Linux). **Visual delta vs Linux X11 pill:** soft
+  `box_blur_alpha` shadow, icon disc + waveform/spinner/check/x, recording
+  timer (`show_timer`), and scale pulse (`pulse_ms`) — closer to Linux than
+  the old `NSTextField` chip, but not pixel-perfect (no Xft DPI scale; AppKit
+  panel host instead of X override-redirect; coarser motion). Fail-open.
 
 Same public surface as Linux. Not live-session verified on this Linux host.
 
@@ -119,6 +141,7 @@ Same public surface as Linux. Not live-session verified on this Linux host.
 | Backend | Status |
 |---|---|
 | Linux X11 hotkey / type / pill | Implemented; live-session re-verify on axiomexec only |
+| Linux Wayland type (`wtype`) + selection | Implemented (pure Wayland); hotkey needs DISPLAY/XWayland; overlay = NullOverlay + warn (layer-shell follow-up). Not live-session verified |
 | Null* | Unit-tested / headless |
-| macOS hotkey / type / NSPanel chip | Implemented in tree; needs Accessibility + AppKit session on a Mac to runtime-verify |
-| Windows hotkey / type / status chip | Implemented in tree (layered HWND chip); needs a Windows host to runtime-verify |
+| macOS hotkey / type / skia NSPanel chip | Implemented in tree (tiny-skia soft-shadow chip in NSImageView); needs Accessibility + AppKit session on a Mac to runtime-verify |
+| Windows hotkey / type / status chip | Implemented in tree (layered HWND + soft `box_blur_alpha` shadow); needs a Windows host to runtime-verify |

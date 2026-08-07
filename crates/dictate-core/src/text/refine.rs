@@ -15,15 +15,17 @@
 //!
 //! ## Honest limits
 //!
-//! [`RuleRefine`] only fixes high-precision, local ASR/grammar glitches
-//! (spaced contractions, a handful of phrase maps, a/an before clear
-//! vowel/consonant starts, duplicate words/short clauses, one leading
-//! filler). It **cannot** repair severe STT garble such as acoustic
-//! hallucinations (`"chromax"` → intended grammar/word). Those belong to
-//! the dictionary (known phrases) and a better acoustic model. Real
-//! grammatical error correction (GEC) is a future [`RefineBackend`] plug
-//! only; this module stays pure offline rules with no LLM or LanguageTool
-//! dependency.
+//! [`RuleRefine`] only fixes high-precision, local ASR/grammar glitches:
+//! spaced / split contractions, common ASR phrase maps (homophones with
+//! tight context, doubled prepositions, frequent mishears), a small
+//! subject–verb map, a/an before clear vowel/consonant starts (plus a few
+//! silent-h / yoo-u / x- edges), duplicate words/short clauses, one
+//! leading filler, and optional trailing discourse fillers. It **cannot**
+//! repair severe STT garble such as acoustic hallucinations
+//! (`"chromax"` → intended grammar/word). Those belong to the dictionary
+//! (known phrases) and a better acoustic model. Real grammatical error
+//! correction (GEC) is a future [`RefineBackend`] plug only; this module
+//! stays pure offline rules with no LLM or LanguageTool dependency.
 //!
 //! Full LLM GEC is therefore a future [`RefineBackend`] only; this module
 //! ships [`RuleRefine`] as the default.
@@ -95,10 +97,10 @@ impl RefineConfig {
     }
 }
 
-/// Tiny table of spaced ASR contractions → solid forms.
-/// Matched case-insensitively as whole consecutive words; replacement
-/// casing follows the first word of the match when that word was
-/// capitalized, otherwise the table literal.
+/// Spaced / split ASR contractions and safe informal spoken forms →
+/// solid forms. Matched case-insensitively as whole consecutive words;
+/// replacement casing follows the first word of the match when that word
+/// was capitalized, otherwise the table literal.
 const SPACED_CONTRACTIONS: &[(&[&str], &str)] = &[
     (&["can", "not"], "cannot"),
     (&["will", "not"], "won't"),
@@ -115,23 +117,79 @@ const SPACED_CONTRACTIONS: &[(&[&str], &str)] = &[
     (&["would", "not"], "wouldn't"),
     (&["could", "not"], "couldn't"),
     (&["should", "not"], "shouldn't"),
+    // Split apostrophe forms ASR often emits as separate tokens.
+    (&["i", "m"], "I'm"),
+    (&["i", "ve"], "I've"),
+    (&["i", "ll"], "I'll"),
+    (&["i", "d"], "I'd"),
+    (&["you", "re"], "you're"),
+    (&["you", "ve"], "you've"),
+    (&["you", "ll"], "you'll"),
+    (&["we", "re"], "we're"),
+    (&["we", "ve"], "we've"),
+    (&["we", "ll"], "we'll"),
+    (&["they", "re"], "they're"),
+    (&["they", "ve"], "they've"),
+    (&["they", "ll"], "they'll"),
+    (&["it", "s"], "it's"),
+    (&["that", "s"], "that's"),
+    (&["what", "s"], "what's"),
+    (&["who", "s"], "who's"),
+    (&["there", "s"], "there's"),
+    (&["here", "s"], "here's"),
+    (&["let", "s"], "let's"),
+    (&["is", "n", "t"], "isn't"),
+    (&["are", "n", "t"], "aren't"),
+    (&["was", "n", "t"], "wasn't"),
+    (&["were", "n", "t"], "weren't"),
+    (&["do", "n", "t"], "don't"),
+    (&["does", "n", "t"], "doesn't"),
+    (&["did", "n", "t"], "didn't"),
+    (&["can", "t"], "can't"),
+    (&["won", "t"], "won't"),
+    (&["would", "n", "t"], "wouldn't"),
+    (&["could", "n", "t"], "couldn't"),
+    (&["should", "n", "t"], "shouldn't"),
+    // Informal spoken forms sometimes spaced by ASR.
+    (&["gon", "na"], "gonna"),
+    (&["wan", "na"], "wanna"),
+    (&["got", "ta"], "gotta"),
+    (&["lem", "me"], "lemme"),
+    (&["giv", "me"], "gimme"),
+    (&["dun", "no"], "dunno"),
+    (&["y", "all"], "y'all"),
+    (&["ya", "ll"], "y'all"),
 ];
 
-/// Frequent ASR garbling → intended text. Keep tiny and documented.
+/// Frequent ASR garbling → intended text. High-precision only; documented
+/// families stay narrow so brand/dictionary tokens are not reinvented.
 /// Matched case-insensitively as consecutive whole words; replacement
 /// casing follows the first matched token (not a forced lowercase literal).
 const COMMON_ASR_FIXES: &[(&[&str], &str)] = &[
     // Repeated filler / stutter patterns ASR often doubles.
     (&["gotta", "gotta"], "gotta"),
+    (&["gonna", "gonna"], "gonna"),
+    (&["wanna", "wanna"], "wanna"),
     (&["kind", "of", "of"], "kind of"),
     (&["sort", "of", "of"], "sort of"),
     (&["a", "lot", "of", "of"], "a lot of"),
+    (&["out", "of", "of"], "out of"),
+    (&["in", "order", "to", "to"], "in order to"),
+    (&["going", "to", "to"], "going to"),
+    (&["have", "to", "to"], "have to"),
+    (&["need", "to", "to"], "need to"),
+    (&["want", "to", "to"], "want to"),
+    (&["try", "to", "to"], "try to"),
+    (&["as", "well", "as", "as"], "as well as"),
+    (&["each", "other", "other"], "each other"),
+    (&["or", "not", "not"], "or not"),
     // Modal "of" → "have" (spoken "should've" misheard as "should of").
     (&["should", "of"], "should have"),
     (&["could", "of"], "could have"),
     (&["would", "of"], "would have"),
     (&["might", "of"], "might have"),
     (&["must", "of"], "must have"),
+    (&["ought", "to", "of"], "ought to have"),
     // Mixed duplicated articles (identical pairs already collapse via
     // `collapse_duplicate_words`, including "i i").
     (&["the", "a"], "the"),
@@ -140,13 +198,35 @@ const COMMON_ASR_FIXES: &[(&[&str], &str)] = &[
     (&["an", "the"], "the"),
     (&["a", "an"], "an"),
     (&["an", "a"], "an"),
-    // Homophone their/there — only before is/are (high confidence).
+    // Homophone their/there/they're — tight contexts only.
     (&["their", "is"], "there is"),
     (&["their", "are"], "there are"),
-    // Stuttered existential.
+    (&["their", "was"], "there was"),
+    (&["their", "were"], "there were"),
+    (&["there", "going", "to"], "they're going to"),
+    (&["your", "going", "to"], "you're going to"),
+    (&["your", "gonna"], "you're gonna"),
+    (&["your", "welcome"], "you're welcome"),
+    // its/it's before a determiner (possessive "its cat" stays).
+    (&["its", "a"], "it's a"),
+    (&["its", "an"], "it's an"),
+    (&["its", "the"], "it's the"),
+    // Stuttered existential / wh-clefts.
     (&["there", "is", "is"], "there is"),
     (&["there's", "is"], "there's"),
     (&["there", "are", "are"], "there are"),
+    (&["who", "is", "is"], "who is"),
+    (&["what's", "is"], "what's"),
+    (&["that's", "is"], "that's"),
+    // Common fused / misheard spoken forms (single-token safe literals).
+    (&["alot"], "a lot"),
+    (&["aswell"], "as well"),
+    (&["incase"], "in case"),
+    (&["supposably"], "supposedly"),
+    (&["irregardless"], "regardless"),
+    (&["all", "of", "the", "sudden"], "all of a sudden"),
+    (&["for", "all", "intensive", "purposes"], "for all intents and purposes"),
+    (&["ex", "specially"], "especially"),
 ];
 
 /// Tiny high-precision subject–verb phrase maps. Not a grammar engine:
@@ -155,6 +235,9 @@ const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
     (&["he", "don't"], "he doesn't"),
     (&["she", "don't"], "she doesn't"),
     (&["it", "don't"], "it doesn't"),
+    (&["he", "doesn't", "doesn't"], "he doesn't"),
+    (&["she", "doesn't", "doesn't"], "she doesn't"),
+    (&["it", "doesn't", "doesn't"], "it doesn't"),
     (&["i", "is"], "i am"),
     (&["you", "is"], "you are"),
     (&["we", "is"], "we are"),
@@ -163,6 +246,16 @@ const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
     (&["she", "are"], "she is"),
     (&["it", "are"], "it is"),
     (&["i", "are"], "i am"),
+    (&["we", "was"], "we were"),
+    (&["they", "was"], "they were"),
+    (&["you", "was"], "you were"),
+    (&["this", "are"], "this is"),
+    (&["that", "are"], "that is"),
+    (&["these", "is"], "these are"),
+    (&["those", "is"], "those are"),
+    (&["there", "is", "many"], "there are many"),
+    (&["there", "is", "several"], "there are several"),
+    (&["there", "is", "few"], "there are few"),
 ];
 
 /// Leading utterance fillers stripped once. `um`/`uh` stay with the
@@ -170,6 +263,39 @@ const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
 /// `[overrides] "um" = ""`.
 const LEADING_FILLERS: &[&str] = &[
     "well", "so", "okay", "ok", "alright", "anyway", "basically", "like",
+];
+
+/// Trailing discourse fillers stripped once when content remains.
+/// Multi-word only; never touches dictionary-owned `um`/`uh`.
+const TRAILING_FILLER_PHRASES: &[&[&str]] = &[
+    &["you", "know"],
+    &["i", "mean"],
+    &["you", "see"],
+    &["i", "guess"],
+    &["i", "suppose"],
+    &["or", "something"],
+    &["or", "whatever"],
+    &["and", "stuff"],
+    &["and", "everything"],
+];
+
+/// Silent-h words that take "an" (ASCII spelling, not a phoneme model).
+const AN_SILENT_H: &[&str] = &[
+    "hour", "hours", "hourly", "honest", "honestly", "honor", "honors", "honored",
+    "honoring", "honour", "honours", "honoured", "honouring", "heir", "heirs",
+];
+
+/// u-/eu- words with initial "yoo" glide that take "a", not "an".
+const A_YOO_U: &[&str] = &[
+    "unique", "university", "universal", "uniform", "united", "useful", "usual",
+    "usually", "euro", "european", "europe",
+];
+
+/// "lets" → "let's …" only before common imperatives, and never right after
+/// a subject pronoun (so "he lets go" stays a real verb phrase).
+const LETS_IMPERATIVES: &[&str] = &["go", "see", "try", "start", "do"];
+const LETS_SUBJECT_BLOCKERS: &[&str] = &[
+    "he", "she", "it", "who", "that", "which", "what",
 ];
 
 fn is_orphan_punct_token(tok: &str) -> bool {
@@ -222,11 +348,13 @@ fn rule_refine_line(line: &str) -> String {
 
     apply_phrase_map(&mut words, COMMON_ASR_FIXES, false);
     apply_phrase_map(&mut words, SUBJECT_VERB_FIXES, false);
+    fix_lets_imperatives(&mut words);
     fix_indefinite_article(&mut words);
     apply_phrase_map(&mut words, SPACED_CONTRACTIONS, false);
     collapse_duplicate_words(&mut words);
     collapse_repeated_short_clauses(&mut words);
     strip_leading_filler_once(&mut words);
+    strip_trailing_filler_once(&mut words);
     // Drop leading orphan punct tokens (nothing to attach to). Trailing /
     // mid-stream punct is reattached by strip_space_before_punct.
     while words.first().is_some_and(|w| is_orphan_punct_token(w)) {
@@ -300,11 +428,42 @@ fn match_contraction_case(first: &str, repl: &str) -> String {
     }
 }
 
+
+/// Fix utterance "lets <imperative>" → "let's <imperative>" unless the
+/// preceding token is a subject pronoun ("he lets go" must stay).
+fn fix_lets_imperatives(words: &mut Vec<Cow<'_, str>>) {
+    if words.len() < 2 {
+        return;
+    }
+    let mut i = 0;
+    while i + 1 < words.len() {
+        if words[i].eq_ignore_ascii_case("lets")
+            && LETS_IMPERATIVES
+                .iter()
+                .any(|imp| words[i + 1].eq_ignore_ascii_case(imp))
+        {
+            let blocked = i > 0
+                && LETS_SUBJECT_BLOCKERS
+                    .iter()
+                    .any(|s| words[i - 1].eq_ignore_ascii_case(s));
+            if !blocked {
+                let repl = format!("let's {}", words[i + 1].as_ref().to_ascii_lowercase());
+                let replacement = match_contraction_case(&words[i], &repl);
+                words.splice(i..i + 2, std::iter::once(Cow::Owned(replacement)));
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 /// Cheap, safe a/an repair before a following alphabetic word.
 ///
-/// Only ASCII vowel/consonant starts. Skips `u…` and `one`/`once` (a-one
-/// is correct) and skips all `h…` targets for `an→a` (hour/honest).
-/// Not a phoneme model — ambiguous cases are left alone.
+/// ASCII vowel/consonant starts plus a few high-precision edges:
+/// silent-h allowlist (`hour`/`honest`/…), yoo-glide u/eu words
+/// (`unique`/`university`/…), and `x…` (spoken "ex"). Still skips bare
+/// `u…`/`one`/`once` and unmarked `h…`. Not a phoneme model.
 fn fix_indefinite_article(words: &mut [Cow<'_, str>]) {
     if words.len() < 2 {
         return;
@@ -332,6 +491,14 @@ fn a_an_fix(article: &str, next: &str) -> Option<String> {
     let next_lower = next_alpha.to_ascii_lowercase();
 
     if article.eq_ignore_ascii_case("a") {
+        // Silent-h allowlist before generic vowel logic.
+        if AN_SILENT_H.iter().any(|w| next_lower == *w) {
+            return Some(match_contraction_case(article, "an"));
+        }
+        // x… is spoken "ex…".
+        if first == 'x' {
+            return Some(match_contraction_case(article, "an"));
+        }
         // Vowel start, excluding u- (university) and one/once.
         if matches!(first, 'a' | 'e' | 'i' | 'o')
             && next_lower != "one"
@@ -342,8 +509,15 @@ fn a_an_fix(article: &str, next: &str) -> Option<String> {
         return None;
     }
     if article.eq_ignore_ascii_case("an") {
+        // Known yoo-glide u/eu words take "a".
+        if A_YOO_U.iter().any(|w| next_lower == *w) {
+            return Some(match_contraction_case(article, "a"));
+        }
         // Consonant start; skip h- (hour/honest) and vowels entirely.
-        if first.is_ascii_alphabetic() && !matches!(first, 'a' | 'e' | 'i' | 'o' | 'u' | 'h') {
+        // x… stays "an".
+        if first.is_ascii_alphabetic()
+            && !matches!(first, 'a' | 'e' | 'i' | 'o' | 'u' | 'h' | 'x')
+        {
             return Some(match_contraction_case(article, "a"));
         }
         return None;
@@ -410,6 +584,37 @@ fn strip_leading_filler_once(words: &mut Vec<Cow<'_, str>>) {
         words.remove(0);
         while words.first().is_some_and(|w| is_orphan_punct_token(w)) {
             words.remove(0);
+        }
+    }
+}
+
+/// Strip at most one trailing discourse-filler phrase when enough content
+/// remains (at least two tokens). Does not touch `um`/`uh` (dictionary-owned)
+/// and will not reduce `do you know` to a bare `do`.
+fn strip_trailing_filler_once(words: &mut Vec<Cow<'_, str>>) {
+    if words.len() < 4 {
+        return;
+    }
+    let mut best_n = 0usize;
+    for phrase in TRAILING_FILLER_PHRASES {
+        let n = phrase.len();
+        // Keep ≥2 content tokens so real questions like "do you know" stay.
+        if n == 0 || words.len() < n + 2 || n <= best_n {
+            continue;
+        }
+        let start = words.len() - n;
+        let ok = phrase
+            .iter()
+            .zip(words[start..].iter())
+            .all(|(p, w)| w.eq_ignore_ascii_case(p));
+        if ok {
+            best_n = n;
+        }
+    }
+    if best_n > 0 {
+        words.truncate(words.len() - best_n);
+        while words.last().is_some_and(|w| is_orphan_punct_token(w)) {
+            words.pop();
         }
     }
 }
@@ -560,6 +765,7 @@ mod tests {
         assert_eq!(rule_refine("we would of tried"), "we would have tried");
         assert_eq!(rule_refine("they might of left"), "they might have left");
         assert_eq!(rule_refine("you must of known"), "you must have known");
+        assert_eq!(rule_refine("you ought to of asked"), "you ought to have asked");
         // Near-miss: real "of" after a non-modal stays.
         assert_eq!(rule_refine("think of leaving"), "think of leaving");
         assert_eq!(rule_refine("a pair of shoes"), "a pair of shoes");
@@ -580,6 +786,8 @@ mod tests {
     fn their_is_are_high_confidence_only() {
         assert_eq!(rule_refine("their is a bug"), "there is a bug");
         assert_eq!(rule_refine("Their are options"), "There are options");
+        assert_eq!(rule_refine("their was a chance"), "there was a chance");
+        assert_eq!(rule_refine("their were problems"), "there were problems");
         assert_eq!(rule_refine("there is is a way"), "there is a way");
         assert_eq!(rule_refine("there's is time"), "there's time");
         // Near-miss: possessive "their" before a noun must not flip.
@@ -661,5 +869,177 @@ mod tests {
         // Severe acoustic garble is out of scope for RuleRefine.
         assert_eq!(rule_refine("chromax grammar"), "chromax grammar");
         assert_eq!(rule_refine("open the chromax"), "open the chromax");
+    }
+
+    #[test]
+    fn doubled_prepositions_and_common_mishears() {
+        // WHY: ASR often doubles the trailing preposition after fixed
+        // phrases; fused mishears need exact-token maps, not fuzzy GEC.
+        let cases = [
+            ("out of of time", "out of time"),
+            ("going to to leave", "going to leave"),
+            ("need to to finish", "need to finish"),
+            ("as well as as that", "as well as that"),
+            ("each other other day", "each other day"),
+            ("gonna gonna try", "gonna try"),
+            ("wanna wanna see", "wanna see"),
+            ("alot of work", "a lot of work"),
+            ("do it aswell", "do it as well"),
+            ("incase it rains", "in case it rains"),
+            ("supposably ready", "supposedly ready"),
+            ("irregardless of that", "regardless of that"),
+            ("all of the sudden", "all of a sudden"),
+            (
+                "for all intensive purposes",
+                "for all intents and purposes",
+            ),
+            ("ex specially now", "especially now"),
+            ("ought to of asked", "ought to have asked"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // Near-misses: legitimate "of"/"to" sequences stay.
+        assert_eq!(rule_refine("out of time"), "out of time");
+        assert_eq!(rule_refine("going to leave"), "going to leave");
+        assert_eq!(rule_refine("specially now"), "specially now");
+    }
+
+    #[test]
+    fn homophone_tight_context_maps() {
+        // WHY: only flip their/your/its/lets when the following token makes
+        // the spoken form overwhelmingly likely.
+        let cases = [
+            ("there going to leave", "they're going to leave"),
+            ("your going to see it", "you're going to see it"),
+            ("Your gonna like this", "You're gonna like this"),
+            ("your welcome", "you're welcome"),
+            ("its a bug", "it's a bug"),
+            ("its an idea", "it's an idea"),
+            ("Its the plan", "It's the plan"),
+            ("lets go now", "let's go now"),
+            ("Lets see", "Let's see"),
+            ("lets try again", "let's try again"),
+            ("who is is next", "who is next"),
+            ("what's is wrong", "what's wrong"),
+            ("that's is fine", "that's fine"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // Near-misses: possessives / bare verb "lets" stay.
+        assert_eq!(rule_refine("your cat sat"), "your cat sat");
+        assert_eq!(rule_refine("its whiskers"), "its whiskers");
+        assert_eq!(rule_refine("he lets go"), "he lets go");
+        assert_eq!(rule_refine("there are cats"), "there are cats");
+    }
+
+    #[test]
+    fn subject_verb_agreement_extensions() {
+        // WHY: expand the tiny map with high-confidence spoken pairs only.
+        let cases = [
+            ("we was ready", "we were ready"),
+            ("they was late", "they were late"),
+            ("you was there", "you were there"),
+            ("this are fine", "this is fine"),
+            ("that are wrong", "that is wrong"),
+            ("these is ready", "these are ready"),
+            ("those is broken", "those are broken"),
+            ("there is many bugs", "there are many bugs"),
+            ("there is several options", "there are several options"),
+            ("there is few left", "there are few left"),
+            ("he doesn't doesn't know", "he doesn't know"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // Near-miss: do not rewrite plural nouns outside the map.
+        assert_eq!(rule_refine("the dogs is loud"), "the dogs is loud");
+        assert_eq!(rule_refine("there is one bug"), "there is one bug");
+    }
+
+    #[test]
+    fn a_an_edge_cases_silent_h_yoo_x() {
+        // WHY: extend a/an with allowlists, not a phoneme model.
+        let cases = [
+            ("a hour ago", "an hour ago"),
+            ("a honest answer", "an honest answer"),
+            ("A heir apparent", "An heir apparent"),
+            ("an unique idea", "a unique idea"),
+            ("an university town", "a university town"),
+            ("an european plan", "a european plan"),
+            ("a xray scan", "an xray scan"),
+            ("a xylophone", "an xylophone"),
+            ("an book", "a book"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // Near-misses: unmarked h-/u- stay; already-correct forms stay.
+        assert_eq!(rule_refine("a house"), "a house");
+        assert_eq!(rule_refine("an hour"), "an hour");
+        assert_eq!(rule_refine("a unique idea"), "a unique idea");
+        assert_eq!(rule_refine("a umbrella"), "a umbrella"); // still skipped (u…)
+        assert_eq!(rule_refine("an xray"), "an xray");
+    }
+
+    #[test]
+    fn spaced_split_and_informal_contractions() {
+        // WHY: ASR often drops apostrophes or spaces informal reductions.
+        let cases = [
+            ("i m ready", "I'm ready"),
+            ("you re late", "you're late"),
+            ("they ve left", "they've left"),
+            ("we ll see", "we'll see"),
+            ("it s fine", "it's fine"),
+            ("that s all", "that's all"),
+            ("what s next", "what's next"),
+            ("let s go", "let's go"),
+            ("do n t stop", "don't stop"),
+            ("can t wait", "can't wait"),
+            ("won t work", "won't work"),
+            ("is n t ready", "isn't ready"),
+            ("gon na leave", "gonna leave"),
+            ("wan na try", "wanna try"),
+            ("got ta go", "gotta go"),
+            ("lem me see", "lemme see"),
+            ("giv me that", "gimme that"),
+            ("dun no why", "dunno why"),
+            ("y all ready", "y'all ready"),
+            ("I m here", "I'm here"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // Near-miss: already-solid contractions / unrelated letters stay.
+        assert_eq!(rule_refine("I'm ready"), "I'm ready");
+        assert_eq!(rule_refine("call m later"), "call m later");
+        assert_eq!(rule_refine("see ya soon"), "see ya soon");
+    }
+
+    #[test]
+    fn trailing_filler_cleanup_not_um_uh() {
+        // WHY: trailing discourse tags are optional cleanup; never fight
+        // dictionary-owned um/uh or wipe the whole utterance.
+        let cases = [
+            ("we should leave you know", "we should leave"),
+            ("that works i mean", "that works"),
+            ("look closer you see", "look closer"),
+            ("maybe later i guess", "maybe later"),
+            ("try again i suppose", "try again"),
+            ("bring a charger or something", "bring a charger"),
+            ("call support or whatever", "call support"),
+            ("packed snacks and stuff", "packed snacks"),
+            ("said hello and everything", "said hello"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rule_refine(input), expected, "input={input:?}");
+        }
+        // um/uh untouched; mid-stream discourse phrases stay; lone phrase stays.
+        assert_eq!(rule_refine("um I agree"), "um I agree");
+        assert_eq!(rule_refine("uh maybe later"), "uh maybe later");
+        assert_eq!(rule_refine("I mean yes"), "I mean yes");
+        assert_eq!(rule_refine("you know"), "you know");
+        assert_eq!(rule_refine("do you know"), "do you know");
     }
 }

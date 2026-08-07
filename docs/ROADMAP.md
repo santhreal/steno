@@ -45,7 +45,7 @@ overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable
 ## Phase 6 — polish / platform depth
 - [x] Honor `XDG_CACHE_HOME` for daemon pid/ready/log + API socket fallback
 - [x] Win/mac recording timer via `[ui.stages].show_timer` (Win chip + macOS label)
-- [ ] Wayland: typing / hotkey / overlay (portal or native; X11 remains primary on Linux)
-- [ ] Stronger offline GEC backend behind `RefineBackend` (RuleRefine stays default)
-- [ ] Win/mac overlay closer to Linux pill (soft blur shadow, icon parity polish)
+- [x] Wayland MVP: runtime selection + `wtype` typing (+ `ydotool` fallback); hotkey via XWayland/X11 when `DISPLAY` set (pure Wayland fails loudly); overlay still NullOverlay + warn (layer-shell follow-up); X11 remains primary when `DISPLAY` works
+- [x] Stronger offline RuleRefine GEC (expanded ASR/agreement/a-an/contractions/trailing fillers; still no LLM; RuleRefine stays default)
+- [x] Win/mac overlay closer to Linux pill (soft `box_blur_alpha` shadow; macOS tiny-skia chip + icons; not pixel-perfect)
 

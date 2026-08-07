@@ -7,12 +7,13 @@
 //! ## Overlay
 //! Layered topmost HWND status chip (`UpdateLayeredWindow` + tiny-skia).
 //! Implements [`OverlayBackend`] stages. Visuals are a simplified always-on-top
-//! rounded chip (stage label + basic icon animation)  -  not a pixel-perfect
-//! port of the Linux X11 pill (flat shadow only — no soft blur; coarser motion).
-//! Recording timer honors `[ui.stages].show_timer`. Colors/labels come from
-//! [`dictate_core::resolve_ui`].
+//! rounded chip (stage label + basic icon animation) — not a pixel-perfect
+//! port of the Linux X11 pill. Soft drop shadow uses the same separable
+//! `box_blur_alpha` approach as Linux (rounded-rect mask, 3-pass box blur).
+//! Recording timer honors `[ui.stages].show_timer`; stage-change scale pulse
+//! honors `pulse_ms`. Colors/labels come from [`dictate_core::resolve_ui`].
 //! `UiConfig.overlay = false` / theme `null|none|off` still select
-//! [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font errors
+//! [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font/GDI errors
 //! disable the chip without affecting dictation.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -27,12 +28,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tiny_skia::{Color, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PremultipliedColorU8, Transform};
+use tiny_skia::{Color, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
 use crate::traits::{HotkeySource, Typer};
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    GetLastError, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
@@ -532,8 +533,9 @@ fn sanitize_for_typing(text: &str) -> String {
 /// Layered HWND status chip. Prefer [`create`] for `UiConfig`-aware selection.
 ///
 /// Visual delta vs Linux X11 pill: simpler rounded chip (label + icon
-/// animation), flat offset shadow (no soft blur); recording timer honors show_timer. Same
-/// stage API (`set` / `flash` / `active`).
+/// animation) with soft `box_blur_alpha` shadow (not CSS-identical); recording
+/// timer honors `show_timer`; scale pulse honors `pulse_ms`. Same stage API
+/// (`set` / `flash` / `active`). No Xft-style DPI scale factor.
 pub struct Overlay {
     tx: Option<Sender<Stage>>,
     /// Set when the overlay thread failed (no HWND / font / GDI error).
@@ -629,18 +631,21 @@ fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
     }
 }
 
-/// Logical design metrics for the simplified Windows chip.
+/// Logical design metrics for the Windows chip (Linux-adjacent, not 1:1).
 mod chip {
-    pub const WIN_W: u32 = 220;
-    pub const WIN_H: u32 = 72;
-    pub const PILL_H: f32 = 40.0;
-    pub const ICON: f32 = 22.0;
-    pub const PAD_X: f32 = 12.0;
-    pub const GAP: f32 = 10.0;
+    // Pill 188 + soft-shadow bleed (~40 each side), matching Linux mock intent.
+    pub const WIN_W: u32 = 268;
+    pub const WIN_H: u32 = 120;
+    pub const PILL_H: f32 = 46.0;
+    pub const ICON: f32 = 26.0;
+    pub const PAD_X: f32 = 16.0;
+    pub const GAP: f32 = 12.0;
     pub const LABEL_PX: f32 = 13.0;
     pub const META_PX: f32 = 11.0;
     pub const BOTTOM_MARGIN: i32 = 48;
-    pub const TOP_PAD: f32 = 12.0;
+    pub const TOP_PAD: f32 = 24.0;
+    pub const SHADOW_DY: f32 = 12.0;
+    pub const SHADOW_BLUR: f32 = 12.0; // box-blur radius ≈ css soft shadow
 }
 
 const CLASS_NAME: &[u16] = &[
@@ -663,6 +668,8 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         .context("CreateDIBSection for status chip")?;
     let mut pixmap = SkPixmap::new(chip::WIN_W, chip::WIN_H)
         .ok_or_else(|| anyhow::anyhow!("tiny-skia pixmap alloc failed"))?;
+    let mut shadow_mask = SkPixmap::new(chip::WIN_W, chip::WIN_H)
+        .ok_or_else(|| anyhow::anyhow!("tiny-skia shadow mask alloc failed"))?;
 
     let mut stage = Stage::Hidden;
     let mut stage_changed_at = Instant::now();
@@ -734,7 +741,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         let anim_t = anim_start.elapsed().as_secs_f32();
         let stage_age = stage_changed_at.elapsed().as_secs_f32();
         let rec_secs = recording_started.elapsed().as_secs();
-        draw_chip(&mut pixmap, &font, stage, anim_t, stage_age, rec_secs, ui);
+        draw_chip(&mut pixmap, &mut shadow_mask, &font, stage, anim_t, stage_age, rec_secs, ui);
         unsafe {
             layer.blit_skia(&pixmap)?;
             present_chip(hwnd, &layer)?;
@@ -1038,8 +1045,10 @@ fn pill_width(stage: Stage) -> f32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_chip(
     pixmap: &mut SkPixmap,
+    shadow_mask: &mut SkPixmap,
     font: &Font,
     stage: Stage,
     anim_t: f32,
@@ -1076,16 +1085,8 @@ fn draw_chip(
     let px = cx - pw * 0.5;
     let py = cy - ph * 0.5;
 
-    // Flat shadow (no blur — documented delta vs Linux).
-    draw_round_rect(
-        pixmap,
-        px + 2.0,
-        py + 3.0,
-        pw,
-        ph,
-        ph * 0.5,
-        rgba(colors.shadow),
-    );
+    // Soft drop shadow (Linux-style separable box blur on alpha mask).
+    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, colors.shadow);
 
     draw_round_rect(pixmap, px, py, pw, ph, ph * 0.5, rgba(colors.bg));
     stroke_round_rect(
@@ -1153,6 +1154,83 @@ fn draw_chip(
             meta_size,
             rgba(colors.meta),
         );
+    }
+}
+
+/// Drop shadow: rounded-rect alpha mask, box-blurred, tinted with palette shadow.
+fn draw_shadow(
+    pixmap: &mut SkPixmap,
+    mask: &mut SkPixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    shadow: [u8; 4],
+) {
+    mask.fill(Color::from_rgba8(0, 0, 0, 0));
+    draw_round_rect(
+        mask,
+        x,
+        y + chip::SHADOW_DY,
+        w,
+        h,
+        h * 0.5,
+        rgba(shadow),
+    );
+    box_blur_alpha(mask, chip::SHADOW_BLUR.max(1.0) as u32);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        mask.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Separable box blur over the alpha channel (premultiplied black, so all
+/// channels scale with alpha), 3 passes ≈ gaussian. Prefix-sum windows
+/// with constant divisor: edges fade to transparent, no lopsidedness.
+fn box_blur_alpha(pm: &mut SkPixmap, radius: u32) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if radius == 0 || w < 2 || h < 2 {
+        return;
+    }
+    let mut buf: Vec<u32> = pm.pixels().iter().map(|p| p.alpha() as u32).collect();
+    let mut tmp = vec![0u32; buf.len()];
+    let r = radius as usize;
+    let n = (2 * r + 1) as u32;
+    let mut ps = vec![0u32; w.max(h) + 1];
+    for _ in 0..3 {
+        // Horizontal.
+        for row in 0..h {
+            let base = row * w;
+            ps[0] = 0;
+            for i in 0..w {
+                ps[i + 1] = ps[i] + buf[base + i];
+            }
+            for col in 0..w {
+                let lo = col.saturating_sub(r);
+                let hi = (col + r).min(w - 1);
+                tmp[base + col] = (ps[hi + 1] - ps[lo]) / n;
+            }
+        }
+        // Vertical.
+        for col in 0..w {
+            ps[0] = 0;
+            for i in 0..h {
+                ps[i + 1] = ps[i] + tmp[i * w + col];
+            }
+            for row in 0..h {
+                let lo = row.saturating_sub(r);
+                let hi = (row + r).min(h - 1);
+                buf[row * w + col] = (ps[hi + 1] - ps[lo]) / n;
+            }
+        }
+    }
+    for (px, a) in pm.pixels_mut().iter_mut().zip(buf.iter()) {
+        *px = PremultipliedColorU8::from_rgba(0, 0, 0, (*a).min(255) as u8)
+            .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
     }
 }
 
@@ -1301,6 +1379,7 @@ fn draw_round_rect(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stroke_round_rect(
     pixmap: &mut SkPixmap,
     x: f32,
@@ -1536,13 +1615,39 @@ mod tests {
     #[test]
     fn show_timer_flag_round_trips_resolve() {
         assert!(resolve_ui(&UiConfig::default()).stages.show_timer);
+        let mut stages = dictate_core::config::UiStages::default();
+        stages.show_timer = false;
         let cfg = UiConfig {
-            stages: dictate_core::config::UiStages {
-                show_timer: false,
-                ..Default::default()
-            },
+            stages,
             ..UiConfig::default()
         };
         assert!(!resolve_ui(&cfg).stages.show_timer);
+    }
+
+    #[test]
+    fn box_blur_alpha_softens_opaque_center() {
+        // WHY: soft shadow must not remain a hard-edged rect; a 3-pass box
+        // blur on an opaque disc must leave edge alphas strictly below the center.
+        let mut pm = tiny_skia::Pixmap::new(64, 64).expect("pixmap");
+        pm.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 0));
+        // Opaque black circle in the middle.
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+        paint.anti_alias = false;
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.push_circle(32.0, 32.0, 10.0);
+        let path = pb.finish().expect("circle");
+        pm.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        super::box_blur_alpha(&mut pm, 4);
+        let center = pm.pixel(32, 32).expect("center").alpha();
+        let edge = pm.pixel(32, 20).expect("edge").alpha();
+        assert!(center > edge, "center {center} should exceed edge {edge} after blur");
+        assert!(edge > 0, "blur must spill alpha past the hard disc");
     }
 }

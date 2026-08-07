@@ -97,8 +97,10 @@ verbatim (formatter never re-cases them).
 
 `Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
 Default `[refine] enabled = true`, `backend = "rules"` → `RuleRefine`
-(duplicate-word collapse, spaced contractions, space-before-punct; tiny
-offline tables). `enabled = false` → `NullRefine`.
+(duplicate/short-clause collapse, spaced/split contractions, high-precision
+ASR phrase + subject–verb maps, a/an edges, light fillers, space-before-punct;
+offline tables only — not acoustic-garble repair). `enabled = false` →
+`NullRefine`.
 
 `RefineBackend` must stay pure and offline — there is no network path in
 `dictate-core`. Heavier offline GEC belongs behind the same trait.

@@ -7,6 +7,10 @@ pub mod null;
 pub mod traits;
 
 #[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod linux_wayland;
+#[cfg(target_os = "linux")]
 pub mod linux_x11;
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -18,7 +22,7 @@ pub use null::{NullHotkey, NullTyper};
 pub use traits::{HotkeySource, Typer};
 
 #[cfg(target_os = "linux")]
-pub use linux_x11::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create};
+pub use linux::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create};
 #[cfg(target_os = "windows")]
 pub use windows::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create};
 #[cfg(target_os = "macos")]

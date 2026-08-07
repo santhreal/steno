@@ -4,7 +4,7 @@ Target: a **minimal, offline, embeddable** speech engine + CLI/daemon that
 works cross-platform, stores **all** user config in one file, exposes a
 daemon API, and lets host apps swap the status UI.
 
-## Current state (2026-08-07, HEAD `d3bddd3` + in-tree expansion)
+## Current state (2026-08-07, Phase 6 polish on master)
 
 Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 **Unverified** = code present but not re-proven on a live desktop / soak host.
@@ -21,7 +21,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Daemon NDJSON API (`ping` / `status` / `transcribe` / `shutdown`) | **Verified** in unit/socket tests; live daemon path **Unverified** here |
 | `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
 | OverlayBackend + theme palettes (`pill|mono|dusk|dawn|contrast`) + `resolve_ui` | **Verified** unit tests in core/platform; live X11 pill **Unverified** here after cutover |
-| Cross-platform | Linux X11 real; Windows / macOS **hotkey + typing + status chip implemented** (HWND / NSPanel); chips consume `ResolvedUi`. Not live-UI verified on this Linux host |
+| Cross-platform | Linux X11 real + Wayland MVP typing (`wtype`); Windows / macOS **hotkey + typing + status chip implemented** (HWND / NSPanel); chips consume `ResolvedUi`. Not live-UI verified on this Linux host |
 | Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
 | Daemon IPC | **Yes** — Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
@@ -57,8 +57,8 @@ unless the main agent asks.
    - `dictate-core` — STT, DSP, audio, text pipeline, config, `Engine` /
      `Session`, overlay trait/`Stage`, IPC protocol + Unix client/server.
    - `dictate-platform` — `HotkeySource`, `Typer`, OS backends (Linux X11
-     first; Win/macOS stubs). Re-exports `OverlayBackend` / `Stage` /
-     `NullOverlay` from core.
+     primary + Wayland MVP typing; Win/macOS real). Re-exports
+     `OverlayBackend` / `Stage` / `NullOverlay` from core.
    - `dictate` — CLI + daemon process binary.
 3. **Daemon API** — local Unix domain socket (Linux/macOS) /
    named pipe (Windows later). Newline-delimited JSON. No HTTP, no
@@ -121,9 +121,11 @@ light-dictate/                      # workspace root
       src/
         lib.rs
         traits.rs           # HotkeySource, Typer
-        linux_x11/          # hotkey / overlay / type backends
-        windows.rs          # Caps Lock + SendInput + HWND chip (ResolvedUi)
-        macos.rs            # Caps Lock + CGEvent + NSPanel chip (ResolvedUi)
+        linux/              # facade: DISPLAY/WAYLAND_DISPLAY selection
+        linux_x11/          # hotkey / overlay / xdotool backends
+        linux_wayland/      # wtype (+ ydotool) typing MVP
+        windows.rs          # Caps Lock + SendInput + HWND soft-blur chip (ResolvedUi)
+        macos.rs            # Caps Lock + CGEvent + NSPanel tiny-skia chip (ResolvedUi)
         null.rs             # NullHotkey / NullTyper
     dictate/
       src/
@@ -275,9 +277,9 @@ no plugin ABI; compile-time injection only.
 
 | Capability | Linux X11 | Linux Wayland | Windows | macOS |
 |---|---|---|---|---|
-| Hotkey | done | evdev/portal later | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
-| Type | xdotool | portal/ydotool later | SendInput | CGEvent |
-| Overlay | done (ResolvedUi) | layer-shell later | HWND chip (ResolvedUi; no local UI soak) | NSPanel chip (ResolvedUi; no local UI soak) |
+| Hotkey | done | XWayland/X11 when `DISPLAY` set; pure Wayland fails loudly (native grab later) | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
+| Type | xdotool | **MVP:** `wtype` (+ `ydotool` fallback) on pure Wayland | SendInput | CGEvent |
+| Overlay | done (ResolvedUi) | NullOverlay + warn for now (layer-shell follow-up) | HWND + soft `box_blur_alpha` chip (ResolvedUi; no local UI soak) | NSPanel + tiny-skia soft-shadow chip (ResolvedUi; no local UI soak) |
 | IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
 | STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
@@ -300,5 +302,5 @@ no plugin ABI; compile-time injection only.
 - Plugin dylib ABI for themes (trait injection only)
 - HTTP/WebSocket API
 - Streaming partial tokens from Parakeet (offline full-utterance)
-- Wayland production support in the first cross-platform cut
+- Full Wayland hotkey/overlay parity (typing MVP is in-tree; layer-shell + native grab later)
 - Live-session testing on the operator workstation

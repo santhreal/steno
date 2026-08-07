@@ -107,7 +107,7 @@ stdout segment by segment as it is decoded, so it composes:
 **Record and type (one-shot).** Typing is fail-closed: it works only after
 you arm it once in `~/.config/dictate/config.toml` (`type_output = true`).
 Then `dictate` (or `dictate --type`) types into the focused window via
-`xdotool` (X11; `sudo apt install xdotool`), and `dictate --stdout`
+`xdotool` on X11 (`sudo apt install xdotool`) or `wtype` on pure Wayland (`sudo apt install wtype`), and `dictate --stdout`
 prints instead for one run. Typed text streams as it is decoded; the
 clipboard is never touched.
 
@@ -201,7 +201,7 @@ config looks like:
 model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 n_threads = 8            # CPU threads for feature extraction; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
-type_output = false      # arm typing (xdotool); the ONLY way to enable it
+type_output = false      # arm typing (xdotool/wtype); the ONLY way to enable it
 provider = "cuda"        # or "cpu"; fail-closed, no silent fallback
 
 [vad]
@@ -250,12 +250,15 @@ enabled = true         # daemon listens on a local Unix socket
 "um" = ""
 ```
 
-Post-format **refine** (`[refine]`) collapses duplicate words, fixes a tiny
-set of spaced contractions / common ASR glitches, and strips space-before
-punctuation. Config knobs are only `enabled` and `backend = "rules"`; set
-`enabled = false` to skip it. RuleRefine stays offline (tiny fixed tables, no
-token re-casing, no network/LLM) — embedders can swap a custom
-`RefineBackend` in-process.
+Post-format **refine** (`[refine]`) collapses duplicate words / short
+repeated clauses, fixes spaced or split contractions, high-precision ASR
+phrase maps (homophones with tight context, doubled prepositions, common
+mishears), a small subject–verb map, a/an edges, and light leading/trailing
+fillers, then strips space-before punctuation. Config knobs are only
+`enabled` and `backend = "rules"`; set `enabled = false` to skip it.
+RuleRefine stays offline (fixed tables, no token re-casing, no network/LLM)
+and still cannot repair acoustic garble like `chromax` — embedders can swap
+a custom `RefineBackend` in-process for heavier GEC.
 
 ## Themes
 
@@ -373,7 +376,7 @@ mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── sherpa-onnx decode on the GPU (Parakeet TDT)
     ── voice commands → dictionary → formatter → refine
-    ── streamed to stdout, or synthetic keystrokes (xdotool, when armed)
+    ── streamed to stdout, or synthetic keystrokes (xdotool/wtype, when armed)
 ```
 
 One-shot mode ends on an energy-VAD endpoint (silence after speech). Daemon
@@ -393,7 +396,6 @@ fresh decode state — nothing leaks between them.
   disposable VM (e.g. Firecracker) only. Unit tests stay off the live session.
 - If no speech starts within `start_timeout_secs`, `dictate` exits non-zero
   with an error, so scripts can tell silence apart from an empty result.
-- X11 only for typing (xdotool). On Wayland, use stdout mode with your
-  compositor's tooling.
+- Typing: X11/XWayland uses `xdotool`; pure Wayland (`WAYLAND_DISPLAY` without `DISPLAY`) uses `wtype` (optional `ydotool` fallback). Install with `sudo apt install wtype`. Caps Lock hotkey still needs `DISPLAY` (XWayland); otherwise the daemon errors with corrective actions. Overlay on pure Wayland is a no-op until layer-shell lands — use stdout mode or XWayland for the pill.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
   is no language flag.
