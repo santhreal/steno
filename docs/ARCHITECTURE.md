@@ -25,7 +25,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
 | Daemon IPC | **Yes** — Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
-| `provider = cuda\|cpu` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI path and daemon call-site wiring: Phase 4 |
+| `provider = cuda\|cpu` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI: `.github/workflows/ci-cpu.yml` / `scripts/ci-cpu.sh` |
 
 ## Operator testing policy
 

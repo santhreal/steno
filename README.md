@@ -40,6 +40,13 @@ config (`provider = "cuda"` default, or `"cpu"`). CUDA builds still need the
 system CUDA/cuDNN install the sherpa libs were built against. Unknown
 provider values fail closed (no silent fallback).
 
+**CPU CI.** GitHub Actions (`.github/workflows/ci-cpu.yml`) and the local
+gate `./scripts/ci-cpu.sh` download the CPU sherpa-onnx shared libs
+(`linux-x64-shared-lib`, never CUDA), then run
+`cargo test -p dictate-core --lib`, `cargo test -p dictate-platform --lib`,
+and clippy on `dictate-core` / `dictate-platform` / `dictate`. No daemon,
+DISPLAY, or GPU soak.
+
 ## Get a model
 
 `dictate` uses a sherpa-onnx **model directory** (encoder/decoder/joiner

@@ -22,11 +22,11 @@
 - [x] Windows: Caps Lock hotkey (`WH_KEYBOARD_LL`) + `SendInput` typing + layered HWND status chip
 - [x] macOS: Caps Lock hotkey (`CGEventTap`) + `CGEvent` typing + NSPanel status chip
 - [x] `provider = cuda|cpu` honored end-to-end (Config / Engine / Transcriber / daemon; fail-closed)
-- [ ] CPU CI job still open
+- [x] CPU CI job (`.github/workflows/ci-cpu.yml` + `scripts/ci-cpu.sh`; unit/clippy vs CPU sherpa)
 
 ## Phase 5 — harden
 - [x] RuleRefine post-STT + RefineBackend hook (offline; expanded ASR/grammar tables; not full LLM GEC)
-- [ ] GPU soak (100× en.wav) + nvidia-smi memory delta — **axiomexec / disposable VM only** (not operator workstation)
+- [x] GPU soak (100× en.wav) + nvidia-smi memory delta — **axiomexec / disposable VM only** (not operator workstation)
 - [x] Socket framing fuzz / partial lines (`api::server` framing_* tests)
 - [x] Caps Lock restore Drop helpers + SIGKILL recovery docs (keycode 66)
 - [x] axiomexec remote Xvfb verify: **PASS** on `axiomexec@192.168.0.135` (Tailscale SSH still interactive-auth blocked)

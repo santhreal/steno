@@ -1,0 +1,44 @@
+name: cpu-ci
+
+# Lightweight CPU gate: unit tests + clippy linked against CPU sherpa-onnx.
+# Never starts the daemon, never uses DISPLAY/GNOME, never pulls CUDA.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl \
+            libasound2-dev \
+            libx11-dev libxi-dev libxrandr-dev libxext-dev libxfixes-dev
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/dictate/sherpa-onnx-cpu
+            target
+          key: cpu-ci-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cpu-ci-${{ runner.os }}-
+
+      - name: CPU unit/clippy gate
+        run: ./scripts/ci-cpu.sh
