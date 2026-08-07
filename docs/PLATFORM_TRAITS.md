@@ -56,7 +56,7 @@ state, so older builds could not self-heal on the next start.
 
 Recovery order now:
 
-1. `dictate stop` / `dictate start` call `restore_caps_lock_mapping()` —
+1. `dictate stop` / `dictate start` call `restore_caps_lock_mapping()` (skipped while a live daemon is detected — never while a live daemon intentionally holds NoSymbol) —
    resolves the keycode via live keysym, then `~/.cache/dictate/caps_keycode`,
    then PC fallback **66**, and writes plain `Caps_Lock` when the slot is
    all-`NoSymbol`.

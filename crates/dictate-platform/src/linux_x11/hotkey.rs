@@ -63,6 +63,8 @@ pub struct Hotkey {
     /// NoSymbol; restored on Drop. Synthesized as plain Caps_Lock when
     /// a previous crashed daemon left it unmapped.
     orig_keysyms: Vec<Keysym>,
+    /// Slot width from GetKeyboardMapping — Drop must pad to this count.
+    keysyms_per_keycode: usize,
     /// Modifier keycodes (Shift/Ctrl/Alt/Super/Lock/Mod*): never cancel.
     modifiers: Vec<Keycode>,
     /// Device id of the "Virtual core XTEST keyboard" slave: its fake key
@@ -144,6 +146,7 @@ impl Hotkey {
             root,
             trigger,
             orig_keysyms,
+            keysyms_per_keycode: per_slot,
             masks: Vec::new(),
             armed: true,
         };
@@ -221,12 +224,13 @@ impl Hotkey {
             });
         guard.conn.as_ref().unwrap().flush()?;
 
-        let (conn, trigger, orig_keysyms, masks) = guard.into_parts();
+        let (conn, trigger, orig_keysyms, keysyms_per_keycode, masks) = guard.into_parts();
         Ok(Self {
             conn,
             root,
             trigger,
             orig_keysyms,
+            keysyms_per_keycode,
             modifiers,
             xtest_device,
             press_at: None,
@@ -396,11 +400,12 @@ impl Drop for Hotkey {
         // the caps toggle works again once the daemon exits.
         // SIGKILL never runs Drop — see recover_orig_keysyms / PLATFORM_TRAITS.
         let restore = caps_lock_restore_keysyms(&self.orig_keysyms);
+        let payload = pad_keysyms(restore, self.keysyms_per_keycode);
         let _ = self.conn.change_keyboard_mapping(
             1,
             self.trigger,
-            restore.len() as u8,
-            restore,
+            payload.len() as u8,
+            &payload,
         );
         let _ = self.conn.flush();
     }
@@ -413,17 +418,19 @@ struct CapsRemapGuard {
     root: Window,
     trigger: Keycode,
     orig_keysyms: Vec<Keysym>,
+    keysyms_per_keycode: usize,
     masks: Vec<ModMask>,
     armed: bool,
 }
 
 impl CapsRemapGuard {
-    fn into_parts(mut self) -> (RustConnection, Keycode, Vec<Keysym>, Vec<ModMask>) {
+    fn into_parts(mut self) -> (RustConnection, Keycode, Vec<Keysym>, usize, Vec<ModMask>) {
         self.armed = false;
         (
             self.conn.take().expect("CapsRemapGuard conn"),
             self.trigger,
             std::mem::take(&mut self.orig_keysyms),
+            self.keysyms_per_keycode,
             std::mem::take(&mut self.masks),
         )
     }
@@ -441,11 +448,12 @@ impl Drop for CapsRemapGuard {
             let _ = conn.ungrab_key(self.trigger, self.root, *mask);
         }
         let restore = caps_lock_restore_keysyms(&self.orig_keysyms);
+        let payload = pad_keysyms(restore, self.keysyms_per_keycode);
         let _ = conn.change_keyboard_mapping(
             1,
             self.trigger,
-            restore.len() as u8,
-            restore,
+            payload.len() as u8,
+            &payload,
         );
         let _ = conn.flush();
     }

@@ -151,6 +151,15 @@ pub fn status() -> Result<()> {
 
 /// Best-effort: if a prior SIGKILL left Caps Lock as NoSymbol, put it back.
 fn repair_caps_lock_if_needed() {
+    // Live daemon intentionally maps Caps → NoSymbol. Never "heal" under it.
+    match is_running() {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            log::warn!("skipping Caps Lock repair; cannot check daemon pid: {e:#}");
+            return;
+        }
+    }
     match restore_caps_lock_mapping() {
         Ok(true) => eprintln!(
             "dictate: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
@@ -420,6 +429,44 @@ extern "C" fn on_sigterm(_sig: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
+fn jail_wav_path(path: &Path) -> Result<PathBuf, ApiError> {
+    let canon = path.canonicalize().map_err(|_| {
+        ApiError::new(
+            "wav_path not found",
+            Some("pass an existing WAV under $HOME, $TMPDIR, or XDG cache/runtime".into()),
+        )
+    })?;
+    if !canon.is_file() {
+        return Err(ApiError::new(
+            "wav_path is not a regular file",
+            Some("pass a WAV file path, not a directory".into()),
+        ));
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for key in ["HOME", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"] {
+        if let Some(v) = std::env::var_os(key) {
+            if !v.is_empty() {
+                roots.push(PathBuf::from(v));
+            }
+        }
+    }
+    if roots.iter().all(|r| r.as_os_str() != "/tmp") {
+        roots.push(PathBuf::from("/tmp"));
+    }
+    let allowed = roots.iter().any(|root| {
+        root.canonicalize()
+            .ok()
+            .is_some_and(|root| canon.starts_with(root))
+    });
+    if !allowed {
+        return Err(ApiError::new(
+            "wav_path is outside the allowed directories",
+            Some("place the WAV under $HOME or $TMPDIR (symlinks escaping those roots are rejected)".into()),
+        ));
+    }
+    Ok(canon)
+}
+
 fn resolve_api_socket(api: &ApiConfig) -> Result<PathBuf> {
     match api.configured_path() {
         Some(p) => config::expand_tilde(p),
@@ -449,12 +496,24 @@ struct DaemonHandler {
 
 impl DaemonHandler {
     fn load_wav(&self, path: &Path) -> Result<Vec<f32>, ApiError> {
-        // Same-uid API can pass any path; still bound decode size so a huge
-        // WAV cannot OOM the resident daemon.
-        let (raw, rate) = dsp::read_wav(path).map_err(|e| {
+        // Same-uid peers could otherwise point at any readable path. Jail to
+        // HOME / TMPDIR / XDG_* after canonicalize (no symlink escape).
+        let path = jail_wav_path(path)?;
+        // Bound decode size so a huge WAV cannot OOM the resident daemon.
+        if let Ok(meta) = fs::metadata(&path) {
+            // ~3 min mono f32 @ 48 kHz ≈ 35 MB raw; reject absurd files early.
+            const MAX_WAV_BYTES: u64 = 64 * 1024 * 1024;
+            if meta.len() > MAX_WAV_BYTES {
+                return Err(ApiError::new(
+                    "wav_path exceeds 64 MiB",
+                    Some("trim the WAV or send pcm_f32_b64 in smaller utterance.audio chunks".into()),
+                ));
+            }
+        }
+        let (raw, rate) = dsp::read_wav(&path).map_err(|_e| {
             ApiError::new(
-                format!("failed to read wav_path: {e:#}"),
-                Some("pass a mono/stereo WAV file path readable by the daemon".into()),
+                "failed to read wav_path",
+                Some("pass a mono/stereo WAV under $HOME or $TMPDIR".into()),
             )
         })?;
         if raw.len() > api::MAX_UTTERANCE_SAMPLES.saturating_mul(4) {
