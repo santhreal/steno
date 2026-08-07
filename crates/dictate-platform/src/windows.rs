@@ -23,6 +23,7 @@ use dictate_core::{InjectTyper, ResolvedUi, resolve_ui};
 use fontdue::{Font, FontSettings};
 use std::f32::consts::PI;
 use std::path::Path;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Mutex, OnceLock};
@@ -81,6 +82,9 @@ struct HookState {
     tx: SyncSender<HotkeyEvent>,
     held: bool,
     press_at: Option<Instant>,
+    /// VKs seen during CANCEL_GRACE (already held before Caps). Auto-repeat
+    /// of those keys must not Cancel after grace.
+    suppress_cancel: HashSet<u32>,
 }
 
 static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
@@ -224,6 +228,7 @@ fn hotkey_thread_main(tx: SyncSender<HotkeyEvent>, ready_tx: mpsc::Sender<Result
             tx,
             held: false,
             press_at: None,
+            suppress_cancel: HashSet::new(),
         });
     }
 
@@ -296,11 +301,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
                     if !state.held {
                         state.held = true;
                         state.press_at = Some(Instant::now());
+                        state.suppress_cancel.clear();
                         let _ = state.tx.try_send(HotkeyEvent::Press);
                     }
                 } else if is_up && state.held {
                     state.held = false;
                     state.press_at = None;
+                    state.suppress_cancel.clear();
                     let _ = state.tx.try_send(HotkeyEvent::Release);
                 }
             }
@@ -308,7 +315,8 @@ unsafe extern "system" fn low_level_keyboard_proc(
         return 1;
     }
 
-    // Cancel: any non-modifier physical key while held (after grace).
+    // Cancel: any non-modifier physical key while held (after grace),
+    // except keys already down during grace (their auto-repeat).
     if is_down && !injected && !is_modifier(vk) {
         if let Ok(mut guard) = HOOK_STATE.lock() {
             if let Some(state) = guard.as_mut() {
@@ -316,9 +324,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
                     let past_grace = state
                         .press_at
                         .is_none_or(|t| t.elapsed() >= CANCEL_GRACE);
-                    if past_grace {
+                    let vk_u = vk as u32;
+                    if !past_grace {
+                        state.suppress_cancel.insert(vk_u);
+                    } else if !state.suppress_cancel.contains(&vk_u) {
                         state.held = false;
                         state.press_at = None;
+                        state.suppress_cancel.clear();
                         let _ = state.tx.try_send(HotkeyEvent::Cancel);
                     }
                 }

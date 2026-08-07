@@ -24,6 +24,7 @@
 //! Manual: `xmodmap -e 'keycode 66 = Caps_Lock'`
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -73,6 +74,9 @@ pub struct Hotkey {
     xtest_device: Option<u16>,
     /// When the current hold started (auto-repeat grace for cancels).
     press_at: Option<Instant>,
+    /// Keys whose XI2 presses arrived during CANCEL_GRACE (already held
+    /// before Caps Lock). Their auto-repeats must not Cancel after grace.
+    suppress_cancel: HashSet<Keycode>,
     /// One peeked event held back from auto-repeat coalescing.
     pending: Option<Event>,
     /// Modifier masks we grabbed (plain + Caps/NumLock variants).
@@ -82,9 +86,9 @@ pub struct Hotkey {
     source_held: bool,
 }
 
-/// A cancel keypress within this window after the activating press is
-/// almost certainly auto-repeat of a key the user was already holding
-/// (XI2 raw events fire for repeats), not a deliberate cancel.
+/// Window after the activating Caps Lock press during which non-trigger
+/// XI2 key events are recorded as pre-held (auto-repeat), not Cancel.
+/// After grace, those keycodes stay suppressed; a *different* key cancels.
 const CANCEL_GRACE: Duration = Duration::from_millis(150);
 
 /// Restores Caps Lock keysyms if a prior daemon left the keycode mapped
@@ -234,6 +238,7 @@ impl Hotkey {
             modifiers,
             xtest_device,
             press_at: None,
+            suppress_cancel: HashSet::new(),
             pending: None,
             masks,
             source_held: false,
@@ -317,9 +322,14 @@ impl Hotkey {
                         if *held
                             && !self.modifiers.contains(&ev.detail)
                             && self.past_grace()
+                            && !self.suppress_cancel.contains(&ev.detail)
                         {
                             *held = false;
+                            self.suppress_cancel.clear();
                             return Ok(HotkeyEvent::Cancel);
+                        }
+                        if *held && !self.past_grace() && !self.modifiers.contains(&ev.detail) {
+                            self.suppress_cancel.insert(ev.detail);
                         }
                         continue;
                     }
@@ -328,6 +338,7 @@ impl Hotkey {
                     }
                     *held = true;
                     self.press_at = Some(Instant::now());
+                    self.suppress_cancel.clear();
                     return Ok(HotkeyEvent::Press);
                 }
                 Some(Event::KeyRelease(ev)) => {
@@ -364,6 +375,7 @@ impl Hotkey {
                         self.pending = Some(first);
                     }
                     *held = false;
+                    self.suppress_cancel.clear();
                     return Ok(HotkeyEvent::Release);
                 }
                 Some(Event::XinputRawKeyPress(ev)) => {
@@ -379,10 +391,17 @@ impl Hotkey {
                     if u32::from(key) != ev.detail {
                         continue; // out-of-range keycode: not a cancel candidate
                     }
-                    if key == self.trigger || self.modifiers.contains(&key) || !self.past_grace() {
+                    if !should_cancel_key(
+                        key,
+                        self.trigger,
+                        &self.modifiers,
+                        !self.past_grace(),
+                        &mut self.suppress_cancel,
+                    ) {
                         continue;
                     }
                     *held = false;
+                    self.suppress_cancel.clear();
                     return Ok(HotkeyEvent::Cancel);
                 }
                 Some(_) => continue,
@@ -491,6 +510,32 @@ fn recover_orig_keysyms(keysyms: Vec<Keysym>) -> Vec<Keysym> {
     } else {
         keysyms
     }
+}
+
+
+/// Whether an XI2/raw key should Cancel the current hold.
+///
+/// `in_grace`: still inside CANCEL_GRACE after Caps Lock press.
+/// `suppress`: keycodes seen during grace (pre-held). Mutated when
+/// `in_grace` is true — the key is recorded and never cancels yet.
+fn should_cancel_key(
+    key: Keycode,
+    trigger: Keycode,
+    modifiers: &[Keycode],
+    in_grace: bool,
+    suppress: &mut HashSet<Keycode>,
+) -> bool {
+    if key == trigger || modifiers.contains(&key) {
+        return false;
+    }
+    if in_grace {
+        suppress.insert(key);
+        return false;
+    }
+    if suppress.contains(&key) {
+        return false;
+    }
+    true
 }
 
 fn is_all_nosymbol(keysyms: &[Keysym]) -> bool {
@@ -658,6 +703,27 @@ mod tests {
         assert!(dead.iter().all(|&k| k == NO_SYMBOL));
         assert_eq!(recover_orig_keysyms(dead), vec![XK_CAPS_LOCK]);
     }
+    #[test]
+    fn preheld_key_does_not_cancel_after_grace() {
+        let mut suppress = HashSet::new();
+        let mods = vec![];
+        // During grace: record, do not cancel.
+        assert!(!should_cancel_key(38, 66, &mods, true, &mut suppress));
+        assert!(suppress.contains(&38));
+        // After grace: same key still suppressed.
+        assert!(!should_cancel_key(38, 66, &mods, false, &mut suppress));
+        // A different key cancels.
+        assert!(should_cancel_key(39, 66, &mods, false, &mut suppress));
+    }
+
+    #[test]
+    fn trigger_and_modifiers_never_cancel() {
+        let mut suppress = HashSet::new();
+        let mods = vec![50u8]; // Shift_L typical
+        assert!(!should_cancel_key(66, 66, &mods, false, &mut suppress));
+        assert!(!should_cancel_key(50, 66, &mods, false, &mut suppress));
+    }
+
 
     #[test]
     fn is_all_nosymbol_detects_stuck_mapping() {
