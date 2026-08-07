@@ -59,7 +59,9 @@ decode:
 
 `Stage::Recording` → `Stage::Transcribing` → `Stage::Done` (or `Error`).
 
-(Product docs sometimes call these Listening / Thinking / Done.)
+Default stage labels are still `"Transcribing"` / `"Processing"` /
+`"Done"` / `"Error"`; hosts may remap them via `[ui.stages]` (for example
+Listening / Thinking).
 
 ```rust
 use dictate_core::{Config, Engine, NullOverlay, OverlayBackend, Session, Stage};
@@ -83,12 +85,38 @@ let text = session.transcribe_f32(&pcm)?;
 
 Use `NullOverlay` for servers/tests (no GPU / no DISPLAY). Custom status
 animations are a compile-time `OverlayBackend` impl — no plugin ABI.
+`ui.theme` is only a hint for `dictate_platform::create`; hosts that inject
+their own backend may ignore the theme string entirely while still reading
+palette / labels via `resolve_ui` if desired (see below).
 
 Stage order without loading a model (tests / custom decode):
 
 ```rust
 Session::drive_overlay_stages(&NullOverlay, 0, || Ok::<_, anyhow::Error>(()));
 ```
+
+## UI resolution (`resolve_ui`)
+
+Theme palettes and stage copy live in `dictate-core`. Platforms and host
+apps share the same helpers:
+
+```rust
+use dictate_core::{resolve_ui, stage_label, list_themes, Stage};
+
+let ui = resolve_ui(&cfg.ui);          // ResolvedUi { theme, colors, stages, … }
+let label = stage_label(&cfg.ui, Stage::Recording);
+let names = list_themes();             // pill | mono | dusk | dawn | contrast
+```
+
+- `resolve_ui` applies the preset (`pill` default) then optional
+  `[ui.colors]` hex overrides into a `ThemePalette`, and copies
+  `[ui.stages]` / `overlay` / `done_flash_ms` into `ResolvedUi`.
+- Unknown themes warn and fall back to pill (fail-open). `null|none|off`
+  still resolve to pill colors here; platform `create` maps those names to
+  `NullOverlay`.
+- Custom `OverlayBackend` remains valid: inject your own animation, ignore
+  `ui.theme`, and optionally still call `resolve_ui` when you want the
+  shared palette / stage labels.
 
 ## Typing (fail-closed)
 
@@ -126,8 +154,10 @@ Linux also implements `dictate_platform::HotkeySource` for `Hotkey` and
 `dictate_platform::Typer` for `Emitter` (Type mode only; Stdout mode refuses).
 
 Windows and macOS ship the same traits for Caps Lock PTT + typing
-(`SendInput` / `CGEvent`); overlay creation returns `NullOverlay` on both
-(no HWND / NSPanel pill in v1).
+(`SendInput` / `CGEvent`). Overlays: layered HWND chip (Windows) and
+minimal AppKit `NSPanel` chip (macOS); both call `resolve_ui` for palette
++ labels. `overlay = false` / `theme` `null|none|off` still select
+`NullOverlay`. Not live-session verified on this Linux host.
 
 ## Daemon API from another process
 
@@ -185,5 +215,20 @@ backend = "rules"            # RuleRefine; unknown → warn + rules
 [ui]
 overlay = true
 done_flash_ms = 1200
-theme = "pill"               # hosts ignore this and inject OverlayBackend
+theme = "dusk"               # hint for platform create; hosts may ignore
+                             # and inject OverlayBackend instead
+
+[ui.colors]                  # optional #RRGGBB / #RRGGBBAA
+fg = "#ECECF0"
+
+[ui.stages]
+recording = "Listening"      # defaults: Transcribing / Processing / Done / Error
+transcribing = "Thinking"
+done = "Done"
+error = "Error"
+show_timer = true
+pulse_ms = 180
 ```
+
+Library helpers: `resolve_ui`, `stage_label`, `ThemePalette`, `ResolvedUi`,
+`list_themes`, plus surgical `config_get` / `config_set` for dotted keys.

@@ -9,14 +9,15 @@
 //! Implements [`OverlayBackend`] stages. Visuals are a simplified always-on-top
 //! rounded chip (stage label + basic icon animation)  -  not a pixel-perfect
 //! port of the Linux X11 pill (no soft CSS shadow, no recording timer meta,
-//! coarser motion). `UiConfig.overlay = false` / theme `null|none|off` still
-//! select [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font errors
+//! coarser motion). Colors/labels come from [`dictate_core::resolve_ui`].
+//! `UiConfig.overlay = false` / theme `null|none|off` still select
+//! [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font errors
 //! disable the chip without affecting dictation.
 
 use anyhow::{Context, Result, bail, ensure};
 use dictate_core::config::UiConfig;
 use dictate_core::overlay::{NullOverlay, OverlayBackend, Stage};
-use dictate_core::InjectTyper;
+use dictate_core::{InjectTyper, ResolvedUi, resolve_ui};
 use fontdue::{Font, FontSettings};
 use std::f32::consts::PI;
 use std::path::Path;
@@ -545,11 +546,12 @@ impl Overlay {
         if !cfg.overlay {
             return Self { tx: None, failed };
         }
+        let ui = resolve_ui(cfg);
         let (tx, rx) = mpsc::channel::<Stage>();
         let failed2 = failed.clone();
         match thread::Builder::new()
             .name("dictate-win-overlay".into())
-            .spawn(move || run_overlay(rx, failed2))
+            .spawn(move || run_overlay(rx, failed2, ui))
         {
             Ok(_) => Self {
                 tx: Some(tx),
@@ -600,28 +602,29 @@ impl OverlayBackend for Overlay {
 ///
 /// - `overlay = false` → [`NullOverlay`]
 /// - `theme` of `"null"` / `"none"` / `"off"` → [`NullOverlay`]
-/// - `"pill"`, empty, or unknown → layered HWND [`Overlay`] (unknown logs a warning)
+/// - otherwise → layered HWND [`Overlay`] (palette via [`resolve_ui`])
 pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
     if !cfg.overlay {
         return Box::new(NullOverlay);
     }
     match cfg.theme.as_str() {
         "null" | "none" | "off" => Box::new(NullOverlay),
-        "pill" | "" => Box::new(Overlay::start(cfg)),
-        other => {
-            log::warn!("unknown ui.theme {other:?}; falling back to Windows status chip");
-            Box::new(Overlay::start(cfg))
-        }
+        _ => Box::new(Overlay::start(cfg)),
     }
 }
 
-fn label(stage: Stage) -> &'static str {
+fn rgba(c: [u8; 4]) -> Color {
+    Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+/// Stage copy from resolved UI (owned strings live on [`ResolvedUi`]).
+fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
     match stage {
         Stage::Hidden => "",
-        Stage::Recording => "Transcribing",
-        Stage::Transcribing => "Processing",
-        Stage::Done => "Done",
-        Stage::Error => "Error",
+        Stage::Recording => ui.stages.recording.as_str(),
+        Stage::Transcribing => ui.stages.transcribing.as_str(),
+        Stage::Done => ui.stages.done.as_str(),
+        Stage::Error => ui.stages.error.as_str(),
     }
 }
 
@@ -644,14 +647,14 @@ const CLASS_NAME: &[u16] = &[
     b'h' as u16, b'i' as u16, b'p' as u16, 0,
 ];
 
-fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>) {
-    if let Err(e) = run_overlay_inner(rx) {
+fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>, ui: ResolvedUi) {
+    if let Err(e) = run_overlay_inner(rx, &ui) {
         log::debug!("Windows overlay disabled: {e:#}");
         failed.store(true, Ordering::Relaxed);
     }
 }
 
-fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
+fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     let font = load_font().context("overlay font")?;
     let hwnd = unsafe { create_chip_window() }.context("create status chip HWND")?;
     let mut layer = unsafe { LayerBuffer::new(chip::WIN_W as i32, chip::WIN_H as i32) }
@@ -721,7 +724,7 @@ fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
 
         let anim_t = anim_start.elapsed().as_secs_f32();
         let stage_age = stage_changed_at.elapsed().as_secs_f32();
-        draw_chip(&mut pixmap, &font, stage, anim_t, stage_age);
+        draw_chip(&mut pixmap, &font, stage, anim_t, stage_age, ui);
         unsafe {
             layer.blit_skia(&pixmap)?;
             present_chip(hwnd, &layer)?;
@@ -1025,86 +1028,112 @@ fn pill_width(stage: Stage) -> f32 {
     }
 }
 
-fn draw_chip(pixmap: &mut SkPixmap, font: &Font, stage: Stage, anim_t: f32, stage_age: f32) {
+fn draw_chip(
+    pixmap: &mut SkPixmap,
+    font: &Font,
+    stage: Stage,
+    anim_t: f32,
+    stage_age: f32,
+    ui: &ResolvedUi,
+) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
     if stage == Stage::Hidden {
         return;
     }
 
+    let colors = &ui.colors;
     let pill_w = pill_width(stage);
     let pill_h = chip::PILL_H;
     let x = (chip::WIN_W as f32 - pill_w) * 0.5;
     let y = chip::TOP_PAD;
 
-    // Flat dark shadow (no blur  -  documented delta vs Linux).
+    // Optional stage-change scale pulse (pulse_ms==0 disables).
+    let pulse_secs = ui.stages.pulse_ms as f32 / 1000.0;
+    let pulse = if ui.stages.pulse_ms == 0 || pulse_secs <= 0.0 {
+        1.0
+    } else if stage_age < pulse_secs {
+        let t = stage_age / pulse_secs;
+        let e = 1.0 - (1.0 - t).powi(3);
+        0.97 + 0.03 * e
+    } else {
+        1.0
+    };
+    let cx = x + pill_w * 0.5;
+    let cy = y + pill_h * 0.5;
+    let pw = pill_w * pulse;
+    let ph = pill_h * pulse;
+    let px = cx - pw * 0.5;
+    let py = cy - ph * 0.5;
+
+    // Flat shadow (no blur — documented delta vs Linux).
     draw_round_rect(
         pixmap,
-        x + 2.0,
-        y + 3.0,
-        pill_w,
-        pill_h,
-        pill_h * 0.5,
-        Color::from_rgba8(0, 0, 0, 40),
+        px + 2.0,
+        py + 3.0,
+        pw,
+        ph,
+        ph * 0.5,
+        rgba(colors.shadow),
     );
 
-    draw_round_rect(
-        pixmap,
-        x,
-        y,
-        pill_w,
-        pill_h,
-        pill_h * 0.5,
-        Color::from_rgba8(255, 255, 255, 240),
-    );
+    draw_round_rect(pixmap, px, py, pw, ph, ph * 0.5, rgba(colors.bg));
     stroke_round_rect(
         pixmap,
-        x + 0.5,
-        y + 0.5,
-        pill_w - 1.0,
-        pill_h - 1.0,
-        pill_h * 0.5,
-        Color::from_rgba8(17, 17, 17, 41),
+        px + 0.5,
+        py + 0.5,
+        pw - 1.0,
+        ph - 1.0,
+        ph * 0.5,
+        rgba(colors.border),
         1.0,
     );
 
-    let icon = chip::ICON;
-    let ix = x + chip::PAD_X;
-    let iy = y + (pill_h - icon) * 0.5;
+    let icon = chip::ICON * pulse;
+    let pad_x = chip::PAD_X * pulse;
+    let gap = chip::GAP * pulse;
+    let ix = px + pad_x;
+    let iy = py + (ph - icon) * 0.5;
+    let icon_disc = if stage == Stage::Error {
+        rgba(colors.error)
+    } else {
+        rgba(colors.icon_bg)
+    };
     fill_circle(
         pixmap,
         ix + icon * 0.5,
         iy + icon * 0.5,
         icon * 0.5,
-        Color::from_rgba8(17, 17, 17, 255),
+        icon_disc,
     );
 
+    let glyph = rgba(colors.icon_fg);
     match stage {
-        Stage::Recording => draw_wave(pixmap, ix, iy, icon, anim_t),
-        Stage::Transcribing => draw_spinner(pixmap, ix, iy, icon, anim_t),
-        Stage::Done => draw_check(pixmap, ix, iy, icon, stage_age),
-        Stage::Error => draw_x(pixmap, ix, iy, icon),
+        Stage::Recording => draw_wave(pixmap, ix, iy, icon, anim_t, glyph),
+        Stage::Transcribing => draw_spinner(pixmap, ix, iy, icon, anim_t, glyph),
+        Stage::Done => draw_check(pixmap, ix, iy, icon, stage_age, glyph),
+        Stage::Error => draw_x(pixmap, ix, iy, icon, glyph),
         Stage::Hidden => {}
     }
 
-    let text = label(stage);
-    let tx = ix + icon + chip::GAP;
-    let ty = y + pill_h * 0.5;
+    let text = stage_text(ui, stage);
+    let tx = ix + icon + gap;
+    let ty = py + ph * 0.5;
     draw_text(
         pixmap,
         font,
         text,
         tx,
         ty,
-        chip::LABEL_PX,
-        Color::from_rgba8(17, 17, 17, 230),
+        chip::LABEL_PX * pulse,
+        rgba(colors.fg),
     );
 }
 
-fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let mut paint = Paint::default();
-    paint.set_color(Color::from_rgba8(255, 255, 255, 230));
+    paint.set_color(color);
     paint.anti_alias = true;
     for i in 0..4 {
         let phase = t * 6.0 + i as f32 * 0.7;
@@ -1124,7 +1153,7 @@ fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
     }
 }
 
-fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let r = icon * 0.28;
@@ -1132,7 +1161,7 @@ fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
     let a1 = a0 + PI * 1.35;
     if let Some(path) = arc_path(cx, cy, r, a0, a1) {
         let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(255, 255, 255, 240));
+        paint.set_color(color);
         paint.anti_alias = true;
         if let Some(ribbon) = arc_ribbon(cx, cy, r, a0, a1, icon * 0.07) {
             pixmap.fill_path(
@@ -1157,7 +1186,7 @@ fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
     }
 }
 
-fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
+fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let progress = (age / 0.25).clamp(0.0, 1.0);
@@ -1179,7 +1208,7 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
     }
     if let Some(path) = pb.finish() {
         let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(255, 255, 255, 240));
+        paint.set_color(color);
         paint.anti_alias = true;
         pixmap.stroke_path(
             &path,
@@ -1196,12 +1225,12 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
     }
 }
 
-fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
+fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let o = icon * 0.16;
     let mut paint = Paint::default();
-    paint.set_color(Color::from_rgba8(255, 255, 255, 240));
+    paint.set_color(color);
     paint.anti_alias = true;
     let stroke = tiny_skia::Stroke {
         width: icon * 0.08,
@@ -1220,6 +1249,7 @@ fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
         }
     }
 }
+
 
 fn draw_round_rect(
     pixmap: &mut SkPixmap,
@@ -1400,9 +1430,10 @@ fn draw_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{create, join, label, sanitize_for_typing};
+    use super::{create, join, sanitize_for_typing, stage_text};
     use dictate_core::config::UiConfig;
     use dictate_core::overlay::{OverlayBackend, Stage};
+    use dictate_core::resolve_ui;
 
     #[test]
     fn sanitize_keeps_newline_strips_other_controls() {
@@ -1461,10 +1492,11 @@ mod tests {
 
     #[test]
     fn stage_labels_match_linux_pill() {
-        assert_eq!(label(Stage::Recording), "Transcribing");
-        assert_eq!(label(Stage::Transcribing), "Processing");
-        assert_eq!(label(Stage::Done), "Done");
-        assert_eq!(label(Stage::Error), "Error");
-        assert_eq!(label(Stage::Hidden), "");
+        let ui = resolve_ui(&UiConfig::default());
+        assert_eq!(stage_text(&ui, Stage::Recording), "Transcribing");
+        assert_eq!(stage_text(&ui, Stage::Transcribing), "Processing");
+        assert_eq!(stage_text(&ui, Stage::Done), "Done");
+        assert_eq!(stage_text(&ui, Stage::Error), "Error");
+        assert_eq!(stage_text(&ui, Stage::Hidden), "");
     }
 }

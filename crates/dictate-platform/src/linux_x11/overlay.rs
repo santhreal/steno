@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use dictate_core::config::UiConfig;
 use dictate_core::overlay::{NullOverlay, OverlayBackend, Stage};
+use dictate_core::{ResolvedUi, resolve_ui};
 use fontdue::{Font, FontSettings};
 use tiny_skia::{
     Color, FillRule, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint,
@@ -29,28 +30,30 @@ use tiny_skia::{
 ///
 /// - `overlay = false` → [`NullOverlay`]
 /// - `theme` of `"null"` / `"none"` / `"off"` → [`NullOverlay`]
-/// - `"pill"`, empty, or unknown → X11 [`Overlay`] (unknown logs a warning)
+/// - otherwise → X11 [`Overlay`] (palette via [`resolve_ui`]; unknown themes
+///   fall back to pill colors fail-open)
 pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
     if !cfg.overlay {
         return Box::new(NullOverlay);
     }
     match cfg.theme.as_str() {
         "null" | "none" | "off" => Box::new(NullOverlay),
-        "pill" | "" => Box::new(Overlay::start(cfg)),
-        other => {
-            log::warn!("unknown ui.theme {other:?}; falling back to pill");
-            Box::new(Overlay::start(cfg))
-        }
+        _ => Box::new(Overlay::start(cfg)),
     }
 }
 
-fn label(stage: Stage) -> &'static str {
+fn rgba(c: [u8; 4]) -> Color {
+    Color::from_rgba8(c[0], c[1], c[2], c[3])
+}
+
+/// Stage copy from resolved UI (owned strings live on [`ResolvedUi`]).
+fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
     match stage {
         Stage::Hidden => "",
-        Stage::Recording => "Transcribing",
-        Stage::Transcribing => "Processing",
-        Stage::Done => "Done",
-        Stage::Error => "Error",
+        Stage::Recording => ui.stages.recording.as_str(),
+        Stage::Transcribing => ui.stages.transcribing.as_str(),
+        Stage::Done => ui.stages.done.as_str(),
+        Stage::Error => ui.stages.error.as_str(),
     }
 }
 
@@ -67,11 +70,12 @@ impl Overlay {
         if !cfg.overlay || std::env::var_os("DISPLAY").is_none() {
             return Self { tx: None, failed };
         }
+        let ui = resolve_ui(cfg);
         let (tx, rx) = channel::<Stage>();
         let failed2 = failed.clone();
         match thread::Builder::new()
             .name("dictate-overlay".into())
-            .spawn(move || run(rx, failed2))
+            .spawn(move || run(rx, failed2, ui))
         {
             Ok(_) => Self {
                 tx: Some(tx),
@@ -135,7 +139,6 @@ mod mock {
     pub const BOTTOM_MARGIN: f32 = 48.0; // gap above the screen edge
     pub const SHADOW_DY: f32 = 12.0;
     pub const SHADOW_BLUR: f32 = 12.0; // box-blur radius ≈ css 34px blur
-    pub const SHADOW_ALPHA: u8 = 28; // rgba(0,0,0,.11)
 }
 
 /// Device-space geometry: logical metrics × the display scale factor.
@@ -229,14 +232,18 @@ fn primary_rect<C: x11rb::connection::Connection>(
     ))
 }
 
-fn run(rx: Receiver<Stage>, failed: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    if let Err(e) = run_inner(&rx) {
+fn run(
+    rx: Receiver<Stage>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ui: ResolvedUi,
+) {
+    if let Err(e) = run_inner(&rx, &ui) {
         log::debug!("overlay disabled: {e}");
         failed.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
+fn run_inner(rx: &Receiver<Stage>, ui: &ResolvedUi) -> anyhow::Result<()> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
     use x11rb::wrapper::ConnectionExt as _;
@@ -383,6 +390,7 @@ fn run_inner(rx: &Receiver<Stage>) -> anyhow::Result<()> {
                     stage_since.elapsed().as_secs_f32(),
                     rec_since.elapsed().as_secs(),
                     &geo,
+                    ui,
                 );
                 if !mapped {
                     conn.map_window(win)?;
@@ -512,16 +520,22 @@ fn draw_frame(
     stage_age: f32,
     rec_secs: u64,
     geo: &Geo,
+    ui: &ResolvedUi,
 ) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
 
+    let colors = &ui.colors;
     let pill_h = geo.l(mock::PILL_H);
     let x = (geo.win_w as f32 - pill_w) * 0.5;
     let y = geo.l(mock::TOP_PAD);
 
-    // Brief scale(.97→1) pulse on every state change (mock transition cue).
-    let pulse = if stage_age < 0.18 {
-        let t = stage_age / 0.18;
+    // Brief scale(.97→1) pulse on every state change; duration from pulse_ms
+    // (0 disables). Default 180ms matches the historical 0.18s cue.
+    let pulse_secs = ui.stages.pulse_ms as f32 / 1000.0;
+    let pulse = if ui.stages.pulse_ms == 0 || pulse_secs <= 0.0 {
+        1.0
+    } else if stage_age < pulse_secs {
+        let t = stage_age / pulse_secs;
         let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
         0.97 + 0.03 * e
     } else {
@@ -534,18 +548,10 @@ fn draw_frame(
     let px = cx - pw * 0.5;
     let py = cy - ph * 0.5;
 
-    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, geo);
+    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, geo, colors.shadow);
 
-    // White pill body rgba(255,255,255,.94) + hairline border.
-    draw_round_rect(
-        pixmap,
-        px,
-        py,
-        pw,
-        ph,
-        ph * 0.5,
-        Color::from_rgba8(255, 255, 255, 240),
-    );
+    // Pill body + hairline border from resolved palette.
+    draw_round_rect(pixmap, px, py, pw, ph, ph * 0.5, rgba(colors.bg));
     stroke_round_rect(
         pixmap,
         px + 0.5 * geo.s,
@@ -553,7 +559,7 @@ fn draw_frame(
         pw - 1.0 * geo.s,
         ph - 1.0 * geo.s,
         ph * 0.5,
-        Color::from_rgba8(17, 17, 17, 41), // rgba(17,17,17,.16)
+        rgba(colors.border),
         1.0 * geo.s,
     );
 
@@ -563,19 +569,25 @@ fn draw_frame(
     let gap = geo.l(mock::GAP) * pulse;
     let ix = px + pad_x;
     let iy = py + (ph - icon) * 0.5;
+    let icon_disc = if stage == Stage::Error {
+        rgba(colors.error)
+    } else {
+        rgba(colors.icon_bg)
+    };
     fill_circle(
         pixmap,
         ix + icon * 0.5,
         iy + icon * 0.5,
         icon * 0.5,
-        Color::from_rgba8(17, 17, 17, 255),
+        icon_disc,
     );
 
+    let glyph = rgba(colors.icon_fg);
     match stage {
-        Stage::Recording => draw_wave(pixmap, ix, iy, icon, anim_t),
-        Stage::Transcribing => draw_spinner(pixmap, ix, iy, icon, anim_t),
-        Stage::Done => draw_check(pixmap, ix, iy, icon, stage_age),
-        Stage::Error => draw_x(pixmap, ix, iy, icon),
+        Stage::Recording => draw_wave(pixmap, ix, iy, icon, anim_t, glyph),
+        Stage::Transcribing => draw_spinner(pixmap, ix, iy, icon, anim_t, glyph),
+        Stage::Done => draw_check(pixmap, ix, iy, icon, stage_age, glyph),
+        Stage::Error => draw_x(pixmap, ix, iy, icon, glyph),
         Stage::Hidden => {}
     }
 
@@ -584,15 +596,15 @@ fn draw_frame(
     draw_text(
         pixmap,
         font,
-        label(stage),
+        stage_text(ui, stage),
         text_x,
         py + ph * 0.5,
         geo.l(mock::LABEL_PX) * pulse,
-        Color::from_rgba8(17, 17, 17, 255),
+        rgba(colors.fg),
     );
 
-    // Elapsed timer on the live-capture state.
-    if stage == Stage::Recording {
+    // Elapsed timer on the live-capture state (honors show_timer).
+    if stage == Stage::Recording && ui.stages.show_timer {
         let meta = format!("{}:{:02}", rec_secs / 60, rec_secs % 60);
         let meta_size = geo.l(mock::META_PX) * pulse;
         let tw = text_width(font, &meta, meta_size);
@@ -603,13 +615,13 @@ fn draw_frame(
             px + pw - pad_x - tw,
             py + ph * 0.5,
             meta_size,
-            Color::from_rgba8(119, 119, 119, 255),
+            rgba(colors.meta),
         );
     }
 }
 
-/// The mock's `0 12px 34px rgba(0,0,0,.11)` drop shadow: a rounded-rect
-/// alpha mask, box-blurred (3 passes ≈ gaussian), tinted black.
+/// Drop shadow: rounded-rect alpha mask, box-blurred, tinted with palette shadow.
+#[allow(clippy::too_many_arguments)]
 fn draw_shadow(
     pixmap: &mut SkPixmap,
     mask: &mut SkPixmap,
@@ -618,6 +630,7 @@ fn draw_shadow(
     w: f32,
     h: f32,
     geo: &Geo,
+    shadow: [u8; 4],
 ) {
     mask.fill(Color::from_rgba8(0, 0, 0, 0));
     draw_round_rect(
@@ -627,7 +640,7 @@ fn draw_shadow(
         w,
         h,
         h * 0.5,
-        Color::from_rgba8(0, 0, 0, mock::SHADOW_ALPHA),
+        rgba(shadow),
     );
     box_blur_alpha(mask, geo.l(mock::SHADOW_BLUR).max(1.0) as u32);
     pixmap.draw_pixmap(
@@ -686,7 +699,7 @@ fn box_blur_alpha(pm: &mut SkPixmap, radius: u32) {
     }
 }
 
-fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let u = icon / mock::ICON; // device px per logical px
@@ -696,10 +709,11 @@ fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
     let gap = 2.0 * u;
     let total = 4.0 * bar_w + 3.0 * gap;
     let left = cx - total * 0.5;
+    let base_a = color.alpha();
     for (i, (&h, &d)) in heights.iter().zip(delays.iter()).enumerate() {
         let phase = ((t + d) * 2.0 * PI).sin() * 0.5 + 0.5; // 0..1
         let scale = 0.55 + 0.60 * phase; // mock: scaleY .55↔1.15
-        let alpha = (0.65 + 0.35 * phase) * 255.0; // mock: opacity .65↔1
+        let alpha = ((0.65 + 0.35 * phase) * base_a * 255.0).round() as u8;
         let bh = (h * u * scale).max(bar_w);
         let x = left + i as f32 * (bar_w + gap);
         let y = cy - bh * 0.5;
@@ -711,12 +725,17 @@ fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
             bar_w,
             bh,
             bar_w * 0.5,
-            Color::from_rgba8(255, 255, 255, alpha.round() as u8),
+            Color::from_rgba8(
+                (color.red() * 255.0) as u8,
+                (color.green() * 255.0) as u8,
+                (color.blue() * 255.0) as u8,
+                alpha,
+            ),
         );
     }
 }
 
-fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
+fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let u = icon / mock::ICON;
@@ -730,20 +749,24 @@ fn draw_spinner(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32) {
         anti_alias: true,
         ..Paint::default()
     };
-    // Track ring rgba(255,255,255,.35).
-    paint.set_color(Color::from_rgba8(255, 255, 255, 89));
+    // Track ring at ~35% of glyph alpha.
+    let cr = (color.red() * 255.0) as u8;
+    let cg = (color.green() * 255.0) as u8;
+    let cb = (color.blue() * 255.0) as u8;
+    let ca = (color.alpha() * 255.0) as u8;
+    paint.set_color(Color::from_rgba8(cr, cg, cb, ((ca as u16 * 89) / 255) as u8));
     if let Some(path) = circle_path(cx, cy, r) {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
-    // White quarter arc, .8s per revolution.
-    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+    // Full glyph quarter arc, .8s per revolution.
+    paint.set_color(color);
     let ang = t * 2.0 * PI * 1.25 - PI * 0.5; // start at the top
     if let Some(path) = arc_path(cx, cy, r, ang, ang + PI * 0.5) {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
 
-fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
+fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     // Mock: 16-unit viewBox (M3.2 8.3 L6.6 11.5 L12.9 4.8, stroke 2.2)
@@ -768,7 +791,7 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
         anti_alias: true,
         ..Paint::default()
     };
-    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+    paint.set_color(color);
     let dash = if progress >= 1.0 {
         None // fully drawn: plain stroke
     } else {
@@ -784,7 +807,7 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32) {
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
-fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
+fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, color: Color) {
     let cx = ix + icon * 0.5;
     let cy = iy + icon * 0.5;
     let u = icon / mock::ICON;
@@ -793,7 +816,7 @@ fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
         anti_alias: true,
         ..Paint::default()
     };
-    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+    paint.set_color(color);
     let stroke = Stroke {
         width: 2.0 * u,
         line_cap: tiny_skia::LineCap::Round,
@@ -808,6 +831,7 @@ fn draw_x(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32) {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
+
 
 fn draw_round_rect(
     pixmap: &mut SkPixmap,
@@ -1028,6 +1052,38 @@ mod backend_tests {
             assert!(!ov.active(), "theme {theme}");
         }
     }
+
+    #[test]
+    fn default_stage_labels_match_historical_copy() {
+        let ui = resolve_ui(&UiConfig::default());
+        assert_eq!(stage_text(&ui, Stage::Recording), "Transcribing");
+        assert_eq!(stage_text(&ui, Stage::Transcribing), "Processing");
+        assert_eq!(stage_text(&ui, Stage::Done), "Done");
+        assert_eq!(stage_text(&ui, Stage::Error), "Error");
+        assert_eq!(stage_text(&ui, Stage::Hidden), "");
+    }
+
+    #[test]
+    fn custom_stage_label_and_timer_flags_resolve() {
+        let mut cfg = UiConfig::default();
+        cfg.stages.recording = "Listening".into();
+        cfg.stages.show_timer = false;
+        cfg.stages.pulse_ms = 0;
+        let ui = resolve_ui(&cfg);
+        assert_eq!(stage_text(&ui, Stage::Recording), "Listening");
+        assert!(!ui.stages.show_timer);
+        assert_eq!(ui.stages.pulse_ms, 0);
+    }
+
+    #[test]
+    fn dusk_theme_changes_palette_via_resolve_ui() {
+        let mut cfg = UiConfig::default();
+        cfg.theme = "dusk".into();
+        let ui = resolve_ui(&cfg);
+        assert_eq!(ui.theme, "dusk");
+        assert_ne!(ui.colors.bg, resolve_ui(&UiConfig::default()).colors.bg);
+        assert_ne!(ui.colors.fg, resolve_ui(&UiConfig::default()).colors.fg);
+    }
 }
 
 #[cfg(test)]
@@ -1055,6 +1111,7 @@ mod tests {
             ] {
                 let mut pm = SkPixmap::new(geo.win_w, geo.win_h).unwrap();
                 let mut mask = SkPixmap::new(geo.win_w, geo.win_h).unwrap();
+                let ui = resolve_ui(&UiConfig::default());
                 draw_frame(
                     &mut pm,
                     &mut mask,
@@ -1065,6 +1122,7 @@ mod tests {
                     age,
                     8,
                     &geo,
+                    &ui,
                 );
                 write_png(&format!("{dir}/{name}-{s}x.png"), &pm);
             }

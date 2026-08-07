@@ -110,17 +110,18 @@ Then `dictate` (or `dictate --type`) types into the focused window via
 prints instead for one run. Typed text streams as it is decoded; the
 clipboard is never touched.
 
-**Status pill.** A tiny animated monochrome pill at the bottom center of
-your primary monitor shows the stage: Transcribing (waveform + timer),
-Processing (spinner), Done (check). It takes no focus and no input, and
-hides itself after Done. Disable it with `[ui] overlay = false`.
+**Status overlay.** A tiny animated status chip at the bottom center of
+your primary monitor shows the stage (defaults: Transcribing with waveform
++ timer, Processing with spinner, Done with check). It takes no focus and
+no input, and hides itself after Done. Pick a palette with `ui.theme`,
+override colors / labels under `[ui.colors]` / `[ui.stages]`, or disable
+with `overlay = false` / `theme = "null"`. See [Themes](#themes).
 
 A bare `dictate --type` without the config entry fails with an error —
-typing is deliberately not enableable from the command line, so no script,
-test, or agent can inject keystrokes into your session unless you armed it
-yourself. Control characters other than newline are stripped before
-typing, so a transcript can never smuggle Tab or Escape keystrokes into
-the target.
+typing is deliberately not enableable from a one-shot flag. Arm it once
+with `dictate config set type_output true` (or edit the TOML). Control
+characters other than newline are stripped before typing, so a transcript
+can never smuggle Tab or Escape keystrokes into the target.
 
 **Transcribe a file.** `dictate clip.wav` reads a WAV instead of recording —
 any PCM or 32-bit float WAV, resampled to 16 kHz mono internally —
@@ -218,9 +219,21 @@ enabled = true         # post-format offline ASR cleanup (default on)
 backend = "rules"      # RuleRefine; unknown names warn and use rules
 
 [ui]
-overlay = true         # bottom-center status pill (X11)
-done_flash_ms = 1200    # how long done/error stays visible
-theme = "pill"         # "pill" or "null"/"none"/"off"
+overlay = true         # bottom-center status overlay
+done_flash_ms = 1200   # how long done/error stays visible
+theme = "dusk"         # pill | mono | dusk | dawn | contrast
+                       # (or null | none | off → no-op overlay)
+
+[ui.colors]            # optional #RRGGBB / #RRGGBBAA overrides
+fg = "#ECECF0"
+
+[ui.stages]
+recording = "Listening"      # Stage::Recording label (default "Transcribing")
+transcribing = "Thinking"    # Stage::Transcribing label (default "Processing")
+done = "Done"
+error = "Error"
+show_timer = true
+pulse_ms = 180
 
 [api]
 enabled = true         # daemon listens on a local Unix socket
@@ -239,6 +252,79 @@ punctuation. Config knobs are only `enabled` and `backend = "rules"`; set
 `enabled = false` to skip it. RuleRefine stays offline (tiny fixed tables, no
 token re-casing, no network/LLM) — embedders can swap a custom
 `RefineBackend` in-process.
+
+## Themes
+
+Built-in overlay palettes (also listed by `dictate theme list`):
+
+| Theme | Role |
+|---|---|
+| `pill` | Default light monochrome chip |
+| `mono` | High-contrast monochrome |
+| `dusk` | Dark cool palette |
+| `dawn` | Warm light palette |
+| `contrast` | Strong fg/bg separation |
+| `null` / `none` / `off` | No-op overlay (`NullOverlay`) |
+
+Unknown theme names warn and fall back to the `pill` palette (UI is
+fail-open). Platform `create` still maps `null|none|off` (and
+`overlay = false`) to `NullOverlay`; palette resolution still returns pill
+colors for those aliases so shared helpers stay usable.
+
+Optional `[ui.colors]` overrides any palette slot with `#RRGGBB` or
+`#RRGGBBAA` (`bg`, `fg`, `border`, `icon_bg`, `icon_fg`, `meta`, `shadow`,
+`accent`, `error`). Bad hex fails at config load.
+
+`[ui.stages]` renames the visible copy and controls the recording timer /
+pulse. Defaults match the historical hard-coded labels
+(`Recording` → `"Transcribing"`, `Transcribing` → `"Processing"`):
+
+```toml
+[ui]
+theme = "dusk"
+
+[ui.colors]
+fg = "#ECECF0"
+error = "#FF6B6B"
+
+[ui.stages]
+recording = "Listening"
+transcribing = "Thinking"
+done = "Done"
+error = "Error"
+show_timer = true
+pulse_ms = 180
+```
+
+Restart the daemon after theme (or model) changes so the resident process
+reloads config: `dictate restart`.
+
+## CLI config
+
+Surgical helpers over the same TOML file (`--config` overrides the path):
+
+```
+$ dictate config show
+$ dictate config get ui.theme
+$ dictate config set ui.theme dusk
+$ dictate config set type_output true   # only persistent typing arm path
+
+$ dictate model list
+$ dictate model use sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+$ dictate model use ~/models/my-parakeet --provider cpu
+
+$ dictate theme list
+$ dictate theme set dusk
+$ dictate theme set null                # disable overlay via ui.theme
+```
+
+`dictate config set` creates the file when missing and only accepts the
+settable dotted keys (`model_path`, `provider`, `type_output`, `n_threads`,
+`ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.*`, `ui.colors.*`).
+Typing stays fail-closed: `--type` alone never arms keystroke injection.
+
+Theme and model writes update the file only — restart the daemon for them
+to take effect in a running hold-to-talk session.
 
 ## Daemon API
 

@@ -9,7 +9,8 @@
 //! (icon disc + waveform/spinner/check/x, soft shadow, recording timer). macOS
 //! ships a simpler AppKit chip — borderless floating `NSPanel` + `NSTextField`
 //! stage label only (no icon animation, no elapsed timer, system window shadow).
-//! Same stage labels and bottom-center placement; fail-open like Linux.
+//! Colors/labels come from [`dictate_core::resolve_ui`]. Same bottom-center
+//! placement; fail-open like Linux.
 //!
 //! ## Permissions
 //! Global taps and synthetic keystrokes require Accessibility trust. Failures
@@ -35,7 +36,7 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use dictate_core::config::UiConfig;
 use dictate_core::overlay::{NullOverlay, OverlayBackend, Stage};
-use dictate_core::InjectTyper;
+use dictate_core::{InjectTyper, ResolvedUi, resolve_ui};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -489,15 +490,24 @@ unsafe extern "C" {
     ) -> bool;
 }
 
-/// Stage label shared with the Linux pill (Recording→"Transcribing", etc.).
-fn label(stage: Stage) -> &'static str {
+/// Stage copy from resolved UI (owned strings live on [`ResolvedUi`]).
+fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
     match stage {
         Stage::Hidden => "",
-        Stage::Recording => "Transcribing",
-        Stage::Transcribing => "Processing",
-        Stage::Done => "Done",
-        Stage::Error => "Error",
+        Stage::Recording => ui.stages.recording.as_str(),
+        Stage::Transcribing => ui.stages.transcribing.as_str(),
+        Stage::Done => ui.stages.done.as_str(),
+        Stage::Error => ui.stages.error.as_str(),
     }
+}
+
+fn ns_rgba(c: [u8; 4]) -> (f64, f64, f64, f64) {
+    (
+        c[0] as f64 / 255.0,
+        c[1] as f64 / 255.0,
+        c[2] as f64 / 255.0,
+        c[3] as f64 / 255.0,
+    )
 }
 
 /// Minimal AppKit status chip (`NSPanel` + `NSTextField`).
@@ -518,11 +528,12 @@ impl Overlay {
         if !cfg.overlay {
             return Self { tx: None, failed };
         }
+        let ui = resolve_ui(cfg);
         let (tx, rx) = mpsc::channel::<Stage>();
         let failed2 = failed.clone();
         match thread::Builder::new()
             .name("dictate-overlay".into())
-            .spawn(move || run_overlay(rx, failed2))
+            .spawn(move || run_overlay(rx, failed2, ui))
         {
             Ok(_) => Self {
                 tx: Some(tx),
@@ -573,18 +584,14 @@ impl OverlayBackend for Overlay {
 ///
 /// - `overlay = false` → [`NullOverlay`]
 /// - `theme` of `"null"` / `"none"` / `"off"` → [`NullOverlay`]
-/// - `"pill"`, empty, or unknown → AppKit [`Overlay`] (unknown logs a warning)
+/// - otherwise → AppKit [`Overlay`] (palette via [`resolve_ui`])
 pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
     if !cfg.overlay {
         return Box::new(NullOverlay);
     }
     match cfg.theme.as_str() {
         "null" | "none" | "off" => Box::new(NullOverlay),
-        "pill" | "" => Box::new(Overlay::start(cfg)),
-        other => {
-            log::warn!("unknown ui.theme {other:?}; falling back to pill");
-            Box::new(Overlay::start(cfg))
-        }
+        _ => Box::new(Overlay::start(cfg)),
     }
 }
 
@@ -597,14 +604,14 @@ mod chip {
     pub const BOTTOM_MARGIN: f64 = 48.0;
 }
 
-fn run_overlay(rx: Receiver<Stage>, failed: Arc<AtomicBool>) {
-    if let Err(e) = run_overlay_inner(rx) {
+fn run_overlay(rx: Receiver<Stage>, failed: Arc<AtomicBool>, ui: ResolvedUi) {
+    if let Err(e) = run_overlay_inner(rx, &ui) {
         log::debug!("overlay disabled: {e}");
         failed.store(true, Ordering::Relaxed);
     }
 }
 
-fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
+fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEventMask,
@@ -653,14 +660,13 @@ fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
     label_view.setSelectable(false);
     label_view.setBezeled(false);
     label_view.setDrawsBackground(true);
+    let (br, bg, bb, ba) = ns_rgba(ui.colors.bg);
     label_view.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        1.0, 1.0, 1.0, 0.94,
+        br, bg, bb, ba,
     )));
+    let (fr, fg, fb, fa) = ns_rgba(ui.colors.fg);
     label_view.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        17.0 / 255.0,
-        17.0 / 255.0,
-        17.0 / 255.0,
-        1.0,
+        fr, fg, fb, fa,
     )));
     label_view.setAlignment(NSTextAlignment::Center);
     label_view.setFont(Some(&NSFont::systemFontOfSize(chip::LABEL_PX)));
@@ -673,7 +679,7 @@ fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
     content.addSubview(&label_view);
 
     let mut current = Stage::Hidden;
-    apply_stage(&panel, &label_view, mtm, current)?;
+    apply_stage(&panel, &label_view, mtm, current, ui)?;
 
     loop {
         match rx.recv_timeout(Duration::from_millis(16)) {
@@ -682,7 +688,7 @@ fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
                 while let Ok(more) = rx.try_recv() {
                     current = more;
                 }
-                apply_stage(&panel, &label_view, mtm, current)?;
+                apply_stage(&panel, &label_view, mtm, current, ui)?;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -714,6 +720,7 @@ fn apply_stage(
     label_view: &objc2_app_kit::NSTextField,
     mtm: objc2::MainThreadMarker,
     stage: Stage,
+    ui: &ResolvedUi,
 ) -> Result<()> {
     use objc2_app_kit::NSScreen;
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -723,9 +730,19 @@ fn apply_stage(
         return Ok(());
     }
 
-    let text = label(stage);
+    let text = stage_text(ui, stage);
     let ns = NSString::from_str(text);
     label_view.setStringValue(&ns);
+    // Error stage uses palette error tint for the label; others stay on fg.
+    {
+        use objc2_app_kit::NSColor;
+        let (r, g, b, a) = if stage == Stage::Error {
+            ns_rgba(ui.colors.error)
+        } else {
+            ns_rgba(ui.colors.fg)
+        };
+        label_view.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a)));
+    }
     label_view.sizeToFit();
 
     let lf = label_view.frame();
@@ -780,10 +797,11 @@ mod overlay_tests {
 
     #[test]
     fn stage_labels_match_linux() {
-        assert_eq!(label(Stage::Recording), "Transcribing");
-        assert_eq!(label(Stage::Transcribing), "Processing");
-        assert_eq!(label(Stage::Done), "Done");
-        assert_eq!(label(Stage::Error), "Error");
-        assert_eq!(label(Stage::Hidden), "");
+        let ui = resolve_ui(&UiConfig::default());
+        assert_eq!(stage_text(&ui, Stage::Recording), "Transcribing");
+        assert_eq!(stage_text(&ui, Stage::Transcribing), "Processing");
+        assert_eq!(stage_text(&ui, Stage::Done), "Done");
+        assert_eq!(stage_text(&ui, Stage::Error), "Error");
+        assert_eq!(stage_text(&ui, Stage::Hidden), "");
     }
 }

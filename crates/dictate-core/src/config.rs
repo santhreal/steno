@@ -14,6 +14,53 @@ use std::path::{Path, PathBuf};
 use crate::dsp::{DspConfig, VadConfig};
 use crate::text::{Dictionary, RefineConfig, TextConfig};
 
+/// Optional per-slot hex overrides under `[ui.colors]`.
+///
+/// Each field is `#RRGGBB` or `#RRGGBBAA`. Omitted fields keep the active
+/// theme preset. Unknown keys are rejected (`deny_unknown_fields`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiColors {
+    pub bg: Option<String>,
+    pub fg: Option<String>,
+    pub border: Option<String>,
+    pub icon_bg: Option<String>,
+    pub icon_fg: Option<String>,
+    pub meta: Option<String>,
+    pub shadow: Option<String>,
+    pub accent: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Stage labels and transition knobs under `[ui.stages]`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiStages {
+    /// Label for [`crate::overlay::Stage::Recording`] (default `"Transcribing"`).
+    pub recording: String,
+    /// Label for [`crate::overlay::Stage::Transcribing`] (default `"Processing"`).
+    pub transcribing: String,
+    pub done: String,
+    pub error: String,
+    /// Show the live recording timer in the meta slot.
+    pub show_timer: bool,
+    /// Stage-change scale pulse duration in milliseconds.
+    pub pulse_ms: u64,
+}
+
+impl Default for UiStages {
+    fn default() -> Self {
+        Self {
+            recording: "Transcribing".to_string(),
+            transcribing: "Processing".to_string(),
+            done: "Done".to_string(),
+            error: "Error".to_string(),
+            show_timer: true,
+            pulse_ms: 180,
+        }
+    }
+}
+
 /// Status overlay section (`[ui]`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -22,13 +69,18 @@ pub struct UiConfig {
     pub overlay: bool,
     /// How long the "done"/"error" stage stays visible before hide.
     pub done_flash_ms: u64,
-    /// Built-in overlay theme selected by platform `create`.
+    /// Built-in overlay theme selected by platform `create` / [`crate::ui_theme::resolve_ui`].
     ///
-    /// Known values: `"pill"` (default X11 pill), `"null"` / `"none"` /
-    /// `"off"` (no-op). Unknown themes log a warning and fall back to the
-    /// pill — UI is fail-open.
+    /// Palette presets: `"pill"` (default), `"mono"`, `"dusk"`, `"dawn"`,
+    /// `"contrast"`. Platform `create` maps `"null"` / `"none"` / `"off"` to a
+    /// no-op overlay; resolve still returns the pill palette for those.
+    /// Unknown themes log a warning and fall back to pill — UI is fail-open.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Optional hex color overrides layered on the theme preset.
+    pub colors: UiColors,
+    /// Configurable stage labels and transition timing.
+    pub stages: UiStages,
 }
 
 fn default_theme() -> String {
@@ -42,6 +94,8 @@ impl Default for UiConfig {
             // Matches the mock's quick Done celebration (~1.2s).
             done_flash_ms: 1200,
             theme: "pill".to_string(),
+            colors: UiColors::default(),
+            stages: UiStages::default(),
         }
     }
 }
@@ -247,8 +301,192 @@ impl Config {
             self.ui.done_flash_ms,
             path.display()
         );
+        ensure!(
+            self.ui.stages.pulse_ms <= 5_000,
+            "invalid ui.stages.pulse_ms = {} in {} — set it to at most 5000",
+            self.ui.stages.pulse_ms,
+            path.display()
+        );
+        crate::ui_theme::validate_color_overrides(&self.ui.colors, path)?;
         Ok(())
     }
+}
+
+
+/// Dotted keys accepted by [`config_get`] / [`config_set`].
+///
+/// Top-level: `model_path`, `provider`, `type_output`, `n_threads`.
+/// UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`.
+/// Stages: `ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`,
+/// `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`.
+/// Colors: `ui.colors.bg`, `ui.colors.fg`, `ui.colors.border`,
+/// `ui.colors.icon_bg`, `ui.colors.icon_fg`, `ui.colors.meta`,
+/// `ui.colors.shadow`, `ui.colors.accent`, `ui.colors.error`.
+///
+/// Unknown keys are rejected. Helpers edit surgically via `toml_edit` and
+/// preserve unrelated keys/comments where the document allows. They never
+/// rewrite `[dict.overrides]` blindly and do not alter typing fail-closed
+/// semantics — `type_output` is just another typed key.
+pub fn list_settable_keys() -> &'static [&'static str] {
+    &[
+        "model_path",
+        "provider",
+        "type_output",
+        "n_threads",
+        "ui.theme",
+        "ui.overlay",
+        "ui.done_flash_ms",
+        "ui.stages.recording",
+        "ui.stages.transcribing",
+        "ui.stages.done",
+        "ui.stages.error",
+        "ui.stages.show_timer",
+        "ui.stages.pulse_ms",
+        "ui.colors.bg",
+        "ui.colors.fg",
+        "ui.colors.border",
+        "ui.colors.icon_bg",
+        "ui.colors.icon_fg",
+        "ui.colors.meta",
+        "ui.colors.shadow",
+        "ui.colors.accent",
+        "ui.colors.error",
+    ]
+}
+
+fn ensure_settable(key: &str) -> Result<()> {
+    ensure!(
+        list_settable_keys().contains(&key),
+        "unsupported config key {key:?} — supported keys: {}",
+        list_settable_keys().join(", ")
+    );
+    Ok(())
+}
+
+fn item_display(item: &toml_edit::Item) -> Option<String> {
+    match item {
+        toml_edit::Item::Value(v) => Some(match v {
+            toml_edit::Value::String(s) => s.value().clone(),
+            toml_edit::Value::Integer(i) => i.value().to_string(),
+            toml_edit::Value::Boolean(b) => b.value().to_string(),
+            toml_edit::Value::Float(f) => f.value().to_string(),
+            other => other.to_string(),
+        }),
+        toml_edit::Item::None => None,
+        _ => Some(item.to_string().trim().to_string()),
+    }
+}
+
+fn get_dotted<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
+    let mut cur = doc.as_item();
+    for part in key.split('.') {
+        cur = cur.as_table_like()?.get(part)?;
+    }
+    if cur.is_none() {
+        None
+    } else {
+        Some(cur)
+    }
+}
+
+fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Item) -> Result<()> {
+    let parts: Vec<&str> = key.split('.').collect();
+    ensure!(!parts.is_empty(), "empty config key");
+    let mut table = doc.as_table_mut();
+    for part in &parts[..parts.len() - 1] {
+        if table.get(part).map(|i| i.is_none()).unwrap_or(true) {
+            table.insert(part, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let item = table.get_mut(part).expect("just inserted");
+        if !item.is_table() && !item.is_inline_table() {
+            bail!(
+                "cannot set {key:?}: {part:?} is not a table (found {})",
+                item.type_name()
+            );
+        }
+        table = item.as_table_mut().expect("checked table");
+        // Prefer explicit `[ui.colors]` style over dotted keys when we create.
+        table.set_implicit(false);
+    }
+    let leaf = parts[parts.len() - 1];
+    table.insert(leaf, value);
+    Ok(())
+}
+
+fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
+    let v = match key {
+        "type_output" | "ui.overlay" | "ui.stages.show_timer" => {
+            let b: bool = raw.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be a boolean (true/false), got {raw:?}")
+            })?;
+            toml_edit::value(b)
+        }
+        "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" => {
+            let n: i64 = raw.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be an integer, got {raw:?}")
+            })?;
+            toml_edit::value(n)
+        }
+        _ => toml_edit::value(raw),
+    };
+    Ok(v)
+}
+
+/// Read one supported dotted key from a TOML config file.
+///
+/// Returns `Ok(None)` when the file or key is absent. Rejects unsupported keys.
+pub fn config_get(path: &Path, key: &str) -> Result<Option<String>> {
+    ensure_settable(key)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path).with_context(|| {
+        format!(
+            "cannot read config {} — check its permissions",
+            path.display()
+        )
+    })?;
+    let doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("invalid TOML in {}", path.display()))?;
+    Ok(get_dotted(&doc, key).and_then(item_display))
+}
+
+/// Set one supported dotted key in a TOML config file, preserving the rest.
+///
+/// Creates the file (and parent dirs) when missing. Value types follow the
+/// key: booleans for `type_output` / `ui.overlay` / `ui.stages.show_timer`,
+/// integers for `n_threads` / `ui.done_flash_ms` / `ui.stages.pulse_ms`,
+/// strings otherwise.
+pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
+    ensure_settable(key)?;
+    let mut doc = if path.exists() {
+        let raw = fs::read_to_string(path).with_context(|| {
+            format!(
+                "cannot read config {} — check its permissions",
+                path.display()
+            )
+        })?;
+        raw.parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("invalid TOML in {}", path.display()))?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+    set_dotted(&mut doc, key, typed_toml_value(key, value)?)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("cannot create config directory {}", parent.display())
+            })?;
+        }
+    }
+    fs::write(path, doc.to_string()).with_context(|| {
+        format!(
+            "cannot write config {} — check its permissions",
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -856,5 +1094,133 @@ n_threads = 2
             home_dir_from(Some(std::ffi::OsString::from("/home/u"))).unwrap(),
             PathBuf::from("/home/u")
         );
+    }
+
+    #[test]
+    fn ui_section_defaults_without_colors_or_stages() {
+        // WHY: existing configs with bare [ui] / no ui table must keep loading.
+        let path = temp_file(
+            "ui-bare.toml",
+            br#"
+[ui]
+overlay = true
+done_flash_ms = 900
+theme = "pill"
+"#,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(cfg.ui.overlay);
+        assert_eq!(cfg.ui.done_flash_ms, 900);
+        assert_eq!(cfg.ui.theme, "pill");
+        assert_eq!(cfg.ui.colors, UiColors::default());
+        assert_eq!(cfg.ui.stages.recording, "Transcribing");
+        assert_eq!(cfg.ui.stages.transcribing, "Processing");
+        assert_eq!(cfg.ui.stages.done, "Done");
+        assert_eq!(cfg.ui.stages.error, "Error");
+        assert!(cfg.ui.stages.show_timer);
+        assert_eq!(cfg.ui.stages.pulse_ms, 180);
+    }
+
+    #[test]
+    fn ui_colors_and_stages_parse_and_unknown_color_key_rejected() {
+        // WHY: deny_unknown_fields on [ui.colors] must catch typos like fgs.
+        let path = temp_file(
+            "ui-full.toml",
+            br##"
+[ui]
+theme = "dusk"
+
+[ui.colors]
+fg = "#FF0000FF"
+
+[ui.stages]
+recording = "Listening"
+pulse_ms = 90
+"##,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(cfg.ui.theme, "dusk");
+        assert_eq!(cfg.ui.colors.fg.as_deref(), Some("#FF0000FF"));
+        assert!(cfg.ui.colors.bg.is_none());
+        assert_eq!(cfg.ui.stages.recording, "Listening");
+        assert_eq!(cfg.ui.stages.pulse_ms, 90);
+
+        let bad = temp_file("ui-colors-typo.toml", b"[ui.colors]\nfgs = \"#fff\"\n");
+        let err = error_of(load_without_legacy(Some(&bad)));
+        fs::remove_file(&bad).ok();
+        assert!(err.contains("fgs") || err.contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn ui_colors_bad_hex_is_rejected_at_load() {
+        let path = temp_file(
+            "ui-bad-hex.toml",
+            b"[ui.colors]\nbg = \"nope\"\n",
+        );
+        let err = error_of(load_without_legacy(Some(&path)));
+        fs::remove_file(&path).ok();
+        assert!(err.contains("ui.colors.bg"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn config_get_set_round_trip_preserves_other_keys() {
+        // WHY: CLI helpers must surgically edit known keys without wiping dict.
+        let path = temp_file(
+            "getset.toml",
+            br#"
+n_threads = 4
+type_output = false
+
+[dict.overrides]
+"um" = ""
+
+[ui]
+theme = "pill"
+"#,
+        );
+        assert_eq!(config_get(&path, "n_threads").unwrap().as_deref(), Some("4"));
+        assert_eq!(config_get(&path, "ui.theme").unwrap().as_deref(), Some("pill"));
+        assert!(config_get(&path, "ui.colors.fg").unwrap().is_none());
+
+        config_set(&path, "ui.theme", "dusk").unwrap();
+        config_set(&path, "ui.colors.fg", "#AABBCCFF").unwrap();
+        config_set(&path, "ui.stages.recording", "Listening").unwrap();
+        config_set(&path, "n_threads", "6").unwrap();
+
+        assert_eq!(config_get(&path, "ui.theme").unwrap().as_deref(), Some("dusk"));
+        assert_eq!(
+            config_get(&path, "ui.colors.fg").unwrap().as_deref(),
+            Some("#AABBCCFF")
+        );
+        assert_eq!(
+            config_get(&path, "ui.stages.recording").unwrap().as_deref(),
+            Some("Listening")
+        );
+        assert_eq!(config_get(&path, "n_threads").unwrap().as_deref(), Some("6"));
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("[dict.overrides]"), "{raw}");
+        assert!(raw.contains("\"um\"") || raw.contains("um"), "{raw}");
+        assert!(raw.contains("type_output"), "{raw}");
+
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(cfg.ui.theme, "dusk");
+        assert_eq!(cfg.ui.colors.fg.as_deref(), Some("#AABBCCFF"));
+        assert_eq!(cfg.ui.stages.recording, "Listening");
+        assert_eq!(cfg.n_threads, 6);
+        assert!(!cfg.type_output);
+        assert_eq!(cfg.dict.overrides.get("um").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn config_set_rejects_unknown_key() {
+        let path = temp_file("getset-bad.toml", b"n_threads = 2\n");
+        let err = error_of(config_set(&path, "ui.colour", "x"));
+        fs::remove_file(&path).ok();
+        assert!(err.contains("unsupported config key"), "{err}");
     }
 }

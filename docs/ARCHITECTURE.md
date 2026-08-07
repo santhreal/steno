@@ -20,8 +20,8 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Typing (`type_output`) | Fail-closed in code; **Unverified** on live session after engine cutover |
 | Daemon NDJSON API (`ping` / `status` / `transcribe` / `shutdown`) | **Verified** in unit/socket tests; live daemon path **Unverified** here |
 | `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
-| OverlayBackend + pill / null themes | **Verified** unit tests; live X11 pill **Unverified** here after cutover |
-| Cross-platform | Linux X11 real; Windows / macOS **hotkey + typing implemented**; overlay = `NullOverlay` (no HWND/NSPanel yet) |
+| OverlayBackend + theme palettes (`pill|mono|dusk|dawn|contrast`) + `resolve_ui` | **Verified** unit tests in core/platform; live X11 pill **Unverified** here after cutover |
+| Cross-platform | Linux X11 real; Windows / macOS **hotkey + typing + status chip implemented** (HWND / NSPanel); chips consume `ResolvedUi`. Not live-UI verified on this Linux host |
 | Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
 | Daemon IPC | **Yes** — Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
@@ -66,11 +66,15 @@ unless the main agent asks.
 4. **Typing safety stays fail-closed** — `type_output = true` in the
    config file is the only arming path, including for API clients. API
    cannot enable typing by itself. `utterance.*` must not enable typing.
-5. **Overlay** — `OverlayBackend` trait in `dictate-core`. Default = X11
-   pill via `dictate_platform::create`. Hosts inject their own. Config can
-   disable (`overlay = false`) or select `theme = "pill"` / `"null"` (and
-   aliases `"none"` / `"off"`). Custom draw code is a trait impl, not a
-   scripting language.
+5. **Overlay** — `OverlayBackend` trait in `dictate-core`. Theme
+   resolution (`resolve_ui` / `stage_label` / `ThemePalette` / `ResolvedUi`)
+   also lives in core; platforms call it once at overlay start and paint
+   from `ResolvedUi`. Default Linux path = X11 pill via
+   `dictate_platform::create`. Hosts may ignore `ui.theme` and inject their
+   own backend while still reading the palette if desired. Config can
+   disable (`overlay = false`) or select `theme = "pill"|"mono"|"dusk"|
+   "dawn"|"contrast"` / `"null"` (aliases `"none"` / `"off"`). Custom draw
+   code is a trait impl, not a scripting language.
 6. **STT stays Parakeet/sherpa** — no whisper shims. `provider = "cuda"`
    (default) or `"cpu"` in config; unknown values fail at config load /
    `Transcriber::load`. No silent fallback between providers.
@@ -107,6 +111,7 @@ light-dictate/                      # workspace root
         engine.rs           # Engine::load / transcribe_f32[_raw]
         session.rs          # Session + InjectTyper (fail-closed typing)
         overlay.rs          # OverlayBackend + Stage + NullOverlay
+        ui_theme.rs         # resolve_ui / stage_label / ThemePalette / ResolvedUi
         api/
           protocol.rs       # request/response/event types (serde)
           client.rs         # ApiClient::connect / call
@@ -116,12 +121,13 @@ light-dictate/                      # workspace root
         lib.rs
         traits.rs           # HotkeySource, Typer
         linux_x11/          # hotkey / overlay / type backends
-        windows.rs          # Caps Lock + SendInput; NullOverlay
-        macos.rs            # Caps Lock + CGEvent; NullOverlay
+        windows.rs          # Caps Lock + SendInput + HWND chip (ResolvedUi)
+        macos.rs            # Caps Lock + CGEvent + NSPanel chip (ResolvedUi)
         null.rs             # NullHotkey / NullTyper
     dictate/
       src/
         main.rs
+        config_cmd.rs       # dictate config|model|theme
         daemon.rs           # hotkey loop + API thread when [api].enabled
   docs/
 ```
@@ -146,7 +152,19 @@ backend = "rules"            # RuleRefine; unknown → warn + rules
 [ui]
 overlay = true
 done_flash_ms = 1200
-theme = "pill"               # "pill" | "null"/"none"/"off"; hosts may inject OverlayBackend
+theme = "dusk"               # pill|mono|dusk|dawn|contrast; null|none|off → NullOverlay
+                             # hosts may ignore the string and inject OverlayBackend
+
+[ui.colors]                  # optional #RRGGBB / #RRGGBBAA overrides
+fg = "#ECECF0"
+
+[ui.stages]
+recording = "Listening"      # defaults: Transcribing / Processing / Done / Error
+transcribing = "Thinking"
+done = "Done"
+error = "Error"
+show_timer = true
+pulse_ms = 180
 
 [api]
 enabled = true               # daemon listens on the socket
@@ -200,11 +218,14 @@ Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `~/.cache/dictate/dictate.
 ## Embedder surface (`dictate-core`)
 
 ```rust
-use dictate_core::{Config, Engine, NullOverlay, Session};
+use dictate_core::{Config, Engine, NullOverlay, Session, resolve_ui, stage_label, Stage};
 
 let cfg = Config::load(None)?;
 let engine = Engine::load(&cfg)?;          // model resident
 let text = engine.transcribe_f32(&pcm16k)?; // offline utterance
+
+let ui = resolve_ui(&cfg.ui);              // ThemePalette + stages
+let _ = stage_label(&cfg.ui, Stage::Recording);
 
 // Interactive (optional platform / custom overlay):
 let session = Session::builder(engine)
@@ -215,6 +236,8 @@ let text = session.transcribe_f32(&pcm16k)?;
 ```
 
 `OverlayBackend` methods: `set(Stage)`, `flash(ms)`, `active() -> bool`.
+Hosts may ignore `ui.theme` and inject their own backend while still calling
+`resolve_ui` for palette / labels.
 
 Typing requires **both** `type_output` armed (via `from_config` / `type_output(true)`)
 **and** a `SessionBuilder::typer(...)` implementing `InjectTyper`. See
@@ -228,12 +251,24 @@ Typing requires **both** `type_output` armed (via `from_config` / `type_output(t
 - `fn flash(&self, ms: u64)`
 - `fn active(&self) -> bool` (fail-open UIs may return false)
 
-`Stage`: `Hidden`, `Recording`, `Transcribing`, `Done`, `Error`
-(product labels: Listening / Thinking / Done).
+`Stage`: `Hidden`, `Recording`, `Transcribing`, `Done`, `Error`.
+Default labels: `"Transcribing"` / `"Processing"` / `"Done"` / `"Error"`
+(overridable via `[ui.stages]`, e.g. Listening / Thinking).
 
-Built-ins via `dictate_platform::create(&UiConfig)`: `pill` (X11), `null`.
-Embedders ship loading animations by implementing the trait — no plugin ABI
-in v0.2; compile-time injection keeps it minimal and safe.
+**Resolution lives in `dictate-core`.** `resolve_ui(&UiConfig) -> ResolvedUi`
+picks a preset palette (`pill|mono|dusk|dawn|contrast`), applies optional
+`[ui.colors]` hex overrides into `ThemePalette`, and copies stage knobs.
+`stage_label` / `list_themes` / surgical `config_get` / `config_set` are
+exported from the same crate. Unknown themes warn and fall back to pill;
+`null|none|off` still resolve to pill colors for shared helpers.
+
+**Platforms consume `ResolvedUi`.** `dictate_platform::create(&UiConfig)`
+maps `overlay = false` and `theme` `null|none|off` to `NullOverlay`;
+otherwise Linux (X11 pill), Windows (layered HWND chip), and macOS
+(`NSPanel` chip) call `resolve_ui` once at start and paint from the
+resolved palette + labels. Embedders may ignore `ui.theme` and inject a
+custom `OverlayBackend` while optionally still reading the palette —
+no plugin ABI; compile-time injection only.
 
 ## Cross-platform roadmap
 
@@ -241,7 +276,7 @@ in v0.2; compile-time injection keeps it minimal and safe.
 |---|---|---|---|---|
 | Hotkey | done | evdev/portal later | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
 | Type | xdotool | portal/ydotool later | SendInput | CGEvent |
-| Overlay | done | layer-shell later | NullOverlay (HWND later) | NullOverlay (NSPanel later) |
+| Overlay | done (ResolvedUi) | layer-shell later | HWND chip (ResolvedUi; no local UI soak) | NSPanel chip (ResolvedUi; no local UI soak) |
 | IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
 | STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |

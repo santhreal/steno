@@ -9,6 +9,7 @@
 //! Caps Lock to dictate into the focused window; `dictate stop` tears it down.
 
 mod api_cmd;
+mod config_cmd;
 mod daemon;
 
 use anyhow::Result;
@@ -35,6 +36,7 @@ pub struct Cli {
     /// Type the result into the focused window via xdotool (X11) instead
     /// of printing. SAFETY: requires `type_output = true` in the config
     /// file — typing is never enabled from the command line alone.
+    /// Arm it persistently with `dictate config set type_output true`.
     #[arg(long)]
     r#type: bool,
 
@@ -96,6 +98,21 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Read or write persistent config keys (`dictate config show`).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// List or select sherpa-onnx model directories.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+    /// List or set the overlay theme (`ui.theme`).
+    Theme {
+        #[command(subcommand)]
+        command: ThemeCommand,
+    },
     /// Internal worker process started by `dictate start`.
     #[command(hide = true)]
     Daemon,
@@ -108,6 +125,51 @@ enum ApiCommand {
         /// Override API socket path (default: config / XDG runtime).
         #[arg(long)]
         socket: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Print the config path, settable keys, and override count.
+    Show,
+    /// Get one settable config key from the TOML file.
+    Get {
+        /// Dotted key (see `dictate config set --help` / `list_settable_keys`).
+        key: String,
+    },
+    /// Set one settable config key (creates the file with the key if missing).
+    ///
+    /// Arm typing with `dictate config set type_output true` — the only
+    /// persistent path; `--type` alone never enables keystroke injection.
+    Set {
+        /// Dotted key (`provider`, `ui.theme`, `type_output`, …).
+        key: String,
+        /// Value as text; booleans/integers are parsed by key.
+        value: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModelCommand {
+    /// List model directories under the default models dir.
+    List,
+    /// Select the active model (writes `model_path`).
+    Use {
+        /// Model directory name under the models dir, or an absolute/`~/` path.
+        name_or_path: String,
+        /// Also write `provider` (`cuda` or `cpu`).
+        #[arg(long)]
+        provider: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ThemeCommand {
+    /// List built-in overlay themes and null aliases.
+    List,
+    /// Set `ui.theme` (`pill`/`mono`/`dusk`/`dawn`/`contrast`, or `null`/`none`/`off`).
+    Set {
+        name: String,
     },
 }
 
@@ -127,6 +189,38 @@ fn main() -> Result<()> {
             command: ApiCommand::Status { socket },
         }) => {
             return api_cmd::api_status(cli.config.as_deref(), socket);
+        }
+        Some(Command::Config { command }) => {
+            return match command {
+                ConfigCommand::Show => config_cmd::config_show(cli.config.as_deref()),
+                ConfigCommand::Get { key } => {
+                    config_cmd::config_get_cmd(cli.config.as_deref(), &key)
+                }
+                ConfigCommand::Set { key, value } => {
+                    config_cmd::config_set_cmd(cli.config.as_deref(), &key, &value)
+                }
+            };
+        }
+        Some(Command::Model { command }) => {
+            return match command {
+                ModelCommand::List => config_cmd::model_list(cli.config.as_deref()),
+                ModelCommand::Use {
+                    name_or_path,
+                    provider,
+                } => config_cmd::model_use(
+                    cli.config.as_deref(),
+                    &name_or_path,
+                    provider.as_deref(),
+                ),
+            };
+        }
+        Some(Command::Theme { command }) => {
+            return match command {
+                ThemeCommand::List => config_cmd::theme_list(),
+                ThemeCommand::Set { name } => {
+                    config_cmd::theme_set(cli.config.as_deref(), &name)
+                }
+            };
         }
         Some(Command::Daemon) => return daemon::run_daemon(&cli),
         None => {}
@@ -291,9 +385,10 @@ fn output_mode(cli_type: bool, cli_stdout: bool, cfg_armed: bool) -> Result<Outp
     }
     if cli_type && !cfg_armed {
         anyhow::bail!(
-            "typing is disarmed: set `type_output = true` in {} to arm it. \
-             Typing injects real keystrokes into the focused window and is \
-             deliberately not enableable from the command line alone.",
+            "typing is disarmed: run `dictate config set type_output true` \
+             (writes {}) to arm it. Typing injects real keystrokes into the \
+             focused window and is deliberately not enableable from the \
+             command line alone.",
             config::default_config_path()?.display()
         );
     }
@@ -397,6 +492,90 @@ mod tests {
             Some(Command::Api {
                 command: ApiCommand::Status { socket: None }
             })
+        ));
+    }
+
+    #[test]
+    fn clap_parses_config_model_theme() {
+        // WHY: help/subcommand wiring must expose config/model/theme without
+        // a daemon — parse-only regression for the persistent config surface.
+        let show = Cli::try_parse_from(["dictate", "config", "show"]).expect("config show");
+        assert!(matches!(
+            show.command,
+            Some(Command::Config {
+                command: ConfigCommand::Show
+            })
+        ));
+
+        let get = Cli::try_parse_from(["dictate", "config", "get", "provider"]).expect("get");
+        assert!(matches!(
+            get.command,
+            Some(Command::Config {
+                command: ConfigCommand::Get { ref key }
+            }) if key == "provider"
+        ));
+
+        let set = Cli::try_parse_from([
+            "dictate",
+            "config",
+            "set",
+            "type_output",
+            "true",
+        ])
+        .expect("set");
+        assert!(matches!(
+            set.command,
+            Some(Command::Config {
+                command: ConfigCommand::Set { ref key, ref value }
+            }) if key == "type_output" && value == "true"
+        ));
+
+        let themes = Cli::try_parse_from(["dictate", "theme", "list"]).expect("theme list");
+        assert!(matches!(
+            themes.command,
+            Some(Command::Theme {
+                command: ThemeCommand::List
+            })
+        ));
+
+        let model = Cli::try_parse_from([
+            "dictate",
+            "model",
+            "use",
+            "parakeet",
+            "--provider",
+            "cpu",
+        ])
+        .expect("model use");
+        assert!(matches!(
+            model.command,
+            Some(Command::Model {
+                command: ModelCommand::Use {
+                    ref name_or_path,
+                    provider: Some(ref p),
+                }
+            }) if name_or_path == "parakeet" && p == "cpu"
+        ));
+
+        // Global --config still attaches to nested commands.
+        let with_cfg = Cli::try_parse_from([
+            "dictate",
+            "--config",
+            "/tmp/dictate-test.toml",
+            "theme",
+            "set",
+            "dusk",
+        ])
+        .expect("theme set --config");
+        assert_eq!(
+            with_cfg.config.as_deref(),
+            Some(std::path::Path::new("/tmp/dictate-test.toml"))
+        );
+        assert!(matches!(
+            with_cfg.command,
+            Some(Command::Theme {
+                command: ThemeCommand::Set { ref name }
+            }) if name == "dusk"
         ));
     }
 }

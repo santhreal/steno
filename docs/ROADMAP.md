@@ -32,6 +32,9 @@
 - [x] axiomexec remote Xvfb verify: **PASS** on `axiomexec@192.168.0.135` (Tailscale SSH still interactive-auth blocked)
 - [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`)
 - [x] README + EMBEDDING.md synced for single config / refine / API / embed hooks
+- [x] Theme palettes (`pill|mono|dusk|dawn|contrast`) + `[ui.colors]` / `[ui.stages]` + `resolve_ui` in dictate-core; platforms consume `ResolvedUi`
+- [x] CLI `dictate config show|get|set`, `dictate model list|use [--provider]`, `dictate theme list|set`
+- [x] Configurable stage labels (`[ui.stages]`; defaults Transcribing/Processing/Done/Error)
 
 ## Policy (standing)
 
