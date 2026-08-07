@@ -19,9 +19,9 @@
 - [x] Null backends for headless
 
 ## Phase 4 — cross-platform
-- [x] Windows stubs compile → SendInput + RegisterHotKey + layered window
-- [x] macOS stubs compile → CGEvent + CGEventTap + NSPanel
-- [ ] provider = cuda|cpu end-to-end (Config/`Engine`/`Transcriber` done; daemon hot-path must pass `cfg.provider`; CPU CI path still open)
+- [x] Windows: Caps Lock hotkey (`WH_KEYBOARD_LL`) + `SendInput` typing; overlay remains `NullOverlay` (layered HWND deferred)
+- [x] macOS: Caps Lock hotkey (`CGEventTap`) + `CGEvent` typing; overlay remains `NullOverlay` (NSPanel deferred)
+- [ ] provider = cuda|cpu end-to-end (Config/`Engine`/`Transcriber`/daemon honor `cfg.provider`; CPU CI path still open)
 
 ## Phase 5 — harden
 - [x] RuleRefine post-STT + RefineBackend hook (offline; not full LLM GEC)

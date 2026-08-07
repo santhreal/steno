@@ -30,6 +30,28 @@ Linux X11: `linux_x11::{hotkey, overlay, output}` — real Caps Lock grab, pill
 overlay (`create(&UiConfig)`), xdotool typing via `Emitter` in `OutputMode::Type`.
 `Emitter` implements both `Typer` and `dictate_core::InjectTyper`.
 
+#### Caps Lock (Linux X11)
+
+Hold Caps Lock to record; release to stop. While the daemon runs, the Caps
+Lock keycode is remapped to `NoSymbol` so XKB cannot latch Lock — a passive
+`XGrabKey` alone does not prevent the toggle. `Hotkey`'s `Drop` restores the
+original keysyms (ungrab + `ChangeKeyboardMapping`) on clean exit, panic
+unwinding, or graceful stop.
+
+**SIGKILL limitation.** `kill -9` / `SIGKILL` never runs `Drop`, so the
+keycode stays mapped to `NoSymbol` and Caps Lock appears "dead" until
+something remaps it. The next daemon start detects an all-`NoSymbol` mapping
+and synthesizes plain `Caps_Lock` as the restore payload, so a subsequent
+clean exit hands the key back. Manual recovery on a typical PC keyboard
+(X11 keycode **66**):
+
+```bash
+xmodmap -e 'keycode 66 = Caps_Lock'
+```
+
+Restore helpers (`recover_orig_keysyms`, `nosymbol_mapping`,
+`caps_lock_restore_keysyms`) are unit-tested without a live display.
+
 Null*: `NullHotkey` / `NullTyper` / `NullOverlay` — no-ops for tests and
 headless embedders.
 

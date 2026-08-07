@@ -583,6 +583,7 @@ mod tests {
     use super::*;
     use crate::api::client::ApiClient;
     use crate::api::protocol::{Op, Request};
+    use std::io::{BufRead, BufReader, Write};
     use std::time::Duration;
 
     #[test]
@@ -895,5 +896,242 @@ mod tests {
         assert!(handler.utterance_start().is_ok());
         let err = handler.utterance_stop().expect_err("empty stop");
         assert!(err.error.contains("empty"));
+    }
+
+    fn spawn_stub_server(tag: &str) -> (PathBuf, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let path = temp_sock(tag);
+        let serve_path = path.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let thread = std::thread::spawn(move || {
+            // Keep SO_PEERCRED same-uid gate on; local client shares uid.
+            let _ = serve_unix_with(
+                &serve_path,
+                StubHandler,
+                Some(stop2),
+                ServeOptions {
+                    require_same_uid: true,
+                },
+            );
+        });
+        (path, stop, thread)
+    }
+
+    fn connect_raw_with_retry(path: &Path) -> UnixStream {
+        for _ in 0..100 {
+            if path.exists() {
+                if let Ok(stream) = UnixStream::connect(path) {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    return stream;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("raw server connect timed out for {}", path.display());
+    }
+
+    fn read_response_line(reader: &mut BufReader<UnixStream>) -> Response {
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            let n = reader
+                .read_until(b'\n', &mut buf)
+                .expect("read response line");
+            assert!(n > 0, "API socket closed before a response arrived");
+            if buf
+                .iter()
+                .all(|b| matches!(b, b'\n' | b'\r' | b' ' | b'\t'))
+            {
+                continue;
+            }
+            let text = std::str::from_utf8(&buf).expect("response utf-8");
+            return decode_line::<Response>(text).unwrap_or_else(|e| {
+                panic!("expected Response JSON, got {text:?}: {e}");
+            });
+        }
+    }
+
+    #[test]
+    fn framing_partial_line_waits_for_newline() {
+        // WHY: NDJSON is newline-delimited; a split write must not dispatch
+        // until the terminating '\n' arrives (no premature decode).
+        let (path, stop, thread) = spawn_stub_server("partial");
+        let stream = connect_raw_with_retry(&path);
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+        let mut writer = stream.try_clone().expect("clone for write");
+        let mut reader = BufReader::new(stream);
+
+        writer
+            .write_all(br#"{"id":1,"op":"pi"#)
+            .expect("partial write");
+        writer.flush().expect("flush partial");
+
+        let mut buf = Vec::new();
+        let err = reader
+            .read_until(b'\n', &mut buf)
+            .expect_err("partial frame must not yield a line yet");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "expected timeout/would-block on partial line, got {err:?}"
+        );
+        assert!(buf.is_empty(), "no bytes should arrive before newline");
+
+        let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(2)));
+        writer.write_all(b"ng\"}\n").expect("complete write");
+        writer.flush().expect("flush complete");
+
+        let resp = read_response_line(&mut reader);
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.id, 1);
+        assert_eq!(resp.result, Some(json!({"pong": true})));
+
+        drop(writer);
+        drop(reader);
+        shutdown_server(&path, &stop, thread);
+    }
+
+    #[test]
+    fn framing_multiple_requests_in_one_write() {
+        // WHY: one Unix write may carry several NDJSON lines; each must get
+        // its own correlated response without requiring a flush between.
+        let (path, stop, thread) = spawn_stub_server("multi");
+        let stream = connect_raw_with_retry(&path);
+        let mut writer = stream.try_clone().expect("clone for write");
+        let mut reader = BufReader::new(stream);
+
+        writer
+            .write_all(br#"{"id":1,"op":"ping"}
+{"id":2,"op":"status"}
+"#)
+            .expect("multi-line write");
+        writer.flush().expect("flush multi");
+
+        let r1 = read_response_line(&mut reader);
+        let r2 = read_response_line(&mut reader);
+        assert!(r1.ok, "{r1:?}");
+        assert_eq!(r1.id, 1);
+        assert_eq!(r1.result, Some(json!({"pong": true})));
+        assert!(r2.ok, "{r2:?}");
+        assert_eq!(r2.id, 2);
+        assert!(
+            r2.result.as_ref().is_some_and(|v| {
+                v.get("stage").and_then(|x| x.as_str()) == Some("idle")
+                    && v.get("pid").is_some()
+            }),
+            "status payload: {r2:?}"
+        );
+
+        drop(writer);
+        drop(reader);
+        shutdown_server(&path, &stop, thread);
+    }
+
+    #[test]
+    fn framing_empty_lines_ignored() {
+        // WHY: blank / whitespace-only lines must be skipped so keepalives or
+        // accidental blank writes do not poison framing or produce replies.
+        let (path, stop, thread) = spawn_stub_server("empty");
+        let stream = connect_raw_with_retry(&path);
+        let mut writer = stream.try_clone().expect("clone for write");
+        let mut reader = BufReader::new(stream);
+
+        writer
+            .write_all(b"\n\n  \n\t\r\n{\"id\":5,\"op\":\"ping\"}\n")
+            .expect("empty+ping write");
+        writer.flush().expect("flush empty+ping");
+
+        let resp = read_response_line(&mut reader);
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.id, 5);
+
+        // No extra reply for the blanks: a short read after the ping reply
+        // must time out rather than return another Response.
+        let _ = reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(150)));
+        let mut buf = Vec::new();
+        let err = reader
+            .read_until(b'\n', &mut buf)
+            .expect_err("no spare response after empty lines");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "unexpected: {err:?}"
+        );
+
+        drop(writer);
+        drop(reader);
+        shutdown_server(&path, &stop, thread);
+    }
+
+    #[test]
+    fn framing_malformed_and_unknown_method_errors() {
+        // WHY: unknown op / bad shape with an id must reply Error(id); frames
+        // without a peekable id are dropped so a later valid request still works.
+        let (path, stop, thread) = spawn_stub_server("badframe");
+        let stream = connect_raw_with_retry(&path);
+        let mut writer = stream.try_clone().expect("clone for write");
+        let mut reader = BufReader::new(stream);
+
+        // Unknown method: valid JSON, peeks id, Request decode fails → err reply.
+        writer
+            .write_all(br#"{"id":9,"op":"nope"}
+"#)
+            .expect("unknown op write");
+        writer.flush().expect("flush unknown");
+        let unknown = read_response_line(&mut reader);
+        assert!(!unknown.ok, "{unknown:?}");
+        assert_eq!(unknown.id, 9);
+        assert!(
+            unknown
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("invalid request JSON")),
+            "unexpected error: {unknown:?}"
+        );
+        assert!(
+            unknown
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("id") && h.contains("op")),
+            "hint should guide wire shape: {unknown:?}"
+        );
+
+        // Malformed JSON that still carries a peekable id → err reply.
+        writer
+            .write_all(br#"{"id":10,"op":123}
+"#)
+            .expect("bad op type write");
+        writer.flush().expect("flush bad op type");
+        let bad_shape = read_response_line(&mut reader);
+        assert!(!bad_shape.ok, "{bad_shape:?}");
+        assert_eq!(bad_shape.id, 10);
+        assert!(
+            bad_shape
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("invalid request JSON")),
+            "unexpected error: {bad_shape:?}"
+        );
+
+        // Unparseable line with no id is dropped; following ping must still work.
+        writer
+            .write_all(b"not-json-at-all\n{\"id\":11,\"op\":\"ping\"}\n")
+            .expect("drop+ping write");
+        writer.flush().expect("flush drop+ping");
+        let ping = read_response_line(&mut reader);
+        assert!(ping.ok, "{ping:?}");
+        assert_eq!(ping.id, 11);
+        assert_eq!(ping.result, Some(json!({"pong": true})));
+
+        drop(writer);
+        drop(reader);
+        shutdown_server(&path, &stop, thread);
     }
 }

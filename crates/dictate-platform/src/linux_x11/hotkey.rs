@@ -93,13 +93,10 @@ impl Hotkey {
             .reply()
             .context("GetKeyboardMapping(Caps Lock) failed")?;
         let per_slot = mapping.keysyms_per_keycode as usize;
-        let mut orig_keysyms = mapping.keysyms;
-        if orig_keysyms.iter().all(|&k| k == NO_SYMBOL) {
-            // A previous daemon died without restoring. The conventional
-            // mapping for this keycode is plain Caps_Lock.
-            orig_keysyms = vec![XK_CAPS_LOCK];
-        }
-        let dead: Vec<Keysym> = vec![NO_SYMBOL; per_slot.max(1)];
+        // SIGKILL skips Drop, leaving NoSymbol. Recover the conventional
+        // Caps_Lock mapping so a later Drop (or fresh grab) can hand it back.
+        let orig_keysyms = recover_orig_keysyms(mapping.keysyms);
+        let dead = nosymbol_mapping(per_slot);
         conn.change_keyboard_mapping(1, trigger, dead.len() as u8, &dead)?
             .check()
             .context("cannot remap Caps Lock to NoSymbol")?;
@@ -126,11 +123,12 @@ impl Hotkey {
                 .with_context(|| format!("XGrabKey(CapsLock, mask={mask:?}) request failed"))?;
             if let Err(e) = cookie.check() {
                 // Restore the mapping before reporting failure.
+                let restore = caps_lock_restore_keysyms(&orig_keysyms);
                 let _ = conn.change_keyboard_mapping(
                     1,
                     trigger,
-                    orig_keysyms.len() as u8,
-                    &orig_keysyms,
+                    restore.len() as u8,
+                    restore,
                 );
                 let _ = conn.flush();
                 bail!(
@@ -343,11 +341,13 @@ impl Drop for Hotkey {
         }
         // Hand Caps Lock back: restore the keycode's original keysyms so
         // the caps toggle works again once the daemon exits.
+        // SIGKILL never runs Drop — see recover_orig_keysyms / PLATFORM_TRAITS.
+        let restore = caps_lock_restore_keysyms(&self.orig_keysyms);
         let _ = self.conn.change_keyboard_mapping(
             1,
             self.trigger,
-            self.orig_keysyms.len() as u8,
-            &self.orig_keysyms,
+            restore.len() as u8,
+            restore,
         );
         let _ = self.conn.flush();
     }
@@ -365,6 +365,32 @@ impl crate::HotkeySource for Hotkey {
     fn drain_pending(&mut self) {
         Hotkey::drain_pending(self);
     }
+}
+
+/// Keysyms Drop / grab-failure cleanup write back for the Caps Lock keycode.
+///
+/// Always the captured (or SIGKILL-recovered) mapping — never NoSymbol.
+fn caps_lock_restore_keysyms(orig_keysyms: &[Keysym]) -> &[Keysym] {
+    orig_keysyms
+}
+
+/// If a prior daemon was SIGKILL'd, Drop never ran and the Caps Lock keycode
+/// may still be all-NoSymbol. Synthesize the conventional Caps_Lock mapping
+/// so the next grab (and its Drop) can hand the key back.
+///
+/// Manual recovery on a typical PC keyboard (keycode 66):
+/// `xmodmap -e 'keycode 66 = Caps_Lock'`
+fn recover_orig_keysyms(keysyms: Vec<Keysym>) -> Vec<Keysym> {
+    if keysyms.is_empty() || keysyms.iter().all(|&k| k == NO_SYMBOL) {
+        vec![XK_CAPS_LOCK]
+    } else {
+        keysyms
+    }
+}
+
+/// Remap payload that disables the caps toggle while leaving raw key events.
+fn nosymbol_mapping(keysyms_per_keycode: usize) -> Vec<Keysym> {
+    vec![NO_SYMBOL; keysyms_per_keycode.max(1)]
 }
 
 fn keycode_for_keysym(conn: &RustConnection, want: Keysym) -> Result<Option<Keycode>> {
@@ -387,4 +413,57 @@ fn keycode_for_keysym(conn: &RustConnection, want: Keysym) -> Result<Option<Keyc
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Restore helpers must not need a live X display. WHY: SIGKILL leaves
+    //! Caps Lock as NoSymbol; Drop must restore captured keysyms on clean
+    //! exit; recovery must synthesize Caps_Lock when the mapping is empty.
+
+    use super::*;
+
+    #[test]
+    fn recover_preserves_real_caps_lock_mapping() {
+        let orig = vec![XK_CAPS_LOCK, NO_SYMBOL, NO_SYMBOL, NO_SYMBOL];
+        assert_eq!(recover_orig_keysyms(orig.clone()), orig);
+    }
+
+    #[test]
+    fn recover_synthesizes_caps_lock_when_all_nosymbol() {
+        // Prior daemon SIGKILL'd before Drop — keycode stuck on NoSymbol.
+        assert_eq!(
+            recover_orig_keysyms(vec![NO_SYMBOL, NO_SYMBOL, NO_SYMBOL, NO_SYMBOL]),
+            vec![XK_CAPS_LOCK]
+        );
+    }
+
+    #[test]
+    fn recover_synthesizes_caps_lock_for_empty_mapping() {
+        assert_eq!(recover_orig_keysyms(vec![]), vec![XK_CAPS_LOCK]);
+    }
+
+    #[test]
+    fn nosymbol_mapping_matches_slot_count() {
+        assert_eq!(nosymbol_mapping(4), vec![NO_SYMBOL; 4]);
+        assert_eq!(nosymbol_mapping(1), vec![NO_SYMBOL]);
+        // X11 should never report 0, but keep Drop/grab safe.
+        assert_eq!(nosymbol_mapping(0), vec![NO_SYMBOL]);
+    }
+
+    #[test]
+    fn drop_restore_payload_is_exactly_orig_keysyms() {
+        let recovered = recover_orig_keysyms(vec![NO_SYMBOL; 4]);
+        assert_eq!(caps_lock_restore_keysyms(&recovered), &[XK_CAPS_LOCK]);
+
+        let live = vec![XK_CAPS_LOCK, 0xffe5, NO_SYMBOL, NO_SYMBOL];
+        assert_eq!(caps_lock_restore_keysyms(&live), live.as_slice());
+    }
+
+    #[test]
+    fn swallow_then_recover_round_trip_yields_caps_lock() {
+        let dead = nosymbol_mapping(4);
+        assert!(dead.iter().all(|&k| k == NO_SYMBOL));
+        assert_eq!(recover_orig_keysyms(dead), vec![XK_CAPS_LOCK]);
+    }
 }
