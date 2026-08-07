@@ -1,6 +1,9 @@
-//! Dictionary: user-defined phrase overrides loaded from TOML.
+//! Dictionary: user-defined phrase overrides.
 //!
-//! File format (`~/.config/dictate/dictionary.toml` by default):
+//! Primary source is `[dict.overrides]` in `config.toml` (built via
+//! [`Dictionary::from_entries`] / [`Dictionary::from_map`]). A standalone
+//! legacy file is still parseable by [`Dictionary::load`] /
+//! [`Dictionary::load_overrides`] for one-shot migration:
 //! ```toml
 //! [overrides]
 //! "hypr whisper" = "hyprwhspr"
@@ -43,10 +46,20 @@ struct DictFile {
 impl Dictionary {
     /// `None` → empty dictionary. A missing explicit file is an error;
     /// a malformed one is an error naming the file.
+    ///
+    /// Standalone `[overrides]` TOML file entry (legacy dictionary.toml).
+    /// Runtime callers build from `Config.dict.overrides` via
+    /// [`from_entries`] / [`from_map`]; migration uses this plus
+    /// [`load_overrides`].
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let Some(path) = path else {
             return Ok(Self::default());
         };
+        Ok(Self::from_entries(Self::load_overrides(path)?))
+    }
+
+    /// Parse a standalone `[overrides]` TOML file (legacy dictionary.toml).
+    pub fn load_overrides(path: &Path) -> Result<HashMap<String, String>> {
         let text = std::fs::read_to_string(path).with_context(|| {
             format!(
                 "cannot read dictionary file '{}'; fix the path or create the file",
@@ -59,7 +72,12 @@ impl Dictionary {
                 path.display()
             )
         })?;
-        Ok(Self::from_entries(parsed.overrides))
+        Ok(parsed.overrides)
+    }
+
+    /// Construct from an in-memory `HashMap` (config `[dict.overrides]`).
+    pub fn from_map(map: HashMap<String, String>) -> Self {
+        Self::from_entries(map)
     }
 
     /// Also construct from an in-memory table (tests, defaults).
@@ -91,6 +109,13 @@ impl Dictionary {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+
+    /// Entries as a map (order not significant). Used when Config stores
+    /// overrides after a legacy [`load`].
+    pub fn to_map(&self) -> HashMap<String, String> {
+        self.entries.iter().cloned().collect()
     }
 
     /// Apply overrides to `input`. Whole-word matching: a phrase never

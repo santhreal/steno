@@ -14,6 +14,12 @@
 //! Pure display: override-redirect, takes no focus. Cosmetic and
 //! fail-open: no DISPLAY / no ARGB visual / any X error simply disables
 //! the overlay — dictation itself is unaffected.
+//!
+//! # Embedders
+//!
+//! Prefer [`create`] + [`OverlayBackend`] (`Box<dyn OverlayBackend>`) so a
+//! host can swap the built-in pill for [`NullOverlay`] or its own loading
+//! UI. [`Overlay::start`] remains for existing callers; migrate when ready.
 
 use std::f32::consts::PI;
 use std::path::Path;
@@ -28,13 +34,24 @@ use tiny_skia::{
     PremultipliedColorU8, Stroke, StrokeDash, Transform,
 };
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     /// Show the bottom-center status overlay (X11 only).
     pub overlay: bool,
     /// How long the "done"/"error" stage stays visible before hide.
     pub done_flash_ms: u64,
+    /// Built-in overlay theme selected by [`create`].
+    ///
+    /// Known values: `"pill"` (default X11 pill), `"null"` / `"none"` /
+    /// `"off"` (no-op). Unknown themes log a warning and fall back to the
+    /// pill — UI is fail-open.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "pill".to_string()
 }
 
 impl Default for UiConfig {
@@ -43,6 +60,52 @@ impl Default for UiConfig {
             overlay: true,
             // Matches the mock's quick Done celebration (~1.2s).
             done_flash_ms: 1200,
+            theme: "pill".to_string(),
+        }
+    }
+}
+
+/// Status UI sink for the daemon / embedders.
+///
+/// Method names match the concrete [`Overlay`] API so call sites can move
+/// to `Box<dyn OverlayBackend>` without renaming.
+pub trait OverlayBackend: Send {
+    fn set(&self, stage: Stage);
+    fn flash(&self, ms: u64);
+    /// True unless the overlay is disabled or already known-dead.
+    /// True while the backend is live (fail-open UIs may return false).
+    fn active(&self) -> bool;
+}
+
+/// Headless / test / embedder stand-in: every method is a no-op.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullOverlay;
+
+impl OverlayBackend for NullOverlay {
+    fn set(&self, _stage: Stage) {}
+
+    fn flash(&self, _ms: u64) {}
+
+    fn active(&self) -> bool {
+        false
+    }
+}
+
+/// Build an overlay from [`UiConfig`].
+///
+/// - `overlay = false` → [`NullOverlay`]
+/// - `theme` of `"null"` / `"none"` / `"off"` → [`NullOverlay`]
+/// - `"pill"`, empty, or unknown → X11 [`Overlay`] (unknown logs a warning)
+pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
+    if !cfg.overlay {
+        return Box::new(NullOverlay);
+    }
+    match cfg.theme.as_str() {
+        "null" | "none" | "off" => Box::new(NullOverlay),
+        "pill" | "" => Box::new(Overlay::start(cfg)),
+        other => {
+            log::warn!("unknown ui.theme {other:?}; falling back to pill");
+            Box::new(Overlay::start(cfg))
         }
     }
 }
@@ -116,6 +179,32 @@ impl Overlay {
         if self.active() {
             thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+impl OverlayBackend for Box<dyn OverlayBackend> {
+    fn set(&self, stage: Stage) {
+        (**self).set(stage)
+    }
+    fn flash(&self, ms: u64) {
+        (**self).flash(ms)
+    }
+    fn active(&self) -> bool {
+        (**self).active()
+    }
+}
+
+impl OverlayBackend for Overlay {
+    fn set(&self, stage: Stage) {
+        Overlay::set(self, stage);
+    }
+
+    fn flash(&self, ms: u64) {
+        Overlay::flash(self, ms);
+    }
+
+    fn active(&self) -> bool {
+        Overlay::active(self)
     }
 }
 
@@ -977,6 +1066,57 @@ fn draw_text(
             }
         }
         pen_x += metrics.advance_width;
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+
+    #[test]
+    fn null_overlay_methods_do_not_panic() {
+        let n = NullOverlay;
+        n.set(Stage::Recording);
+        n.set(Stage::Transcribing);
+        n.set(Stage::Done);
+        n.set(Stage::Error);
+        n.set(Stage::Hidden);
+        n.flash(0);
+        n.flash(1);
+        assert!(!n.active());
+    }
+
+    #[test]
+    fn ui_config_default_theme_is_pill() {
+        let cfg = UiConfig::default();
+        assert_eq!(cfg.theme, "pill");
+        assert!(cfg.overlay);
+        assert_eq!(cfg.done_flash_ms, 1200);
+    }
+
+    #[test]
+    fn create_with_overlay_false_is_null() {
+        let cfg = UiConfig {
+            overlay: false,
+            ..UiConfig::default()
+        };
+        let ov = create(&cfg);
+        ov.set(Stage::Recording);
+        ov.flash(0);
+        assert!(!ov.active());
+    }
+
+    #[test]
+    fn create_theme_null_aliases_are_null() {
+        for theme in ["null", "none", "off"] {
+            let cfg = UiConfig {
+                theme: theme.to_string(),
+                ..UiConfig::default()
+            };
+            let ov = create(&cfg);
+            ov.set(Stage::Done);
+            assert!(!ov.active(), "theme {theme}");
+        }
     }
 }
 

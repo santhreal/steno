@@ -2,16 +2,16 @@
 //!
 //! Requirements (tests skip with a message when missing):
 //! - espeak-ng in PATH (speech synthesis for fixtures)
-//! - a ggml model at ~/.local/share/dictate/models/*.bin (or DICTATE_TEST_MODEL)
+//! - a sherpa-onnx Parakeet model dir under ~/.local/share/dictate/models/ (or DICTATE_TEST_MODEL)
 //!
 //! Every transformation assertion is backed by two anchors so a test can
 //! never pass vacuously:
-//! - STT-fidelity anchors on the `--raw` transcript prove whisper actually
+//! - STT-fidelity anchors on the `--raw` transcript prove the recognizer actually
 //!   heard the spoken command words and content. Without them, a garbled
 //!   transcript would "pass" absence assertions (e.g. scratch that)
 //!   without the feature ever firing.
 //! - Command-word absence in the processed output proves the command was
-//!   consumed. whisper inserts its own punctuation around spoken command
+//!   consumed. the recognizer may insert its own punctuation around spoken command
 //!   words ("bank, comma,"), so asserting the presence of '.' or ','
 //!   alone would pass even with the command table disabled.
 
@@ -30,14 +30,23 @@ fn test_model() -> Option<PathBuf> {
         return Some(PathBuf::from(m));
     }
     let dir = PathBuf::from(std::env::var_os("HOME")?).join(".local/share/dictate/models");
-    let mut bins: Vec<PathBuf> = std::fs::read_dir(&dir)
+    // Prefer sherpa-onnx model directories (tokens.txt + encoder*.onnx).
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "bin"))
+        .filter(|p| {
+            p.is_dir()
+                && p.join("tokens.txt").is_file()
+                && std::fs::read_dir(p).ok().is_some_and(|rd| {
+                    rd.filter_map(|e| e.ok()).any(|e| {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        n.starts_with("encoder") && n.ends_with(".onnx")
+                    })
+                })
+        })
         .collect();
-    // Prefer the largest model: the best available STT quality.
-    bins.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
-    bins.into_iter().next_back()
+    dirs.sort();
+    dirs.into_iter().next_back()
 }
 
 fn speak(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -121,7 +130,7 @@ macro_rules! require {
 }
 
 /// Assert every STT-fidelity anchor appears in the raw transcript. If one
-/// is missing, whisper garbled the speech and the transformation
+/// is missing, the recognizer garbled the speech and the transformation
 /// assertions downstream would be vacuous — fail loudly instead.
 macro_rules! anchor_raw {
     ($raw_lower:expr, $($needle:expr),+ $(,)?) => {
@@ -169,7 +178,7 @@ fn e2e_commands_and_formatting() {
     let raw_lower = raw.to_lowercase();
     let lower = text.to_lowercase();
 
-    // STT fidelity: whisper must have heard content and command words,
+    // STT fidelity: the recognizer must have heard content and command words,
     // otherwise the pipeline assertions below prove nothing.
     anchor_raw!(
         raw_lower,
@@ -179,7 +188,7 @@ fn e2e_commands_and_formatting() {
         "new line",
         "question mark"
     );
-    // whisper emits a single line; a newline in the output can only come
+    // the recognizer emits a single utterance; a newline in the output can only come
     // from the `new line` command.
     assert!(
         !raw.contains('\n'),
@@ -205,7 +214,7 @@ fn e2e_commands_and_formatting() {
         text.contains('?'),
         "question mark command did not fire: {text:?}"
     );
-    // The spoken command words themselves must be gone: whisper adds its
+    // The spoken command words themselves must be gone: the recognizer may add its
     // own '.' around "period", so symbol presence alone proves nothing.
     commands_consumed!(lower, text, "period", "new line", "question mark");
     // Content survived the pipeline.
@@ -230,10 +239,10 @@ fn e2e_scratch_and_dictionary() {
     };
     let tmp = std::env::temp_dir().join("dictate-e2e-2");
     std::fs::create_dir_all(&tmp).unwrap();
-    let dict = tmp.join("dict.toml");
+    let cfg = tmp.join("cfg.toml");
     std::fs::write(
-        &dict,
-        "[overrides]\n\"main street\" = \"Main Street\"\n\"um\" = \"\"\n",
+        &cfg,
+        "[ui]\noverlay = false\n\n[dict.overrides]\n\"main street\" = \"Main Street\"\n\"um\" = \"\"\n",
     )
     .unwrap();
     let wav = speak(
@@ -242,12 +251,13 @@ fn e2e_scratch_and_dictionary() {
         "um i went to the store scratch that i went to the bank comma main street period",
     );
 
-    let extra = &["--dictionary".into(), dict.to_string_lossy().into_owned()];
+    // Last --config wins over hermetic empty config inside dictate().
+    let extra = &["--config".into(), cfg.to_string_lossy().into_owned()];
     let (raw, text) = raw_and_processed(&model, &wav, extra);
     let raw_lower = raw.to_lowercase();
     let lower = text.to_lowercase();
 
-    // STT fidelity: whisper must have heard both clauses and the scratch
+    // STT fidelity: the recognizer must have heard both clauses and the scratch
     // phrase. In particular "went to the store" must be audible in raw —
     // otherwise "store is gone from the output" passes vacuously even if
     // scratch that is broken.
@@ -289,7 +299,7 @@ fn e2e_scratch_and_dictionary() {
         !text.contains("main street"),
         "override did not apply (lowercase phrase survives): {text:?}"
     );
-    // Commands: symbols present AND spoken words consumed (whisper emits
+    // Commands: symbols present AND spoken words consumed (the recognizer may emit
     // its own ',' around "comma", so symbol presence alone is vacuous).
     assert!(text.contains(','), "comma command did not fire: {text:?}");
     commands_consumed!(lower, text, "comma", "period");
@@ -313,10 +323,14 @@ fn e2e_quotes_paragraph_and_names() {
         "t3.wav",
         "open quote hello world close quote new paragraph this is the boss speaking exclamation mark",
     );
-    let dict = tmp.join("dict.toml");
-    std::fs::write(&dict, "[overrides]\n\"boss\" = \"Mukund\"\n").unwrap();
+    let cfg = tmp.join("cfg.toml");
+    std::fs::write(
+        &cfg,
+        "[ui]\noverlay = false\n\n[dict.overrides]\n\"boss\" = \"Mukund\"\n",
+    )
+    .unwrap();
 
-    let extra = &["--dictionary".into(), dict.to_string_lossy().into_owned()];
+    let extra = &["--config".into(), cfg.to_string_lossy().into_owned()];
     let (raw, text) = raw_and_processed(&model, &wav, extra);
     let raw_lower = raw.to_lowercase();
     let lower = text.to_lowercase();
@@ -411,11 +425,11 @@ fn typing_is_fail_closed_without_config_arming() {
         err.contains("type_output"),
         "error must name the arming key: {err}"
     );
-    // The guard must fire fast — before whisper (never prints model load)
+    // The guard must fire fast — before the model loads
     // and before the microphone is opened.
     assert!(
-        !err.contains("whisper"),
-        "model loaded before the guard: {err}"
+        !err.contains("sherpa") && !err.contains("onnx"),
+        "model/STT touched before the guard: {err}"
     );
 }
 

@@ -8,23 +8,28 @@
 //!   dictate restart — stop then start
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use crate::api::{self, ApiError, ApiHandler, ApiResult};
 use crate::audio;
-use crate::config::{self, Config};
+use crate::config::{self, ApiConfig, Config};
+use crate::dsp::{self, DspConfig};
 use crate::hotkey::{Hotkey, HotkeyEvent};
 use crate::output::OutputMode;
-use crate::overlay::{Overlay, Stage};
+use crate::overlay::{self, Stage};
 use crate::stt::Transcriber;
-use crate::text::{self, TextPipeline};
+use crate::text::{self, TextConfig, TextPipeline};
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
@@ -276,9 +281,21 @@ fn write_pid(pid: u32) -> Result<()> {
     Ok(())
 }
 
-struct PidGuard;
+struct PidGuard {
+    socket: Option<PathBuf>,
+    api_stop: Option<Arc<AtomicBool>>,
+}
+
 impl Drop for PidGuard {
     fn drop(&mut self) {
+        if let Some(stop) = self.api_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(sock) = self.socket.take() {
+            // Unblock a non-blocking accept loop waiting on WouldBlock / connect.
+            let _ = std::os::unix::net::UnixStream::connect(&sock);
+            let _ = fs::remove_file(&sock);
+        }
         if let Ok(path) = pid_path() {
             let _ = fs::remove_file(path);
         }
@@ -288,9 +305,6 @@ impl Drop for PidGuard {
 fn forward_flags(cmd: &mut Command, cli: &Cli) {
     if let Some(m) = &cli.model {
         cmd.arg("--model").arg(m);
-    }
-    if let Some(d) = &cli.dictionary {
-        cmd.arg("--dictionary").arg(d);
     }
     if let Some(d) = &cli.device {
         cmd.arg("--device").arg(d);
@@ -316,11 +330,10 @@ fn preflight(cli: &Cli) -> Result<()> {
         );
     }
     let _ = config::resolve_model(cli.model.as_ref(), &cfg)?;
-    // A malformed dictionary must fail `dictate start` here, not surface
-    // only as a readiness-handshake timeout pointing at the daemon log.
-    let _ = text::Dictionary::load(
-        config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
-    )?;
+    // Legacy dictionary.toml parse errors (and other config issues) already
+    // fail inside Config::load above — surface them before advertising
+    // "running".
+    let _ = text::Dictionary::from_map(cfg.dict.overrides.clone());
     if std::env::var_os("DISPLAY").is_none() {
         bail!("DISPLAY is unset — the daemon needs X11 for Caps Lock and typing");
     }
@@ -335,6 +348,191 @@ extern "C" fn on_sigterm(_sig: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
+fn resolve_api_socket(api: &ApiConfig) -> Result<PathBuf> {
+    match api.configured_path() {
+        Some(p) => config::expand_tilde(p),
+        None => api::default_socket_path(),
+    }
+}
+
+/// NDJSON handler backed by the resident model. Typing is never armed here —
+/// API clients only receive text; `type_output` stays config-only.
+struct DaemonHandler {
+    transcriber: Arc<Transcriber>,
+    text_cfg: TextConfig,
+    dict: text::Dictionary,
+    dsp: DspConfig,
+    model: PathBuf,
+    type_output_armed: bool,
+    token: Option<String>,
+    raw: bool,
+    stage: Arc<Mutex<String>>,
+}
+
+impl DaemonHandler {
+    fn utterance_nyi(op: &str) -> ApiResult {
+        Err(ApiError::new(
+            format!("{op} is not implemented"),
+            Some("use hotkey PTT or transcribe op".into()),
+        ))
+    }
+
+    fn load_wav(&self, path: &Path) -> Result<Vec<f32>, ApiError> {
+        let (raw, rate) = dsp::read_wav(path).map_err(|e| {
+            ApiError::new(
+                format!("failed to read wav_path: {e:#}"),
+                Some("pass a mono/stereo WAV file path readable by the daemon".into()),
+            )
+        })?;
+        let mut samples = dsp::resample(&raw, rate, dsp::STT_RATE).map_err(|e| {
+            ApiError::new(
+                format!("failed to resample WAV to 16 kHz: {e:#}"),
+                Some("re-export the WAV with a positive sample rate".into()),
+            )
+        })?;
+        let mut dc = dsp::DcBlock::new(dsp::STT_RATE);
+        dc.process(&mut samples);
+        dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
+        Ok(samples)
+    }
+
+    fn decode_pcm_b64(&self, b64: &str) -> Result<Vec<f32>, ApiError> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim().as_bytes())
+            .map_err(|e| {
+                ApiError::new(
+                    format!("invalid pcm_f32_b64: {e}"),
+                    Some("send standard base64 of little-endian f32 PCM at 16 kHz mono".into()),
+                )
+            })?;
+        if bytes.len() % 4 != 0 {
+            return Err(ApiError::new(
+                format!(
+                    "pcm_f32_b64 length {} is not a multiple of 4",
+                    bytes.len()
+                ),
+                Some("encode little-endian f32 samples (4 bytes each) before base64".into()),
+            ));
+        }
+        let mut samples = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
+        Ok(samples)
+    }
+
+    fn decode_samples(&self, samples: &[f32]) -> Result<String, ApiError> {
+        let out = Arc::new(Mutex::new(String::new()));
+        let out2 = out.clone();
+        self.transcriber
+            .transcribe_streaming(samples, move |chunk| {
+                if let Ok(mut g) = out2.lock() {
+                    g.push_str(chunk);
+                }
+            })
+            .map_err(|e| {
+                ApiError::new(
+                    format!("transcription failed: {e:#}"),
+                    Some("check GPU / model health and retry; see daemon log".into()),
+                )
+            })?;
+        let raw = out
+            .lock()
+            .map_err(|_| ApiError::new("transcript lock poisoned", None))?
+            .clone();
+        if self.raw {
+            return Ok(raw.trim().to_string());
+        }
+        let pipeline = TextPipeline::new(self.text_cfg, self.dict.clone());
+        let (text, _) = pipeline.process_stream(&raw, text::FmtState::default());
+        Ok(text)
+    }
+}
+
+impl ApiHandler for DaemonHandler {
+    fn authorize(&self, token: Option<&str>) -> Result<(), ApiError> {
+        let Some(expected) = self.token.as_deref() else {
+            return Ok(());
+        };
+        if token == Some(expected) {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                "unauthorized",
+                Some("set request token to match [api].token in config.toml".into()),
+            ))
+        }
+    }
+
+    fn ping(&self) -> ApiResult {
+        Ok(Some(json!({"pong": true})))
+    }
+
+    fn status(&self) -> ApiResult {
+        let stage = self
+            .stage
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "idle".into());
+        Ok(Some(json!({
+            "pid": std::process::id(),
+            "model": self.model.display().to_string(),
+            "type_output_armed": self.type_output_armed,
+            "stage": stage,
+            "api": true,
+        })))
+    }
+
+    fn transcribe(
+        &self,
+        wav_path: Option<PathBuf>,
+        pcm_f32_b64: Option<String>,
+    ) -> ApiResult {
+        let has_wav = wav_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty());
+        let has_pcm = pcm_f32_b64.as_ref().is_some_and(|s| !s.is_empty());
+        let samples = match (has_wav, has_pcm) {
+            (true, false) => self.load_wav(wav_path.as_ref().unwrap())?,
+            (false, true) => self.decode_pcm_b64(pcm_f32_b64.as_ref().unwrap())?,
+            (true, true) => {
+                return Err(ApiError::new(
+                    "transcribe requires exactly one of wav_path or pcm_f32_b64",
+                    Some("omit one payload field; do not send both".into()),
+                ));
+            }
+            (false, false) => {
+                return Err(ApiError::new(
+                    "transcribe requires wav_path or pcm_f32_b64",
+                    Some(
+                        r#"send {"op":"transcribe","wav_path":"/path/file.wav"} or pcm_f32_b64"#
+                            .into(),
+                    ),
+                ));
+            }
+        };
+        let text = self.decode_samples(&samples)?;
+        Ok(Some(json!({ "text": text })))
+    }
+
+    fn utterance_start(&self) -> ApiResult {
+        Self::utterance_nyi("utterance.start")
+    }
+    fn utterance_audio(&self, _pcm_f32_b64: String) -> ApiResult {
+        Self::utterance_nyi("utterance.audio")
+    }
+    fn utterance_stop(&self) -> ApiResult {
+        Self::utterance_nyi("utterance.stop")
+    }
+    fn utterance_cancel(&self) -> ApiResult {
+        Self::utterance_nyi("utterance.cancel")
+    }
+
+    fn shutdown(&self) -> ApiResult {
+        SHUTDOWN.store(true, Ordering::Relaxed);
+        Ok(Some(json!({"stopping": true})))
+    }
+}
+
 /// Foreground worker: load model once, grab hotkey, loop utterances.
 pub fn run_daemon(cli: &Cli) -> Result<()> {
     // Ignore SIGHUP in case we were started without setsid.
@@ -347,7 +545,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     // before grab + model load succeed, and a second worker must not
     // clobber a live one's entry.
     write_pid(std::process::id())?;
-    let _pid_guard = PidGuard;
+    let mut pid_guard = PidGuard {
+        socket: None,
+        api_stop: None,
+    };
 
     let cfg = Config::load(cli.config.as_deref())?;
     // Daemon's job is to type into the focused window. Fail closed: must
@@ -365,17 +566,52 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         "dictate: loading model {} …",
         model.display()
     );
-    let transcriber = Transcriber::load(&model, cfg.n_threads)?;
-    let dict_path = config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?;
-    let dict = text::Dictionary::load(dict_path.as_deref())?;
-    if let Some(p) = &dict_path {
+    let transcriber = Arc::new(Transcriber::load(&model, cfg.n_threads)?);
+    let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
+    if !dict.is_empty() {
         eprintln!(
-            "dictate: dictionary {} loaded; edits apply after `dictate restart`",
-            p.display()
+            "dictate: dictionary ({} overrides) loaded from {}; edits apply after `dictate restart`",
+            cfg.dict.overrides.len(),
+            config::default_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "~/.config/dictate/config.toml".into())
         );
     }
     let text_cfg = cfg.text;
-    let overlay = Overlay::start(&cfg.ui);
+    let overlay = overlay::create(&cfg.ui);
+    log::debug!("overlay active={}", overlay.active());
+    let stage = Arc::new(Mutex::new(String::from("idle")));
+
+    // API socket: spawn before hotkey loop so clients can ping while Caps Lock
+    // is idle. Typing remains fail-closed (config-only); handler never types.
+    if cfg.api.enabled {
+        let sock = resolve_api_socket(&cfg.api)?;
+        let api_stop = Arc::new(AtomicBool::new(false));
+        let handler = DaemonHandler {
+            transcriber: Arc::clone(&transcriber),
+            text_cfg,
+            dict: dict.clone(),
+            dsp: cfg.dsp,
+            model: model.clone(),
+            type_output_armed: cfg.type_output,
+            token: cfg.api.required_token().map(str::to_owned),
+            raw: cli.raw,
+            stage: Arc::clone(&stage),
+        };
+        let serve_path = sock.clone();
+        let stop2 = Arc::clone(&api_stop);
+        thread::Builder::new()
+            .name("dictate-api".into())
+            .spawn(move || {
+                if let Err(e) = api::serve_unix_until(&serve_path, handler, Some(stop2)) {
+                    log::error!("api server exited: {e:#}");
+                }
+            })
+            .context("cannot spawn API socket thread")?;
+        eprintln!("dictate: api socket {}", sock.display());
+        pid_guard.socket = Some(sock);
+        pid_guard.api_stop = Some(api_stop);
+    }
 
     let mut hotkey = Hotkey::grab_caps_lock()?;
     // Ready: model loaded AND hotkey grabbed. Tell the parent.
@@ -400,6 +636,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     loop {
         match hotkey.next_event_debug(&mut held, false, &SHUTDOWN)? {
             HotkeyEvent::Press => {
+                if let Ok(mut g) = stage.lock() {
+                    *g = "listening".into();
+                }
                 overlay.set(Stage::Recording);
                 let stop = Arc::new(AtomicBool::new(false));
                 let discard = Arc::new(AtomicBool::new(false));
@@ -438,6 +677,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         overlay.set(Stage::Error);
                         overlay.flash(cfg.ui.done_flash_ms);
                         overlay.set(Stage::Hidden);
+                        if let Ok(mut g) = stage.lock() {
+                            *g = "idle".into();
+                        }
                         continue;
                     }
                     Err(_) => {
@@ -445,6 +687,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         overlay.set(Stage::Error);
                         overlay.flash(cfg.ui.done_flash_ms);
                         overlay.set(Stage::Hidden);
+                        if let Ok(mut g) = stage.lock() {
+                            *g = "idle".into();
+                        }
                         continue;
                     }
                 };
@@ -452,6 +697,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     // Drop the utterance: no transcription, no typing.
                     log::info!("utterance cancelled by keypress");
                     overlay.set(Stage::Hidden);
+                    if let Ok(mut g) = stage.lock() {
+                        *g = "idle".into();
+                    }
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         return Ok(());
                     }
@@ -460,7 +708,13 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                 if samples.is_empty() {
                     log::debug!("empty hold — skipped");
                     overlay.set(Stage::Hidden);
+                    if let Ok(mut g) = stage.lock() {
+                        *g = "idle".into();
+                    }
                     continue;
+                }
+                if let Ok(mut g) = stage.lock() {
+                    *g = "transcribing".into();
                 }
                 overlay.set(Stage::Transcribing);
                 let pipeline = TextPipeline::new(text_cfg, dict.clone());
@@ -470,13 +724,16 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     pipeline,
                     cli.raw,
                     mode,
-                    &overlay,
+                    overlay.as_ref(),
                     cfg.ui.done_flash_ms,
                 ) {
                     log::error!("transcript failed: {e}");
                     overlay.set(Stage::Error);
                     overlay.flash(cfg.ui.done_flash_ms);
                     overlay.set(Stage::Hidden);
+                }
+                if let Ok(mut g) = stage.lock() {
+                    *g = "idle".into();
                 }
                 // Typing just injected keys: drop any late raw events so
                 // they cannot cancel the next utterance.
@@ -489,3 +746,56 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod api_handler_tests {
+    //! WHY: API must reject ambiguous/missing audio payloads and never treat
+    //! typing as API-controllable — unit-test the pure validation path without
+    //! loading a GPU model.
+    use super::*;
+
+    struct PayloadProbe;
+
+    impl ApiHandler for PayloadProbe {
+        fn transcribe(
+            &self,
+            wav_path: Option<PathBuf>,
+            pcm_f32_b64: Option<String>,
+        ) -> ApiResult {
+            // Mirror DaemonHandler payload rules without STT.
+            let has_wav = wav_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty());
+            let has_pcm = pcm_f32_b64.as_ref().is_some_and(|s| !s.is_empty());
+            match (has_wav, has_pcm) {
+                (true, false) | (false, true) => Ok(Some(json!({"ok": true}))),
+                (true, true) => Err(ApiError::new(
+                    "transcribe requires exactly one of wav_path or pcm_f32_b64",
+                    Some("omit one payload field; do not send both".into()),
+                )),
+                (false, false) => Err(ApiError::new(
+                    "transcribe requires wav_path or pcm_f32_b64",
+                    Some(
+                        r#"send {"op":"transcribe","wav_path":"/path/file.wav"} or pcm_f32_b64"#
+                            .into(),
+                    ),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn transcribe_rejects_both_and_neither() {
+        let h = PayloadProbe;
+        let both = h.transcribe(Some(PathBuf::from("/tmp/a.wav")), Some("AAAA".into()));
+        assert!(both.is_err());
+        let neither = h.transcribe(None, None);
+        assert!(neither.is_err());
+        let wav_only = h.transcribe(Some(PathBuf::from("/tmp/a.wav")), None);
+        assert!(wav_only.is_ok());
+    }
+
+    #[test]
+    fn api_config_enabled_by_default() {
+        assert!(ApiConfig::default().enabled);
+    }
+}
+

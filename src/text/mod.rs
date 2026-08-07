@@ -7,7 +7,7 @@
 //! punctuates around them but never re-cases them, so a lowercase-branded
 //! entry ("veyyon") stays lowercase even at a sentence start.
 //!
-//! Pure string logic; no I/O except dictionary file loading.
+//! Pure string logic; no I/O except legacy dictionary.toml parsing.
 
 mod commands;
 mod dictionary;

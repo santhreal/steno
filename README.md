@@ -21,44 +21,39 @@ The budget is approved, see attached.
 
 ## Build
 
-You need a Rust toolchain, a C compiler, and cmake (for whisper.cpp).
+You need a Rust toolchain, a C compiler, and the sherpa-onnx CUDA shared
+libraries (or a CPU build) available at build time via
+`SHERPA_ONNX_LIB_DIR` (e.g. `/usr/local/lib/sherpa-onnx`).
 
 ```
+export SHERPA_ONNX_LIB_DIR=/usr/local/lib/sherpa-onnx
 cargo build --release
-# binary: target/release/dictate
-cargo install --path .   # or: install `dictate` into ~/.cargo/bin
+cargo install --path .
 ```
 
-NVIDIA GPU acceleration is a compile-time feature (CUDA toolkit required):
-
-```
-cargo build --release --features cuda
-```
+GPU decode uses the system CUDA/cuDNN install the sherpa libs were built
+against. There is no cargo `--features cuda` flag — provider selection is
+runtime/config once that lands; today the linked sherpa build is CUDA.
 
 ## Get a model
 
-`dictate` uses any ggml whisper model and never downloads anything itself.
-One curl command is all it takes:
+`dictate` uses a sherpa-onnx **model directory** (encoder/decoder/joiner
+ONNX + `tokens.txt`). Recommended: NVIDIA Parakeet TDT v3 int8.
 
 ```
 mkdir -p ~/.local/share/dictate/models
-curl -L -o ~/.local/share/dictate/models/ggml-small.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+cd ~/.local/share/dictate/models
+curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
+tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 ```
 
-Which model is a speed/accuracy tradeoff:
-
-| Model | Size | Note |
+| Model dir | Size | Note |
 |---|---|---|
-| `ggml-base.en.bin` | 142 MB | Fast; English only |
-| `ggml-small.en.bin` | 466 MB | Good default; English only |
-| `ggml-medium.en.bin` | 1.5 GB | More accurate, slower |
-| `ggml-large-v3-turbo.bin` | 1.6 GB | Best accuracy; multilingual |
+| `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | ~600 MB | Default; multilingual; GPU-fast |
 
-`dictate` looks in `~/.local/share/dictate/models` when `--model` is not
-passed and picks the first `*.bin` alphabetically. With one model there is
-nothing to configure; with several, pass `--model /path/to/model.bin` (or
-set `model_path` in the config) to choose.
+When `--model` is not set, `dictate` picks the single model directory under
+`~/.local/share/dictate/models`. With several, set `model_path` in the
+config (or pass `--model /path/to/model-dir`).
 
 ## Use it
 
@@ -121,7 +116,7 @@ also useful for testing your setup without a microphone.
 
 Useful flags: `--list-devices` and `--device <name>` pick a microphone,
 `--raw` skips all text processing,
-`--model`/`--dictionary`/`--config <path>` override auto-resolution,
+`--model`/`--config <path>` override auto-resolution,
 `-v`/`-vv` shows what the pipeline is doing.
 
 One-shot invocations load the model from disk each time (a few seconds of
@@ -159,12 +154,12 @@ is collapsed during formatting, so you get "bank, " and not "bank,, ".
 ## Dictionary
 
 The dictionary rewrites phrases after commands run — names, jargon, product
-terms the recognizer gets wrong. Create `~/.config/dictate/dictionary.toml`
-(picked up automatically when it exists; `--dictionary <path>` points
-elsewhere):
+terms the recognizer gets wrong. Put overrides in the same config file under
+`[dict.overrides]`:
 
 ```toml
-[overrides]
+# ~/.config/dictate/config.toml
+[dict.overrides]
 "handy" = "Dictate"
 "main street" = "Main Street"
 "um" = ""                # empty replacement deletes the phrase
@@ -172,6 +167,12 @@ elsewhere):
 
 Matching is case-insensitive and whole-word; longer phrases win. The
 replacement's case is used exactly as written.
+
+If you still have a legacy `~/.config/dictate/dictionary.toml`, it is
+imported into memory once when `[dict.overrides]` is empty (with a
+deprecation warning). Copy the entries under `[dict.overrides]` and remove
+the old file; `dictate` never rewrites your config for you. Restart the
+daemon after edits (`dictate restart`).
 
 ## Configuration
 
@@ -181,7 +182,6 @@ config looks like:
 
 ```toml
 model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
-dictionary_path = "~/.config/dictate/dictionary.toml"
 n_threads = 8            # CPU threads for feature extraction; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
 type_output = false      # arm typing (xdotool); the ONLY way to enable it
@@ -203,9 +203,47 @@ format = true
 [ui]
 overlay = true         # bottom-center status pill (X11)
 done_flash_ms = 1200    # how long done/error stays visible
+
+[api]
+enabled = true         # daemon listens on a local Unix socket
+# path = ""            # empty → $XDG_RUNTIME_DIR/dictate/dictate.sock
+# token = ""           # optional shared secret on each request
+
+[dict.overrides]
+"handy" = "Dictate"
+"main street" = "Main Street"
+"um" = ""
 ```
 
+## Daemon API
+
+When the daemon is running with `[api].enabled` (the default), it listens on a
+Unix socket — `$XDG_RUNTIME_DIR/dictate/dictate.sock`, or
+`~/.cache/dictate/dictate.sock` if `XDG_RUNTIME_DIR` is unset. Override with
+`[api].path`. Optional `[api].token` requires every request to carry the same
+`token` field.
+
+One JSON object per line (NDJSON). The API never enables typing; `type_output`
+in the config file remains the only arming path.
+
+```bash
+# ping
+printf '%s\n' '{"id":1,"op":"ping"}' | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+
+# status
+printf '%s\n' '{"id":2,"op":"status"}' | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+
+# transcribe a WAV (returns {"text":"..."}; does not type)
+printf '%s\n' '{"id":3,"op":"transcribe","wav_path":"/path/to/clip.wav"}' \
+  | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+```
+
+Ops: `ping`, `status`, `transcribe` (`wav_path` **or** `pcm_f32_b64` little-endian
+f32 @ 16 kHz mono), `shutdown`. Streaming `utterance.*` is not implemented yet —
+use Caps Lock PTT or `transcribe`.
+
 ## How it works
+
 
 ```
 mic ── capture (cpal/ALSA)

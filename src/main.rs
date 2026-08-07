@@ -17,6 +17,7 @@ mod output;
 mod overlay;
 mod stt;
 mod text;
+mod api;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -35,10 +36,6 @@ pub struct Cli {
     /// Path to a sherpa-onnx model directory. Overrides config.
     #[arg(short, long, global = true)]
     pub model: Option<PathBuf>,
-
-    /// Path to a dictionary TOML with an [overrides] table.
-    #[arg(short, long, global = true)]
-    pub dictionary: Option<PathBuf>,
 
     /// Type the result into the focused window via xdotool (X11) instead
     /// of printing. SAFETY: requires `type_output = true` in the config
@@ -129,12 +126,13 @@ fn main() -> Result<()> {
     // microphone opens, the model loads, or xdotool is ever spawned.
     let mode = output_mode(cli.r#type, cli.stdout, cfg.type_output)?;
 
-    let overlay = overlay::Overlay::start(&cfg.ui);
+    let overlay = overlay::create(&cfg.ui);
+    log::debug!("overlay active={}", overlay.active());
 
     // Warn about flags that have no effect in the chosen mode; silently
     // ignoring them would look like they worked.
-    if cli.raw && cli.dictionary.is_some() {
-        log::warn!("--raw skips the text pipeline; --dictionary is ignored");
+    if cli.raw && !cfg.dict.overrides.is_empty() {
+        log::warn!("--raw skips the text pipeline; [dict.overrides] are ignored");
     }
     if cli.input.is_some() && cli.device.is_some() {
         log::warn!("--device is ignored when transcribing a file");
@@ -173,9 +171,7 @@ fn main() -> Result<()> {
 
     let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
     let transcriber = stt::Transcriber::load(&model, cfg.n_threads)?;
-    let dict = text::Dictionary::load(
-        config::resolve_dictionary(cli.dictionary.as_ref(), &cfg)?.as_deref(),
-    )?;
+    let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
     let pipeline = text::TextPipeline::new(cfg.text, dict);
     emit_transcript(
         &samples,
@@ -183,7 +179,7 @@ fn main() -> Result<()> {
         pipeline,
         cli.raw,
         mode,
-        &overlay,
+        overlay.as_ref(),
         cfg.ui.done_flash_ms,
     )
 }
@@ -195,7 +191,7 @@ pub(crate) fn emit_transcript(
     pipeline: text::TextPipeline,
     raw: bool,
     mode: output::OutputMode,
-    overlay: &overlay::Overlay,
+    overlay: &dyn overlay::OverlayBackend,
     flash_ms: u64,
 ) -> Result<()> {
     struct StreamCtx {

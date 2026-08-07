@@ -763,6 +763,7 @@ name = "light-dictate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "cpal",
  "env_logger",
@@ -772,6 +773,7 @@ dependencies = [
  "log",
  "rubato",
  "serde",
+ "serde_json",
  "sherpa-onnx",
  "tiny-skia",
  "toml",

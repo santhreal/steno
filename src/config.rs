@@ -1,14 +1,19 @@
 //! Configuration: built-in defaults, then `~/.config/dictate/config.toml`,
 //! then CLI flags (merged by `main.rs`).
+//!
+//! Dictionary overrides live under `[dict.overrides]` in the same file.
+//! A legacy `~/.config/dictate/dictionary.toml` is imported into memory
+//! once when that table is empty (never rewritten to disk).
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::dsp::{DspConfig, VadConfig};
 use crate::overlay::UiConfig;
-use crate::text::TextConfig;
+use crate::text::{Dictionary, TextConfig};
 
 // deny_unknown_fields: a typo'd key must fail loudly, not be silently
 // ignored. Every nested table sets it too.
@@ -19,9 +24,6 @@ pub struct Config {
     /// ONNX + tokens.txt). Falls back to the single model directory in
     /// `~/.local/share/dictate/models/`.
     pub model_path: Option<PathBuf>,
-    /// Dictionary TOML with an `[overrides]` table. Falls back to
-    /// `~/.config/dictate/dictionary.toml` when present.
-    pub dictionary_path: Option<PathBuf>,
     /// Decode threads. Defaults to half the logical CPUs.
     pub n_threads: u32,
     /// Hard cap on one recording.
@@ -36,13 +38,58 @@ pub struct Config {
     pub dsp: DspConfig,
     pub text: TextConfig,
     pub ui: UiConfig,
+    /// Phrase overrides applied after voice commands.
+    pub dict: DictConfig,
+    /// Unix-socket NDJSON API (daemon only).
+    pub api: ApiConfig,
+}
+
+/// Dictionary section of the single config file (`[dict]` / `[dict.overrides]`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DictConfig {
+    pub overrides: HashMap<String, String>,
+}
+
+/// Daemon NDJSON socket API (`[api]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiConfig {
+    /// Listen on the Unix socket when the daemon starts.
+    pub enabled: bool,
+    /// Socket path. Empty / unset → `$XDG_RUNTIME_DIR/dictate/dictate.sock`
+    /// (else `~/.cache/dictate/dictate.sock`).
+    pub path: Option<PathBuf>,
+    /// If set (non-empty), every request must carry a matching `token`.
+    pub token: Option<String>,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            token: None,
+        }
+    }
+}
+
+impl ApiConfig {
+    /// Non-empty configured token, if any.
+    pub fn required_token(&self) -> Option<&str> {
+        self.token.as_deref().filter(|t| !t.is_empty())
+    }
+
+    /// True when `path` is set to a non-empty value.
+    pub fn configured_path(&self) -> Option<&Path> {
+        self.path.as_deref().filter(|p| !p.as_os_str().is_empty())
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             model_path: None,
-            dictionary_path: None,
             n_threads: (std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
                 .unwrap_or(4)
@@ -54,6 +101,8 @@ impl Default for Config {
             dsp: DspConfig::default(),
             text: TextConfig::default(),
             ui: UiConfig::default(),
+            dict: DictConfig::default(),
+            api: ApiConfig::default(),
         }
     }
 }
@@ -63,35 +112,69 @@ impl Config {
     /// DEFAULT file is not an error (defaults apply); a missing EXPLICIT
     /// path is an error — a silent typo would be worse. A malformed file
     /// is an error with the offending line context.
+    ///
+    /// When `[dict.overrides]` is empty, a legacy
+    /// `~/.config/dictate/dictionary.toml` is imported into memory (loud
+    /// deprecation warning). The on-disk config is never rewritten.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let (path, explicit) = match path {
             Some(p) => (expand_tilde(p)?, true),
             None => (default_config_path()?, false),
         };
-        if !path.exists() {
+        let mut cfg = if !path.exists() {
             if explicit {
                 bail!(
                     "config file '{}' does not exist — fix the path or remove the flag",
                     path.display()
                 );
             }
-            return Ok(Self::default());
-        }
-        ensure!(
-            !path.is_dir(),
-            "config path '{}' is a directory — pass a TOML file",
-            path.display()
-        );
-        let raw = fs::read_to_string(&path).with_context(|| {
-            format!(
-                "cannot read config {} — check its permissions",
-                path.display()
-            )
-        })?;
-        let cfg: Self = toml::from_str(&raw)
-            .with_context(|| format!("invalid TOML in config {}", path.display()))?;
+            Self::default()
+        } else {
+            if path.is_dir() {
+                bail!(
+                    "config path '{}' is a directory — pass a TOML file",
+                    path.display()
+                );
+            }
+            let raw = fs::read_to_string(&path).with_context(|| {
+                format!(
+                    "cannot read config {} — check its permissions",
+                    path.display()
+                )
+            })?;
+            let cfg: Self = toml::from_str(&raw)
+                .with_context(|| format!("invalid TOML in config {}", path.display()))?;
+            cfg
+        };
+        cfg.migrate_legacy_dictionary()?;
+        // Validate against the config path we tried to load (or the
+        // default path when using built-in defaults).
         cfg.validate(&path)?;
         Ok(cfg)
+    }
+
+    /// Import `~/.config/dictate/dictionary.toml` into `dict.overrides`
+    /// when that table is empty. Read-only: never writes config.toml.
+    fn migrate_legacy_dictionary(&mut self) -> Result<()> {
+        if !self.dict.overrides.is_empty() {
+            return Ok(());
+        }
+        let legacy = default_dictionary_path()?;
+        if !legacy.exists() {
+            return Ok(());
+        }
+        if legacy.is_dir() {
+            bail!(
+                "legacy dictionary path '{}' is a directory — replace it with a TOML file, or move overrides under [dict.overrides] in config.toml",
+                legacy.display()
+            );
+        }
+        self.dict.overrides = Dictionary::load(Some(&legacy))?.to_map();
+        log::warn!(
+            "{} is deprecated; dictionary overrides now live under [dict.overrides] in config.toml — copy them there and remove the old file",
+            legacy.display()
+        );
+        Ok(())
     }
 
     /// Reject values that parse but break downstream (integer truncation
@@ -123,6 +206,7 @@ pub fn default_config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("dictate/config.toml"))
 }
 
+/// Legacy standalone dictionary path (migration only).
 pub fn default_dictionary_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("dictate/dictionary.toml"))
 }
@@ -187,19 +271,6 @@ fn looks_like_model(dir: &Path) -> bool {
             .any(|n| dir.join(n).is_file())
 }
 
-/// Dictionary resolution order: CLI flag, config file, default path if it
-/// exists, else `None` (empty dictionary).
-pub fn resolve_dictionary(cli: Option<&PathBuf>, cfg: &Config) -> Result<Option<PathBuf>> {
-    if let Some(p) = cli {
-        return Ok(Some(expand_tilde(p)?));
-    }
-    if let Some(p) = &cfg.dictionary_path {
-        return Ok(Some(expand_tilde(p)?));
-    }
-    let default = default_dictionary_path()?;
-    Ok(default.exists().then_some(default))
-}
-
 /// Expand a leading `~` or `~/` to $HOME. Non-UTF-8 paths and paths
 /// without a tilde pass through untouched.
 pub fn expand_tilde(p: &Path) -> Result<PathBuf> {
@@ -218,7 +289,7 @@ fn home_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf> {
     match home {
         Some(h) if !h.as_os_str().is_empty() => Ok(PathBuf::from(h)),
         _ => bail!(
-            "the HOME environment variable is not set — set HOME, or pass explicit paths (--config, --model, --dictionary)"
+            "the HOME environment variable is not set — set HOME, or pass explicit paths (--config, --model)"
         ),
     }
 }
@@ -246,6 +317,10 @@ mod tests {
     //! load error instead of an actionable message.
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    /// Serialize tests that mutate process-wide env (XDG_CONFIG_HOME).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Write `content` to a uniquely named temp file and return its path.
     fn temp_file(name: &str, content: &[u8]) -> PathBuf {
@@ -259,10 +334,41 @@ mod tests {
         format!("{:#}", r.err().expect("expected an error"))
     }
 
+    /// Unique empty XDG config home so a developer's real dictionary.toml
+    /// cannot leak into tests that expect an empty `[dict.overrides]`.
+    fn empty_xdg() -> PathBuf {
+        let xdg = std::env::temp_dir().join(format!(
+            "dictate-xdg-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&xdg).unwrap();
+        xdg
+    }
+
+    /// `Config::load` with XDG_CONFIG_HOME pointed at an empty dir (no legacy file).
+    fn load_without_legacy(path: Option<&Path>) -> Result<Config> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let xdg = empty_xdg();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: held under ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let result = Config::load(path);
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        fs::remove_dir_all(&xdg).ok();
+        result
+    }
+
     #[test]
     fn unknown_config_key_is_rejected() {
         let path = temp_file("unknown-key.toml", b"languge = \"en\"\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("languge"), "error names the typo'd key: {err}");
     }
@@ -273,17 +379,228 @@ mod tests {
             "known-keys.toml",
             b"n_threads = 4\nmax_record_secs = 30\ntype_output = true\n",
         );
-        let cfg = Config::load(Some(&path)).unwrap();
+        let cfg = load_without_legacy(Some(&path)).unwrap();
         fs::remove_file(&path).ok();
         assert_eq!(cfg.n_threads, 4);
         assert_eq!(cfg.max_record_secs, 30);
         assert!(cfg.type_output);
+        assert!(cfg.dict.overrides.is_empty());
+        assert!(cfg.model_path.is_none());
+    }
+
+    #[test]
+    fn api_config_defaults_enabled() {
+        // WHY: daemon usefulness — [api] defaults to enabled so `dictate start`
+        // exposes the socket without extra config.
+        let cfg = Config::default();
+        assert!(cfg.api.enabled);
+        assert!(cfg.api.path.is_none());
+        assert!(cfg.api.token.is_none());
+        assert!(cfg.api.required_token().is_none());
+        assert!(cfg.api.configured_path().is_none());
+    }
+
+    #[test]
+    fn api_section_parses_and_unknown_key_rejected() {
+        let path = temp_file(
+            "api-ok.toml",
+            br#"
+[api]
+enabled = false
+path = "/tmp/dictate-test.sock"
+token = "s3cret"
+"#,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(!cfg.api.enabled);
+        assert_eq!(
+            cfg.api.configured_path().map(|p| p.to_string_lossy().into_owned()),
+            Some("/tmp/dictate-test.sock".into())
+        );
+        assert_eq!(cfg.api.required_token(), Some("s3cret"));
+
+        let bad = temp_file("api-bad.toml", b"[api]\nextra = true\n");
+        let err = error_of(load_without_legacy(Some(&bad)));
+        fs::remove_file(&bad).ok();
+        assert!(err.contains("extra"), "error names the typo\'d key: {err}");
+    }
+
+    #[test]
+    fn api_empty_token_and_path_mean_unset() {
+        let path = temp_file(
+            "api-empty.toml",
+            br#"
+[api]
+path = ""
+token = ""
+"#,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(cfg.api.enabled);
+        assert!(cfg.api.configured_path().is_none());
+        assert!(cfg.api.required_token().is_none());
+    }
+
+    #[test]
+    fn dict_overrides_load_and_dictionary_applies() {
+        // WHY: overrides must live in the single config file and feed
+        // Dictionary without a separate dictionary.toml.
+        let path = temp_file(
+            "dict-overrides.toml",
+            br#"
+n_threads = 2
+
+[dict.overrides]
+"mukund" = "Mukund"
+"um" = ""
+"main street" = "Main Street"
+"#,
+        );
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(cfg.dict.overrides.get("mukund").map(String::as_str), Some("Mukund"));
+        assert_eq!(cfg.dict.overrides.get("um").map(String::as_str), Some(""));
+        let dict = Dictionary::from_map(cfg.dict.overrides.clone());
+        assert_eq!(dict.apply("hello mukund um on main street"), "hello Mukund on Main Street");
+    }
+
+    #[test]
+    fn unknown_dict_key_is_rejected() {
+        let path = temp_file(
+            "dict-unknown.toml",
+            b"[dict]\nextra = 1\n",
+        );
+        let err = error_of(load_without_legacy(Some(&path)));
+        fs::remove_file(&path).ok();
+        assert!(err.contains("extra"), "error names the typo'd key: {err}");
+    }
+
+    #[test]
+    fn legacy_dictionary_toml_migrates_when_overrides_empty() {
+        // WHY: users with a pre-single-config dictionary.toml must keep
+        // working without rewriting config.toml on disk.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!(
+            "dictate-xdg-mig-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dictate_dir = xdg.join("dictate");
+        fs::create_dir_all(&dictate_dir).unwrap();
+        fs::write(
+            dictate_dir.join("dictionary.toml"),
+            b"[overrides]\n\"veyyon\" = \"veyyon\"\n\"um\" = \"\"\n",
+        )
+        .unwrap();
+        let config_path = temp_file("mig-empty.toml", b"n_threads = 3\n");
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: held under ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let cfg = Config::load(Some(&config_path));
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let cfg = cfg.expect("migration load");
+        fs::remove_file(&config_path).ok();
+        fs::remove_dir_all(&xdg).ok();
+
+        assert_eq!(cfg.dict.overrides.get("veyyon").map(String::as_str), Some("veyyon"));
+        assert_eq!(cfg.dict.overrides.get("um").map(String::as_str), Some(""));
+        // Config file on disk was not rewritten (still just n_threads).
+        // (We deleted config_path above after load; migration is in-memory only.)
+        let dict = Dictionary::from_entries(cfg.dict.overrides.clone());
+        assert_eq!(dict.apply("say veyyon um now"), "say veyyon now");
+    }
+
+    #[test]
+    fn inline_dict_overrides_skip_legacy_file() {
+        // WHY: once [dict.overrides] exists, the legacy file must not
+        // silently replace or merge over it.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!(
+            "dictate-xdg-skip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dictate_dir = xdg.join("dictate");
+        fs::create_dir_all(&dictate_dir).unwrap();
+        fs::write(
+            dictate_dir.join("dictionary.toml"),
+            b"[overrides]\n\"legacy\" = \"LEGACY\"\n",
+        )
+        .unwrap();
+        let config_path = temp_file(
+            "mig-skip.toml",
+            b"[dict.overrides]\n\"inline\" = \"INLINE\"\n",
+        );
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let cfg = Config::load(Some(&config_path));
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let cfg = cfg.expect("load");
+        fs::remove_file(&config_path).ok();
+        fs::remove_dir_all(&xdg).ok();
+
+        assert_eq!(cfg.dict.overrides.get("inline").map(String::as_str), Some("INLINE"));
+        assert!(!cfg.dict.overrides.contains_key("legacy"));
+    }
+
+    #[test]
+    fn malformed_legacy_dictionary_errors_naming_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!(
+            "dictate-xdg-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dictate_dir = xdg.join("dictate");
+        fs::create_dir_all(&dictate_dir).unwrap();
+        let legacy = dictate_dir.join("dictionary.toml");
+        fs::write(&legacy, b"overrides = \"not-a-table\"\n").unwrap();
+        let config_path = temp_file("mig-bad.toml", b"n_threads = 2\n");
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let err = error_of(Config::load(Some(&config_path)));
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        fs::remove_file(&config_path).ok();
+        fs::remove_dir_all(&xdg).ok();
+
+        assert!(
+            err.contains(legacy.file_name().unwrap().to_str().unwrap())
+                || err.contains("dictionary.toml"),
+            "error must name the legacy path: {err}"
+        );
+        assert!(
+            err.contains("invalid dictionary") || err.contains("overrides"),
+            "{err}"
+        );
     }
 
     #[test]
     fn wrong_type_is_rejected() {
         let path = temp_file("wrong-type.toml", b"n_threads = \"lots\"\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("invalid TOML"), "{err}");
     }
@@ -291,7 +608,7 @@ mod tests {
     #[test]
     fn negative_n_threads_is_rejected() {
         let path = temp_file("negative.toml", b"n_threads = -5\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("invalid TOML"), "{err}");
     }
@@ -300,7 +617,7 @@ mod tests {
     fn zero_n_threads_is_rejected_with_fix() {
         // WHY: n_threads = 0 would reach the recognizer as 0 threads.
         let path = temp_file("zero-threads.toml", b"n_threads = 0\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("n_threads"), "{err}");
         assert!(err.contains("between 1 and"), "{err}");
@@ -311,7 +628,7 @@ mod tests {
         // WHY: 3_000_000_000 as i32 wraps negative; the recognizer would
         // get a negative thread count.
         let path = temp_file("huge-threads.toml", b"n_threads = 3000000000\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("n_threads"), "{err}");
     }
@@ -319,7 +636,7 @@ mod tests {
     #[test]
     fn zero_max_record_secs_is_rejected() {
         let path = temp_file("zero-record.toml", b"max_record_secs = 0\n");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         fs::remove_file(&path).ok();
         assert!(err.contains("max_record_secs"), "{err}");
     }
@@ -327,14 +644,14 @@ mod tests {
     #[test]
     fn explicit_config_path_that_is_a_directory_errors() {
         let dir = std::env::temp_dir();
-        let err = error_of(Config::load(Some(&dir)));
+        let err = error_of(load_without_legacy(Some(&dir)));
         assert!(err.contains("is a directory"), "{err}");
     }
 
     #[test]
     fn missing_explicit_config_errors() {
         let path = std::env::temp_dir().join("dictate-test-does-not-exist.toml");
-        let err = error_of(Config::load(Some(&path)));
+        let err = error_of(load_without_legacy(Some(&path)));
         assert!(err.contains("does not exist"), "{err}");
     }
 
@@ -402,6 +719,7 @@ mod tests {
         let err = error_of(home_dir_from(None));
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("--model"), "{err}");
+        assert!(!err.contains("--dictionary"), "{err}");
         let err = error_of(home_dir_from(Some(std::ffi::OsString::new())));
         assert!(err.contains("HOME"), "{err}");
         assert_eq!(

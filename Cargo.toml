@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 # Minimal CLI: skip colorized help; keep help/usage/error context/typo suggestions.
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 cpal = "0.18"
@@ -24,6 +25,7 @@ log = "0.4"
 # Only the sinc resampler is used; the default fft_resampler feature pulls in rustfft.
 rubato = { version = "4", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Official safe wrapper; `shared` links the system sherpa-onnx (CUDA build
 # in /usr/local/lib/sherpa-onnx, selected via SHERPA_ONNX_LIB_DIR at build
 # time) instead of downloading the CPU-only prebuilt archive.
