@@ -19,14 +19,37 @@ use dictate_core::{Config, Engine};
 let cfg = Config::load(None)?;                 // ~/.config/dictate/config.toml
 let engine = Engine::load(&cfg)?;              // model resident (provider from cfg)
 let pcm: Vec<f32> = /* 16 kHz mono */;
-let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format
+let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format → refine
 ```
 
-Raw decode (skip text pipeline):
+Raw decode (skip text pipeline, including refine):
 
 ```rust
 let text = engine.transcribe_f32_raw(&pcm)?;
 ```
+
+## Refine (`RefineBackend`)
+
+`Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
+Default `[refine] enabled = true`, `backend = "rules"` → `RuleRefine`
+(duplicate-word collapse, spaced contractions, space-before-punct; tiny
+offline tables). `enabled = false` → `NullRefine`.
+
+Hosts that want heavier offline GEC inject their own backend:
+
+```rust
+use dictate_core::{NullRefine, RefineBackend, RuleRefine, TextPipeline};
+
+struct MyRefine;
+impl RefineBackend for MyRefine {
+    fn refine(&self, text: &str) -> String { /* pure, offline */ text.to_string() }
+}
+
+let pipeline = TextPipeline::with_refine(cfg.text, dict, Box::new(MyRefine));
+```
+
+`RefineBackend` must stay pure and offline — there is no network path in
+`dictate-core`.
 
 ## Session (engine + overlay)
 
@@ -43,7 +66,7 @@ use dictate_core::{Config, Engine, NullOverlay, OverlayBackend, Session, Stage};
 
 struct MyLoader;
 impl OverlayBackend for MyLoader {
-    fn set(&self, stage: Stage) { /* drive your animation */ }
+    fn set(&self, stage: Stage) { /* drive your custom animation */ }
     fn flash(&self, _ms: u64) {}
     fn active(&self) -> bool { true }
 }
@@ -52,13 +75,14 @@ let cfg = Config::load(None)?;
 let engine = Engine::load(&cfg)?;
 let mut session = Session::builder(engine)
     .from_config(&cfg)                 // copies type_output + ui.done_flash_ms
-    .overlay(MyLoader)                 // or NullOverlay / overlay_box(...)
+    .overlay(MyLoader)                 // custom OverlayBackend animations
     .build();                          // Session (not Result); default overlay = NullOverlay
 
 let text = session.transcribe_f32(&pcm)?;
 ```
 
-Use `NullOverlay` for servers/tests (no GPU / no DISPLAY).
+Use `NullOverlay` for servers/tests (no GPU / no DISPLAY). Custom status
+animations are a compile-time `OverlayBackend` impl — no plugin ABI.
 
 Stage order without loading a model (tests / custom decode):
 
@@ -100,6 +124,10 @@ error instead of typing.
 
 Linux also implements `dictate_platform::HotkeySource` for `Hotkey` and
 `dictate_platform::Typer` for `Emitter` (Type mode only; Stdout mode refuses).
+
+Windows and macOS ship the same traits for Caps Lock PTT + typing
+(`SendInput` / `CGEvent`); overlay creation returns `NullOverlay` on both
+(no HWND / NSPanel pill in v1).
 
 ## Daemon API from another process
 
@@ -149,6 +177,10 @@ Relevant knobs for embedders:
 type_output = false          # FAIL-CLOSED: must be true to type
 n_threads = 8
 provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
+
+[refine]
+enabled = true               # default; false → NullRefine
+backend = "rules"            # RuleRefine; unknown → warn + rules
 
 [ui]
 overlay = true

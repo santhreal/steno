@@ -206,6 +206,10 @@ max_gain = 8.0           # ...but never boost more than this
 commands = true
 format = true
 
+[refine]
+enabled = true         # post-format offline ASR cleanup (default on)
+backend = "rules"      # RuleRefine; unknown names warn and use rules
+
 [ui]
 overlay = true         # bottom-center status pill (X11)
 done_flash_ms = 1200    # how long done/error stays visible
@@ -221,6 +225,12 @@ enabled = true         # daemon listens on a local Unix socket
 "main street" = "Main Street"
 "um" = ""
 ```
+
+Post-format **refine** (`[refine]`) collapses duplicate words, fixes a tiny
+set of spaced contractions / common ASR glitches, and strips space-before
+punctuation. It is offline-only (`backend = "rules"`); set `enabled = false`
+to skip it. Limits: tiny fixed tables, no re-casing of tokens, no network /
+LLM — embedders can swap a custom `RefineBackend` in-process.
 
 ## Daemon API
 
@@ -264,7 +274,7 @@ types). `[api].require_same_uid` defaults true (SO_PEERCRED).
 mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── sherpa-onnx decode on the GPU (Parakeet TDT)
-    ── voice commands → dictionary → formatter
+    ── voice commands → dictionary → formatter → refine
     ── streamed to stdout, or synthetic keystrokes (xdotool, when armed)
 ```
 

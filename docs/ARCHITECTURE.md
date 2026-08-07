@@ -4,7 +4,7 @@ Target: a **minimal, offline, embeddable** speech engine + CLI/daemon that
 works cross-platform, stores **all** user config in one file, exposes a
 daemon API, and lets host apps swap the status UI.
 
-## Current state (2026-08-07, HEAD `0912e34` + in-tree expansion)
+## Current state (2026-08-07, HEAD `d3bddd3` + in-tree expansion)
 
 Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 **Unverified** = code present but not re-proven on a live desktop / soak host.
@@ -21,7 +21,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Daemon NDJSON API (`ping` / `status` / `transcribe` / `shutdown`) | **Verified** in unit/socket tests; live daemon path **Unverified** here |
 | `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
 | OverlayBackend + pill / null themes | **Verified** unit tests; live X11 pill **Unverified** here after cutover |
-| Cross-platform | Linux X11 real; Windows / macOS **compile stubs** (capability methods fail closed) |
+| Cross-platform | Linux X11 real; Windows / macOS **hotkey + typing implemented**; overlay = `NullOverlay` (no HWND/NSPanel yet) |
 | Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
 | Daemon IPC | **Yes** — Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
@@ -74,11 +74,22 @@ unless the main agent asks.
 6. **STT stays Parakeet/sherpa** — no whisper shims. `provider = "cuda"`
    (default) or `"cpu"` in config; unknown values fail at config load /
    `Transcriber::load`. No silent fallback between providers.
-7. **Text pipeline order** — commands → dictionary → format. A refine
-   stage (offline rule-based ASR cleanup; LLM GEC as a trait hook only)
-   runs **after** format so brands/verbatim markers still work. Wiring of
-   refine into `TextPipeline` is in flight — do not assume it is on by
-   default until `text/mod.rs` exports it.
+7. **Text pipeline order** — commands → dictionary → format → refine.
+   Refine is wired and **on by default** (`[refine] enabled = true`,
+   `backend = "rules"` → `RuleRefine`). Offline only; embedders may inject
+   a custom `RefineBackend`. `enabled = false` → `NullRefine`. Limits:
+   tiny fixed rule tables, no token re-casing, no network/LLM in-tree.
+
+## Text pipeline
+
+```
+raw STT text
+  → voice commands
+  → dictionary ([dict.overrides]; legacy dictionary.toml import-in-memory)
+  → format (sentence case; verbatim markers protect dictionary casing)
+  → refine (RuleRefine by default; RefineBackend hook; NullRefine if disabled)
+  → stdout / typer (typer only when type_output armed)
+```
 
 ## Crate layout
 
@@ -91,7 +102,7 @@ light-dictate/                      # workspace root
         lib.rs
         config.rs
         audio.rs dsp.rs stt.rs
-        text/…
+        text/…              # commands, dictionary, format, refine
         engine.rs           # Engine::load / transcribe_f32[_raw]
         session.rs          # Session + InjectTyper (fail-closed typing)
         overlay.rs          # OverlayBackend + Stage + NullOverlay
@@ -104,8 +115,8 @@ light-dictate/                      # workspace root
         lib.rs
         traits.rs           # HotkeySource, Typer
         linux_x11/          # hotkey / overlay / type backends
-        windows.rs          # compile stubs
-        macos.rs            # compile stubs
+        windows.rs          # Caps Lock + SendInput; NullOverlay
+        macos.rs            # Caps Lock + CGEvent; NullOverlay
         null.rs             # NullHotkey / NullTyper
     dictate/
       src/
@@ -126,6 +137,10 @@ provider = "cuda"            # or "cpu" — fail-closed; no silent fallback
 [text]
 commands = true
 format = true
+
+[refine]
+enabled = true               # default; false → NullRefine
+backend = "rules"            # RuleRefine; unknown → warn + rules
 
 [ui]
 overlay = true
@@ -223,9 +238,9 @@ in v0.2; compile-time injection keeps it minimal and safe.
 
 | Capability | Linux X11 | Linux Wayland | Windows | macOS |
 |---|---|---|---|---|
-| Hotkey | done | evdev/portal later | RegisterHotKey (stub) | CGEventTap (stub) |
-| Type | xdotool | portal/ydotool later | SendInput (stub) | CGEvent (stub) |
-| Overlay | done | layer-shell later | layered HWND (stub) | NSPanel (stub) |
+| Hotkey | done | evdev/portal later | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
+| Type | xdotool | portal/ydotool later | SendInput | CGEvent |
+| Overlay | done | layer-shell later | NullOverlay (HWND later) | NullOverlay (NSPanel later) |
 | IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
 | STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
