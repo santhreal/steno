@@ -49,10 +49,10 @@ unless the main agent asks.
 
 1. **Single config file** — `~/.config/dictate/config.toml` owns everything,
    including dictionary overrides under `[dict.overrides]`. Legacy
-   `dictionary.toml` is imported once on default/XDG load (loud log; explicit
-   `--config` only reads a sibling file) then ignored once
-   the merged table exists. No second config file. `dictate` never rewrites
-   the operator's config for them.
+   `dictionary.toml` is imported once on default/XDG load (loud log; an
+   explicit `--config` only reads a sibling file beside that path). Once
+   `[dict.overrides]` is populated, the legacy file is ignored. No second
+   config file. `dictate` never rewrites the operator's config for them.
 2. **Workspace crates**
    - `dictate-core` — STT, DSP, audio, text pipeline, config, `Engine` /
      `Session`, overlay trait/`Stage`, IPC protocol + Unix client/server.
