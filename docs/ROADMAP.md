@@ -19,21 +19,21 @@
 - [x] Null backends for headless
 
 ## Phase 4 — cross-platform
-- [x] Windows: Caps Lock hotkey (`WH_KEYBOARD_LL`) + `SendInput` typing; overlay remains `NullOverlay` (layered HWND deferred)
-- [x] macOS: Caps Lock hotkey (`CGEventTap`) + `CGEvent` typing; overlay remains `NullOverlay` (NSPanel deferred)
-- [ ] provider = cuda|cpu end-to-end (Config/`Engine`/`Transcriber`/daemon honor `cfg.provider`; CPU CI path still open)
+- [x] Windows: Caps Lock hotkey (`WH_KEYBOARD_LL`) + `SendInput` typing + layered HWND status chip
+- [x] macOS: Caps Lock hotkey (`CGEventTap`) + `CGEvent` typing + NSPanel status chip
+- [x] `provider = cuda|cpu` honored end-to-end (Config / Engine / Transcriber / daemon; fail-closed)
+- [ ] CPU CI job still open
 
 ## Phase 5 — harden
-- [x] RuleRefine post-STT + RefineBackend hook (offline; not full LLM GEC)
-
-- [ ] GPU soak (100× en.wav) + nvidia-smi memory delta — **axiomexec / disposable VM only**
+- [x] RuleRefine post-STT + RefineBackend hook (offline; expanded ASR/grammar tables; not full LLM GEC)
+- [ ] GPU soak (100× en.wav) + nvidia-smi memory delta — **axiomexec / disposable VM only** (not operator workstation)
 - [x] Socket framing fuzz / partial lines (`api::server` framing_* tests)
 - [x] Caps Lock restore Drop helpers + SIGKILL recovery docs (keycode 66)
-- [ ] axiomexec remote verify (no local live typing) — **BLOCKED**: Tailscale SSH interactive auth; see `local/axiom-verify-summary.md`
-- [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`; live path Unverified)
-- [ ] README + EMBEDDING.md finalized after Phase 5 proofs
+- [x] axiomexec remote Xvfb verify: **PASS** on `axiomexec@192.168.0.135` (Tailscale SSH still interactive-auth blocked)
+- [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`)
+- [x] README + EMBEDDING.md synced for single config / refine / API / embed hooks
 
 ## Policy (standing)
 
 No live-session testing on the operator workstation. Hotkey / typing /
-overlay / soak verification only on axiomexec (Tailscale) or a disposable VM.
+overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable VM.

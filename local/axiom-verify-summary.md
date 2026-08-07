@@ -1,25 +1,27 @@
 # AxiomVerify summary
 
-**Overall: BLOCKED** (no remote live checks completed from Main)
+**Result: PASS (remote Xvfb)**  
+**Host:** `axiomexec@192.168.0.135` (hostname `axiomserver`) via LAN BatchMode SSH  
+**Not used:** Tailscale `100.110.179.20` (interactive login URL / timeout); operator local GNOME/DISPLAY
 
-## Per-check
+## Checks
 
-| Check | Result | Evidence |
-|---|---|---|
-| Local release build (compute only) | PASS (prior) | Existing release binary / SHERPA_ONNX_LIB_DIR builds; not re-run as a soak |
-| SCP / stage to axiomexec | UNKNOWN | AxiomVerify claimed staging; Main could not re-verify SSH |
-| Tailscale SSH `axiomexec@100.110.179.20` | **BLOCKED** | `Tailscale SSH requires an additional check` + browser login URL; BatchMode cannot complete |
-| LAN SSH `192.168.1.20` | **BLOCKED** | Connection timed out; `~/.ssh/config` notes LAN unroutable from this host |
-| Remote daemon start / `dictate ping` / API status | **BLOCKED** | Depends on SSH |
-| Remote Caps Lock inject-seq (Xvfb) | **BLOCKED** | Depends on SSH |
-| Operator local GNOME hotkey/typing | **NOT RUN** (policy) | Explicitly avoided |
+| Check | Result |
+|---|---|
+| `dictate start` on Xvfb `:97` | PASS — PID running, Caps Lock PTT armed |
+| `dictate status` | PASS |
+| `dictate ping` | PASS — `pong 27.9 ms` |
+| `dictate api status` | PASS — JSON with `api:true`, stage idle, model path, type armed |
+| Caps Lock inject-seq (`hotkey_demo` keycode 66) | PASS — sequences completed; after `stop`, keycode 66 = `Caps_Lock NoSymbol Caps_Lock` |
+| Cancel inject (`53:tap` while held) | exercised (sequence done) |
+| Local GNOME/typing | **not touched** |
 
-## Operator action required
+## Notes
 
-1. Complete Tailscale SSH check in a browser (or disable Tailscale SSH and use plain OpenSSH key auth on axiomexec).
-2. Re-run remote verify: `ssh axiomexec` then Xvfb + `dictate start` + `dictate ping` + Caps Lock inject-seq.
-3. If AxiomVerify left hung `dictate`/`Xvfb :9*` on the remote, kill them after reconnect.
+- Isolated tree: `~/light-dictate-verify/{bin,lib,models,config-xdg}` with `provider=cpu`, Parakeet int8 model, sherpa shared libs under `lib/`.
+- Daemon still logged to `~/.cache/dictate/dictate.log` (did not honor `XDG_CACHE_HOME` for the worker log path in this run) — follow-up if we want fully sandboxed logs.
+- `type_output=true` required to start; typing only hit Xvfb `:97`, never the operator session.
 
-## Policy
+## HEAD exercised
 
-No live-session testing on the operator workstation. This report does not authorize local daemon/X soaks.
+Release binaries built from workspace at verify time (post-`ad96f0f` rebuild).
