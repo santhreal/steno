@@ -1,9 +1,10 @@
 # light-dictate
 
 Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
-out. No cloud, no GPU required. One-shot or a background daemon.
+out. No cloud. Default decode uses CUDA; set `provider = "cpu"` for CPU-only
+hosts. One-shot or a background daemon.
 
-`dictate` records from your microphone, transcribes locally on your GPU with
+`dictate` records from your microphone, transcribes locally with
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Parakeet TDT), cleans
 the text up, and prints it — or types it into whatever window is focused.
 
@@ -34,9 +35,10 @@ cargo install --path crates/dictate
 Workspace crates: `dictate-core` (embeddable engine), `dictate-platform`
 (OS backends), `dictate` (CLI/daemon binary).
 
-GPU decode uses the system CUDA/cuDNN install the sherpa libs were built
-against. There is no cargo `--features cuda` flag — provider selection is
-runtime/config once that lands; today the linked sherpa build is CUDA.
+There is no cargo `--features cuda` flag — pick the execution provider in
+config (`provider = "cuda"` default, or `"cpu"`). CUDA builds still need the
+system CUDA/cuDNN install the sherpa libs were built against. Unknown
+provider values fail closed (no silent fallback).
 
 ## Get a model
 
@@ -188,6 +190,7 @@ model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v
 n_threads = 8            # CPU threads for feature extraction; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
 type_output = false      # arm typing (xdotool); the ONLY way to enable it
+provider = "cuda"        # or "cpu"; fail-closed, no silent fallback
 
 [vad]
 silence_ms = 900         # stop after this much trailing silence
@@ -206,6 +209,7 @@ format = true
 [ui]
 overlay = true         # bottom-center status pill (X11)
 done_flash_ms = 1200    # how long done/error stays visible
+theme = "pill"         # "pill" or "null"/"none"/"off"
 
 [api]
 enabled = true         # daemon listens on a local Unix socket
@@ -241,9 +245,17 @@ printf '%s\n' '{"id":3,"op":"transcribe","wav_path":"/path/to/clip.wav"}' \
   | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
 ```
 
+CLI helpers (same socket; optional `--socket`):
+
+```
+$ dictate ping
+$ dictate api status
+```
+
 Ops: `ping`, `status`, `transcribe` (`wav_path` **or** `pcm_f32_b64` little-endian
-f32 @ 16 kHz mono), `shutdown`. Streaming `utterance.*` is not implemented yet —
-use Caps Lock PTT or `transcribe`.
+f32 @ 16 kHz mono), `utterance.start` / `utterance.audio` / `utterance.stop` /
+`utterance.cancel`, `shutdown`. Streaming utterance returns text only (never
+types). `[api].require_same_uid` defaults true (SO_PEERCRED).
 
 ## How it works
 
@@ -265,8 +277,12 @@ fresh decode state — nothing leaks between them.
 - Typing sends keystrokes to the **focused** window. That is the feature;
   it is also why you should not dictate while a password field is focused.
   It is armed only via `type_output = true` in your config — never from a
-  CLI flag (see above). The test suite never types; real keystroke e2e
-  belongs in a disposable microVM (e.g. Firecracker), not a live desktop.
+  CLI flag (see above).
+- **No live-session testing on the operator workstation.** Agents and local
+  runs must not start/restart the daemon against the logged-in desktop, grab
+  Caps Lock, inject keystrokes, or run GPU soaks here. Hotkey / typing /
+  overlay / soak verification belongs on **axiomexec** (Tailscale) or a
+  disposable VM (e.g. Firecracker) only. Unit tests stay off the live session.
 - If no speech starts within `start_timeout_secs`, `dictate` exits non-zero
   with an error, so scripts can tell silence apart from an empty result.
 - X11 only for typing (xdotool). On Wayland, use stdout mode with your

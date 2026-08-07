@@ -17,9 +17,9 @@ dictate-platform = { path = "…/crates/dictate-platform" }
 use dictate_core::{Config, Engine};
 
 let cfg = Config::load(None)?;                 // ~/.config/dictate/config.toml
-let engine = Engine::load(&cfg)?;              // model resident (GPU/CPU)
+let engine = Engine::load(&cfg)?;              // model resident (provider from cfg)
 let pcm: Vec<f32> = /* 16 kHz mono */;
-let text = engine.transcribe_f32(&pcm)?;       // dictionary + commands + format applied
+let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format
 ```
 
 Raw decode (skip text pipeline):
@@ -53,7 +53,7 @@ let engine = Engine::load(&cfg)?;
 let mut session = Session::builder(engine)
     .from_config(&cfg)                 // copies type_output + ui.done_flash_ms
     .overlay(MyLoader)                 // or NullOverlay / overlay_box(...)
-    .build();
+    .build();                          // Session (not Result); default overlay = NullOverlay
 
 let text = session.transcribe_f32(&pcm)?;
 ```
@@ -103,16 +103,40 @@ Linux also implements `dictate_platform::HotkeySource` for `Hotkey` and
 
 ## Daemon API from another process
 
-```rust
-use dictate_core::api::ApiClient;
+`ApiClient` is a thin Unix-socket NDJSON client: `connect(path)` + `call(&Request)`.
 
-let mut c = ApiClient::connect_default()?;
-let resp = c.ping()?;
+```rust
+use dictate_core::api::{ApiClient, Op, Request, default_socket_path};
+
+let mut c = ApiClient::connect(default_socket_path()?)?;
+
+let ping = c.call(&Request {
+    id: 1,
+    token: None,
+    op: Op::Ping,
+})?;
+assert!(ping.ok);
+
+let resp = c.call(&Request {
+    id: 2,
+    token: None,
+    op: Op::Transcribe {
+        wav_path: Some("/path/to/clip.wav".into()),
+        pcm_f32_b64: None,
+    },
+})?;
 assert!(resp.ok);
-let text = c.transcribe_wav("/path/to/clip.wav")?;
+// resp.result is JSON, typically {"text":"..."}; API never types
 ```
 
-Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`.
+Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (else `~/.cache/dictate/dictate.sock`).
+
+Streaming: send `utterance.start` → `utterance.audio` (pcm_f32_b64) → `utterance.stop`.
+Stop returns `{"text":…}`; server may also emit `{"event":"utterance.done","text":…}`.
+CLI helpers: `dictate ping`, `dictate api status` (same socket / optional `--socket`).
+
+Ops implemented by the daemon today: `ping`, `status`, `transcribe`, `shutdown`.
+`utterance.*` (`start`/`audio`/`stop`/`cancel`) is implemented on the daemon: buffers PCM, returns text on stop (never types). Optional `[api].require_same_uid` (default true) rejects other-uid peers.
 
 ## Config
 
@@ -124,6 +148,7 @@ Relevant knobs for embedders:
 ```toml
 type_output = false          # FAIL-CLOSED: must be true to type
 n_threads = 8
+provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
 
 [ui]
 overlay = true

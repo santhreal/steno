@@ -4,45 +4,81 @@ Target: a **minimal, offline, embeddable** speech engine + CLI/daemon that
 works cross-platform, stores **all** user config in one file, exposes a
 daemon API, and lets host apps swap the status UI.
 
-## Current state (2026-08-07)
+## Current state (2026-08-07, HEAD `0912e34` + in-tree expansion)
+
+Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
+**Unverified** = code present but not re-proven on a live desktop / soak host.
 
 | Piece | Status |
 |---|---|
-| Parakeet TDT v3 via sherpa-onnx CUDA | Working — GPU smoke (JFK wav, ~498 MiB VRAM) |
-| Caps Lock PTT + cancel-any-key | Working on X11 (axiomexec verified earlier) |
-| Dictionary + verbatim case protection | Working in unit tests; needs daemon restart after edits |
-| Typing (`type_output`) | Fail-closed; **not** re-verified on live session after engine cutover |
-| Daemon soak / crash recovery | Thin — needs hardening |
-| Cross-platform | Linux X11 only (`x11rb`, `xdotool`) |
-| Embeddable lib | No — single bin crate |
-| Daemon IPC | No — only pidfile + CLI subcommands |
-| Overlay theming | Hard-coded pill mock |
+| Workspace split (`dictate-core` / `dictate-platform` / `dictate`) | **Verified** — builds as a Cargo workspace |
+| `Engine` + `Session` public API | **Verified** — unit-tested pipeline/session wiring; GPU load not in unit tests |
+| Single config + `[dict.overrides]` | **Verified** — unit tests; legacy `dictionary.toml` import-in-memory |
+| Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path must pass `cfg.provider` (see ROADMAP). |
+| Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |
+| Dictionary + verbatim case protection | **Verified** in unit tests; daemon needs restart after edits |
+| Typing (`type_output`) | Fail-closed in code; **Unverified** on live session after engine cutover |
+| Daemon NDJSON API (`ping` / `status` / `transcribe` / `shutdown`) | **Verified** in unit/socket tests; live daemon path **Unverified** here |
+| `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
+| OverlayBackend + pill / null themes | **Verified** unit tests; live X11 pill **Unverified** here after cutover |
+| Cross-platform | Linux X11 real; Windows / macOS **compile stubs** (capability methods fail closed) |
+| Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
+| Daemon IPC | **Yes** — Unix domain socket, NDJSON |
+| Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
+| `provider = cuda\|cpu` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI path and daemon call-site wiring: Phase 4 |
+
+## Operator testing policy
+
+**No live-session testing on the operator workstation.**
+
+Agents and local development must not:
+
+- run `dictate start` / `restart` against the logged-in desktop
+- grab Caps Lock, inject keystrokes, or drive the live X11/GNOME session
+- run GPU/nvidia-smi soaks or decode through the resident daemon on this machine
+
+Hotkey, typing, overlay, and soak verification belong on **axiomexec** (Tailscale)
+or a **disposable VM** only. Unit/`cargo test` and clippy on this host are fine
+when they stay off the live session and do not install over `~/.cargo/bin`
+unless the main agent asks.
 
 ## Locked decisions
+
+0. **Post-STT refine** — `commands → dictionary → format → refine`. Default `RuleRefine` (offline ASR cleanup). Embedders can swap `RefineBackend` for heavier GEC; no network.
+
 
 1. **Single config file** — `~/.config/dictate/config.toml` owns everything,
    including dictionary overrides under `[dict.overrides]`. Legacy
    `dictionary.toml` is imported once on load (loud log) then ignored once
-   the merged table exists. No second config file.
+   the merged table exists. No second config file. `dictate` never rewrites
+   the operator's config for them.
 2. **Workspace crates**
-   - `dictate-core` — STT, DSP, audio, text pipeline, config, session, IPC
-     protocol types. This is what embedders depend on.
-   - `dictate-platform` — `Hotkey`, `Typer`, `OverlayBackend` traits + OS
-     backends (Linux X11 first; Win/macOS stubs → real).
-   - `dictate` — CLI + daemon process + socket server binary.
+   - `dictate-core` — STT, DSP, audio, text pipeline, config, `Engine` /
+     `Session`, overlay trait/`Stage`, IPC protocol + Unix client/server.
+   - `dictate-platform` — `HotkeySource`, `Typer`, OS backends (Linux X11
+     first; Win/macOS stubs). Re-exports `OverlayBackend` / `Stage` /
+     `NullOverlay` from core.
+   - `dictate` — CLI + daemon process binary.
 3. **Daemon API** — local Unix domain socket (Linux/macOS) /
    named pipe (Windows later). Newline-delimited JSON. No HTTP, no
    cloud. Socket path: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (fallback
-   under cache dir). Optional token file for multi-user hosts.
+   `~/.cache/dictate/dictate.sock`). Optional `[api].token` shared secret. `[api].require_same_uid` (default true) gates peers via `SO_PEERCRED`.
 4. **Typing safety stays fail-closed** — `type_output = true` in the
    config file is the only arming path, including for API clients. API
-   cannot enable typing by itself.
-5. **Overlay** — `OverlayBackend` trait. Default = current pill. Hosts
-   inject their own. Config can disable (`overlay = false`) or select a
-   named built-in theme; custom draw code is a trait impl, not a scripting
-   language.
-6. **STT stays Parakeet/sherpa** — no whisper shims. Provider selectable
-   (`cuda` / `cpu`) via config for non-NVIDIA hosts.
+   cannot enable typing by itself. `utterance.*` must not enable typing.
+5. **Overlay** — `OverlayBackend` trait in `dictate-core`. Default = X11
+   pill via `dictate_platform::create`. Hosts inject their own. Config can
+   disable (`overlay = false`) or select `theme = "pill"` / `"null"` (and
+   aliases `"none"` / `"off"`). Custom draw code is a trait impl, not a
+   scripting language.
+6. **STT stays Parakeet/sherpa** — no whisper shims. `provider = "cuda"`
+   (default) or `"cpu"` in config; unknown values fail at config load /
+   `Transcriber::load`. No silent fallback between providers.
+7. **Text pipeline order** — commands → dictionary → format. A refine
+   stage (offline rule-based ASR cleanup; LLM GEC as a trait hook only)
+   runs **after** format so brands/verbatim markers still work. Wiring of
+   refine into `TextPipeline` is in flight — do not assume it is on by
+   default until `text/mod.rs` exports it.
 
 ## Crate layout
 
@@ -56,24 +92,25 @@ light-dictate/                      # workspace root
         config.rs
         audio.rs dsp.rs stt.rs
         text/…
-        session.rs          # high-level: load → transcribe PCM → text
+        engine.rs           # Engine::load / transcribe_f32[_raw]
+        session.rs          # Session + InjectTyper (fail-closed typing)
+        overlay.rs          # OverlayBackend + Stage + NullOverlay
         api/
           protocol.rs       # request/response/event types (serde)
-          client.rs         # thin client for other processes
+          client.rs         # ApiClient::connect / call
+          server.rs         # serve_unix[_until], ApiHandler
     dictate-platform/
       src/
         lib.rs
-        traits.rs           # HotkeySource, Typer, OverlayBackend
-        linux_x11/          # current hotkey/overlay/type backends
-        windows/            # stubs → SendInput / RegisterHotKey
-        macos/              # stubs → CGEvent*
-        null.rs             # headless (tests, servers)
+        traits.rs           # HotkeySource, Typer
+        linux_x11/          # hotkey / overlay / type backends
+        windows.rs          # compile stubs
+        macos.rs            # compile stubs
+        null.rs             # NullHotkey / NullTyper
     dictate/
       src/
         main.rs
-        daemon.rs
-        api_server.rs       # socket accept loop → session
-  examples/
+        daemon.rs           # hotkey loop + API thread when [api].enabled
   docs/
 ```
 
@@ -84,7 +121,7 @@ model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v
 type_output = false          # FAIL-CLOSED: must be true to type
 n_threads = 8
 max_record_secs = 120
-provider = "cuda"            # or "cpu"
+provider = "cuda"            # or "cpu" — fail-closed; no silent fallback
 
 [text]
 commands = true
@@ -93,12 +130,13 @@ format = true
 [ui]
 overlay = true
 done_flash_ms = 1200
-theme = "pill"               # built-in; hosts ignore this and inject their own
+theme = "pill"               # "pill" | "null"/"none"/"off"; hosts may inject OverlayBackend
 
 [api]
 enabled = true               # daemon listens on the socket
 # path = ""                  # empty → default runtime path
-# token = ""                 # empty → peer-cred only (same uid)
+# token = ""                 # empty → no shared-secret check
+# require_same_uid = true    # SO_PEERCRED same-uid gate (default true)
 
 [hotkey]
 # key = "Caps_Lock"          # reserved; Linux X11 Caps Lock for now
@@ -117,16 +155,16 @@ enabled = true               # daemon listens on the socket
 
 Client → server (one JSON object per line):
 
-| op | purpose |
-|---|---|
-| `ping` | liveness |
-| `status` | pid, model, stage, armed typing?, uptime |
-| `transcribe` | `{ "pcm_f32_b64" \| "wav_path": … }` → final text |
-| `utterance.start` | begin push-to-talk from API (no hotkey) |
-| `utterance.audio` | stream PCM frames while open |
-| `utterance.stop` | end → decode → emit event |
-| `utterance.cancel` | drop buffer |
-| `shutdown` | graceful stop (same uid / token) |
+| op | purpose | Daemon today |
+|---|---|---|
+| `ping` | liveness | Implemented |
+| `status` | pid, model, stage, `type_output_armed`, `api` | Implemented |
+| `transcribe` | `{ "pcm_f32_b64" \| "wav_path": … }` → final text | Implemented (never types) |
+| `utterance.start` | begin push-to-talk from API (no hotkey) | Implemented (buffer clear) |
+| `utterance.audio` | stream PCM frames while open | Implemented (append PCM f32 LE b64) |
+| `utterance.stop` | end → decode → text result (+ `utterance.done`) | Implemented (never types) |
+| `utterance.cancel` | drop buffer | Implemented |
+| `shutdown` | graceful stop | Implemented |
 
 Server → client:
 
@@ -135,58 +173,74 @@ Server → client:
 {"id":1,"ok":false,"error":"…","hint":"…"}
 {"event":"stage","stage":"listening"}
 {"event":"transcript","text":"hello","final":true}
+{"event":"utterance.done","text":"hello"}
 ```
+
+`utterance.done` is emitted when an `utterance.stop` completes (same text as the
+response `result`). API utterance/transcribe paths never type.
+
+Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`.
 
 ## Embedder surface (`dictate-core`)
 
 ```rust
-use dictate_core::{Config, Engine, Session};
+use dictate_core::{Config, Engine, NullOverlay, Session};
 
 let cfg = Config::load(None)?;
 let engine = Engine::load(&cfg)?;          // model resident
 let text = engine.transcribe_f32(&pcm16k)?; // offline utterance
 
-// Interactive (optional platform):
+// Interactive (optional platform / custom overlay):
 let session = Session::builder(engine)
-    .overlay(MyOverlay::new())             # or NullOverlay
-    .typer(NullTyper)                      # never types unless cfg armed + real Typer
-    .build()?;
+    .from_config(&cfg)                     // copies type_output + ui.done_flash_ms
+    .overlay(NullOverlay)                  // or a custom OverlayBackend
+    .build();                              // missing overlay → NullOverlay
+let text = session.transcribe_f32(&pcm16k)?;
 ```
+
+`OverlayBackend` methods: `set(Stage)`, `flash(ms)`, `active() -> bool`.
+
+Typing requires **both** `type_output` armed (via `from_config` / `type_output(true)`)
+**and** a `SessionBuilder::typer(...)` implementing `InjectTyper`. See
+`docs/EMBEDDING.md`.
 
 ## Overlay theming
 
-`OverlayBackend`:
+`OverlayBackend` (in `dictate-core`, re-exported by `dictate-platform`):
 
-- `fn set_stage(&self, stage: Stage)`
-- `fn flash_done(&self, ms: u64)`
-- `fn is_alive(&self) -> bool` (fail-open)
+- `fn set(&self, stage: Stage)`
+- `fn flash(&self, ms: u64)`
+- `fn active(&self) -> bool` (fail-open UIs may return false)
 
-Built-ins: `pill` (current), `null`. Embedders ship their own loading
-animations by implementing the trait — no plugin ABI in v0.2; compile-time
-injection keeps it minimal and safe.
+`Stage`: `Hidden`, `Recording`, `Transcribing`, `Done`, `Error`
+(product labels: Listening / Thinking / Done).
+
+Built-ins via `dictate_platform::create(&UiConfig)`: `pill` (X11), `null`.
+Embedders ship loading animations by implementing the trait — no plugin ABI
+in v0.2; compile-time injection keeps it minimal and safe.
 
 ## Cross-platform roadmap
 
 | Capability | Linux X11 | Linux Wayland | Windows | macOS |
 |---|---|---|---|---|
-| Hotkey | done | evdev/portal later | RegisterHotKey | CGEventTap |
-| Type | xdotool → XTEST | portal/ydotool later | SendInput | CGEvent |
-| Overlay | done | layer-shell later | layered HWND | NSPanel |
-| IPC | Unix socket | Unix socket | named pipe | Unix socket |
+| Hotkey | done | evdev/portal later | RegisterHotKey (stub) | CGEventTap (stub) |
+| Type | xdotool | portal/ydotool later | SendInput (stub) | CGEvent (stub) |
+| Overlay | done | layer-shell later | layered HWND (stub) | NSPanel (stub) |
+| IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
-| STT | sherpa CUDA/CPU | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
+| STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
 
 ## Robustness checklist
 
-- [ ] Daemon GPU soak: N sequential decodes without VRAM leak
+- [ ] Daemon GPU soak: N sequential decodes without VRAM leak (axiomexec / VM only)
 - [ ] Socket reconnect + partial-line framing
 - [ ] Model load errors always include corrective action
-- [ ] Typing remains config-armed through API
+- [x] Typing remains config-armed through API (handler never arms typing)
 - [ ] Crash → pidfile/socket cleaned; Caps Lock keysyms restored
-- [ ] Config migrate: dictionary.toml → `[dict.overrides]` once
-- [ ] `cargo test` / clippy clean across workspace
+- [x] Config migrate: dictionary.toml → `[dict.overrides]` once (in-memory; operator copies to disk)
+- [ ] `cargo test` / clippy clean across workspace (main runs final gates)
 - [ ] Remote X verification on axiomexec after platform extract
-- [ ] No live-session typing from local agent runs
+- [x] Policy: no live-session typing / hotkey / soak from local agent runs
 
 ## Non-goals (v0.2)
 
@@ -195,3 +249,4 @@ injection keeps it minimal and safe.
 - HTTP/WebSocket API
 - Streaming partial tokens from Parakeet (offline full-utterance)
 - Wayland production support in the first cross-platform cut
+- Live-session testing on the operator workstation
