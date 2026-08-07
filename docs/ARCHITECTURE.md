@@ -13,7 +13,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 |---|---|
 | Workspace split (`dictate-core` / `dictate-platform` / `dictate`) | **Verified** — builds as a Cargo workspace |
 | `Engine` + `Session` public API | **Verified** — unit-tested pipeline/session wiring; GPU load not in unit tests |
-| Single config + `[dict.overrides]` | **Verified** — unit tests; legacy `dictionary.toml` import-in-memory |
+| Single config + `[dict.overrides]` | **Verified** — unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
 | Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path must pass `cfg.provider` (see ROADMAP). |
 | Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |
 | Dictionary + verbatim case protection | **Verified** in unit tests; daemon needs restart after edits |
@@ -49,7 +49,8 @@ unless the main agent asks.
 
 1. **Single config file** — `~/.config/dictate/config.toml` owns everything,
    including dictionary overrides under `[dict.overrides]`. Legacy
-   `dictionary.toml` is imported once on load (loud log) then ignored once
+   `dictionary.toml` is imported once on default/XDG load (loud log; explicit
+   `--config` only reads a sibling file) then ignored once
    the merged table exists. No second config file. `dictate` never rewrites
    the operator's config for them.
 2. **Workspace crates**

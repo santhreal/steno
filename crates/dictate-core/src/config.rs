@@ -2,8 +2,11 @@
 //! then CLI flags (merged by `main.rs`).
 //!
 //! Dictionary overrides live under `[dict.overrides]` in the same file.
-//! A legacy `~/.config/dictate/dictionary.toml` is imported into memory
-//! once when that table is empty (never rewritten to disk).
+//! A legacy `dictionary.toml` is imported into memory once when that table
+//! is empty (never rewritten to disk):
+//! - default / XDG config load → `~/.config/dictate/dictionary.toml`
+//! - explicit `--config` → only a sibling `dictionary.toml` beside that file
+//!   (never the operator XDG path — keeps alternate configs isolated)
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -210,9 +213,11 @@ impl Config {
     /// path is an error — a silent typo would be worse. A malformed file
     /// is an error with the offending line context.
     ///
-    /// When `[dict.overrides]` is empty, a legacy
-    /// `~/.config/dictate/dictionary.toml` is imported into memory (loud
-    /// deprecation warning). The on-disk config is never rewritten.
+    /// When `[dict.overrides]` is empty, a legacy `dictionary.toml` is
+    /// imported into memory (loud deprecation warning). Default loads use
+    /// `~/.config/dictate/dictionary.toml`; an explicit `--config` only
+    /// considers a sibling `dictionary.toml` beside that file (never the
+    /// operator XDG path). The on-disk config is never rewritten.
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let (path, explicit) = match path {
             Some(p) => (expand_tilde(p)?, true),
@@ -243,20 +248,27 @@ impl Config {
                 .with_context(|| format!("invalid TOML in config {}", path.display()))?;
             cfg
         };
-        cfg.migrate_legacy_dictionary()?;
+        cfg.migrate_legacy_dictionary(&path, explicit)?;
         // Validate against the config path we tried to load (or the
         // default path when using built-in defaults).
         cfg.validate(&path)?;
         Ok(cfg)
     }
 
-    /// Import `~/.config/dictate/dictionary.toml` into `dict.overrides`
-    /// when that table is empty. Read-only: never writes config.toml.
-    fn migrate_legacy_dictionary(&mut self) -> Result<()> {
+    /// Import a legacy `dictionary.toml` into `dict.overrides` when that
+    /// table is empty. Read-only: never writes config.toml.
+    ///
+    /// - `explicit == false` (default path): `$XDG_CONFIG_HOME/dictate/dictionary.toml`
+    /// - `explicit == true`: sibling `dictionary.toml` next to `loaded_from` only,
+    ///   unless `loaded_from` *is* the default config path (then XDG legacy applies)
+    fn migrate_legacy_dictionary(&mut self, loaded_from: &Path, explicit: bool) -> Result<()> {
         if !self.dict.overrides.is_empty() {
             return Ok(());
         }
-        let legacy = default_dictionary_path()?;
+        let legacy = legacy_dictionary_candidate(loaded_from, explicit)?;
+        let Some(legacy) = legacy else {
+            return Ok(());
+        };
         if !legacy.exists() {
             return Ok(());
         }
@@ -496,6 +508,19 @@ pub fn default_config_path() -> Result<PathBuf> {
 /// Legacy standalone dictionary path (migration only).
 pub fn default_dictionary_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("dictate/dictionary.toml"))
+}
+
+/// Resolve which legacy dictionary file (if any) to consider for migration.
+fn legacy_dictionary_candidate(loaded_from: &Path, explicit: bool) -> Result<Option<PathBuf>> {
+    if !explicit {
+        return Ok(Some(default_dictionary_path()?));
+    }
+    let default_cfg = default_config_path()?;
+    if loaded_from == default_cfg {
+        return Ok(Some(default_dictionary_path()?));
+    }
+    // Alternate --config: never read the operator XDG dictionary.toml.
+    Ok(loaded_from.parent().map(|dir| dir.join("dictionary.toml")))
 }
 
 pub fn default_model_dir() -> Result<PathBuf> {
@@ -865,26 +890,93 @@ n_threads = 2
             b"[overrides]\n\"veyyon\" = \"veyyon\"\n\"um\" = \"\"\n",
         )
         .unwrap();
-        let config_path = temp_file("mig-empty.toml", b"n_threads = 3\n");
+        // Default config path under this XDG home (load(None) migration path).
+        let config_path = dictate_dir.join("config.toml");
+        fs::write(&config_path, b"n_threads = 3\n").unwrap();
 
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         // SAFETY: held under ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let cfg = Config::load(None);
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let cfg = cfg.expect("migration load");
+        let on_disk = fs::read_to_string(&config_path).unwrap();
+        fs::remove_dir_all(&xdg).ok();
+
+        assert_eq!(cfg.dict.overrides.get("veyyon").map(String::as_str), Some("veyyon"));
+        assert_eq!(cfg.dict.overrides.get("um").map(String::as_str), Some(""));
+        // Config file on disk was not rewritten (still just n_threads).
+        assert_eq!(on_disk, "n_threads = 3\n");
+        let dict = Dictionary::from_entries(cfg.dict.overrides.clone());
+        assert_eq!(dict.apply("say veyyon um now"), "say veyyon now");
+    }
+
+    #[test]
+    fn explicit_config_does_not_import_xdg_dictionary() {
+        // WHY: `dictate --config /tmp/foo.toml config show` must not bleed
+        // the operator's ~/.config/dictate/dictionary.toml into the report.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let xdg = std::env::temp_dir().join(format!(
+            "dictate-xdg-iso-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dictate_dir = xdg.join("dictate");
+        fs::create_dir_all(&dictate_dir).unwrap();
+        fs::write(
+            dictate_dir.join("dictionary.toml"),
+            b"[overrides]\n\"legacy\" = \"LEGACY\"\n",
+        )
+        .unwrap();
+        let config_path = temp_file("iso-empty.toml", b"n_threads = 3\n");
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
         let cfg = Config::load(Some(&config_path));
         match &prev {
             Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
-        let cfg = cfg.expect("migration load");
+        let cfg = cfg.expect("isolated load");
         fs::remove_file(&config_path).ok();
         fs::remove_dir_all(&xdg).ok();
 
-        assert_eq!(cfg.dict.overrides.get("veyyon").map(String::as_str), Some("veyyon"));
-        assert_eq!(cfg.dict.overrides.get("um").map(String::as_str), Some(""));
-        // Config file on disk was not rewritten (still just n_threads).
-        // (We deleted config_path above after load; migration is in-memory only.)
-        let dict = Dictionary::from_entries(cfg.dict.overrides.clone());
-        assert_eq!(dict.apply("say veyyon um now"), "say veyyon now");
+        assert!(
+            cfg.dict.overrides.is_empty(),
+            "explicit --config must not import XDG dictionary.toml: {:?}",
+            cfg.dict.overrides
+        );
+    }
+
+    #[test]
+    fn explicit_config_imports_sibling_dictionary_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "dictate-sib-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("dictionary.toml"),
+            b"[overrides]\n\"sib\" = \"SIB\"\n",
+        )
+        .unwrap();
+        let config_path = dir.join("config.toml");
+        fs::write(&config_path, b"n_threads = 4\n").unwrap();
+
+        let cfg = Config::load(Some(&config_path)).expect("sibling migrate");
+        fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(cfg.dict.overrides.get("sib").map(String::as_str), Some("SIB"));
     }
 
     #[test]
@@ -942,16 +1034,15 @@ n_threads = 2
         fs::create_dir_all(&dictate_dir).unwrap();
         let legacy = dictate_dir.join("dictionary.toml");
         fs::write(&legacy, b"overrides = \"not-a-table\"\n").unwrap();
-        let config_path = temp_file("mig-bad.toml", b"n_threads = 2\n");
+        fs::write(dictate_dir.join("config.toml"), b"n_threads = 2\n").unwrap();
 
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
-        let err = error_of(Config::load(Some(&config_path)));
+        let err = error_of(Config::load(None));
         match &prev {
             Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
-        fs::remove_file(&config_path).ok();
         fs::remove_dir_all(&xdg).ok();
 
         assert!(

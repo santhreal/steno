@@ -182,8 +182,11 @@ Matching is case-insensitive and whole-word; longer phrases win. The
 replacement's case is used exactly as written.
 
 If you still have a legacy `~/.config/dictate/dictionary.toml`, it is
-imported into memory once when `[dict.overrides]` is empty (with a
-deprecation warning). Copy the entries under `[dict.overrides]` and remove
+imported into memory once when loading the **default** config and
+`[dict.overrides]` is empty (with a deprecation warning). An explicit
+`--config /path/to.toml` only considers a sibling `dictionary.toml` beside
+that file — never the operator XDG path. Copy entries under
+`[dict.overrides]` and remove
 the old file; `dictate` never rewrites your config for you. Restart the
 daemon after edits (`dictate restart`).
 
