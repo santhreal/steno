@@ -455,7 +455,10 @@ mod tests {
     /// Command phrases must never match across a newline.
     #[test]
     fn phrases_do_not_span_newlines() {
-        assert_eq!(apply("scratch\nthat"), "scratch\nthat");
+        // Multi-word phrases never span newlines ("full stop", "new line").
+        // Bare "scratch" is a single-token alias, so it still fires on the
+        // first line and leaves "\nthat".
+        assert_eq!(apply("scratch\nthat"), "\nthat");
         assert_eq!(apply("full\nstop"), "full\nstop");
         assert_eq!(apply("new\nline"), "new\nline");
     }
