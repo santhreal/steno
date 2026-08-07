@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use dictate_core::api::{self, ApiError, ApiHandler, ApiResult, ServeOptions, UtteranceBuffer, decode_pcm_f32_le_b64};
+use dictate_core::api::{self, ApiError, ApiHandler, ApiResult, ServeOptions, UtteranceBuffer, authorize_token, decode_pcm_f32_le_b64};
 use dictate_core::audio;
 use dictate_core::config::{self, ApiConfig, Config};
 use dictate_core::dsp::{self, DspConfig};
@@ -583,17 +583,7 @@ impl DaemonHandler {
 
 impl ApiHandler for DaemonHandler {
     fn authorize(&self, token: Option<&str>) -> Result<(), ApiError> {
-        let Some(expected) = self.token.as_deref() else {
-            return Ok(());
-        };
-        if token == Some(expected) {
-            Ok(())
-        } else {
-            Err(ApiError::new(
-                "unauthorized",
-                Some("set request token to match [api].token in config.toml".into()),
-            ))
-        }
+        authorize_token(token, self.token.as_deref())
     }
 
     fn ping(&self) -> ApiResult {

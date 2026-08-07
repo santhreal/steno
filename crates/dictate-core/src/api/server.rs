@@ -322,6 +322,44 @@ pub fn authorize_peer(
     Ok(())
 }
 
+/// Shared-secret gate for optional `[api].token`.
+///
+/// When `expected` is `None`/empty, any provided token is accepted (including
+/// none). Otherwise the provided token must match with a byte-wise
+/// constant-time compare so timing does not leak which characters differ.
+/// Length mismatches still touch every byte of `expected` so a missing token
+/// is not dramatically cheaper than a wrong-length guess.
+pub fn authorize_token(provided: Option<&str>, expected: Option<&str>) -> Result<(), ApiError> {
+    let Some(expected) = expected.filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+    let got = provided.unwrap_or("");
+    if !constant_time_eq(got.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::new(
+            "unauthorized",
+            Some("set request token to match [api].token in config.toml".into()),
+        ));
+    }
+    Ok(())
+}
+
+/// Constant-time equality for equal-length slices. On length mismatch, folds
+/// every byte of `expected` then returns false (length itself may still leak).
+fn constant_time_eq(got: &[u8], expected: &[u8]) -> bool {
+    let mut diff = 0u8;
+    if got.len() != expected.len() {
+        for &b in expected {
+            diff |= b;
+        }
+        std::hint::black_box(diff);
+        return false;
+    }
+    for (a, b) in got.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// Read peer credentials via Linux `SO_PEERCRED`. Non-Linux returns Unsupported.
 pub fn peer_credentials(stream: &UnixStream) -> std::io::Result<PeerCred> {
     peer_credentials_fd(stream.as_raw_fd())
@@ -787,14 +825,7 @@ mod tests {
 
     impl ApiHandler for TokenHandler {
         fn authorize(&self, token: Option<&str>) -> Result<(), ApiError> {
-            if token == Some(self.token) {
-                Ok(())
-            } else {
-                Err(ApiError::new(
-                    "unauthorized",
-                    Some("set request token to match [api].token in config.toml".into()),
-                ))
-            }
+            authorize_token(token, Some(self.token))
         }
     }
 
@@ -847,6 +878,31 @@ mod tests {
         .unwrap();
         assert!(done.contains("\"event\":\"utterance.done\""));
         assert!(done.contains("\"text\":\"hi\""));
+    }
+
+    #[test]
+    fn authorize_token_accepts_when_unset() {
+        assert!(authorize_token(None, None).is_ok());
+        assert!(authorize_token(Some("x"), None).is_ok());
+        assert!(authorize_token(None, Some("")).is_ok());
+    }
+
+    #[test]
+    fn authorize_token_constant_time_match() {
+        assert!(authorize_token(Some("s3cret"), Some("s3cret")).is_ok());
+        assert!(authorize_token(None, Some("s3cret")).is_err());
+        assert!(authorize_token(Some("wrong"), Some("s3cret")).is_err());
+        assert!(authorize_token(Some("s3cre"), Some("s3cret")).is_err());
+        assert!(authorize_token(Some("s3cret!"), Some("s3cret")).is_err());
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_mismatch() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"ab", b"abc"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]
