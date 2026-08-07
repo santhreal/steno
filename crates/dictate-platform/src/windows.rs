@@ -520,14 +520,22 @@ fn push_vk(inputs: &mut Vec<INPUT>, vk: VIRTUAL_KEY, up: bool) {
 
 /// Only '\n' is typed (voice "new line"); every other control char is stripped.
 fn sanitize_for_typing(text: &str) -> String {
+    // Keep intentional '\n' (voice "new line"). Strip Cc controls AND Unicode
+    // Zl/Zp line/paragraph separators (U+2028/U+2029) — Rust's is_control()
+    // only covers Cc, so those would otherwise inject breaks via xdotool/wtype.
     let clean: String = text
         .chars()
-        .filter(|&c| c == '\n' || !c.is_control())
+        .filter(|&c| c == '\n' || (!c.is_control() && !is_unicode_line_break(c)))
         .collect();
     if clean.len() != text.len() {
-        log::warn!("stripped control characters from the transcript before typing");
+        log::warn!("stripped control / line-break characters from the transcript before typing");
     }
     clean
+}
+
+/// U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (Zl / Zp).
+fn is_unicode_line_break(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// Layered HWND status chip. Prefer [`create`] for `UiConfig`-aware selection.
@@ -1550,6 +1558,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_newline_strips_other_controls() {
         assert_eq!(sanitize_for_typing("ab\t\nc\u{7}"), "ab\nc");
+        assert_eq!(sanitize_for_typing("a\u{2028}b\u{2029}c"), "abc");
     }
 
     #[test]

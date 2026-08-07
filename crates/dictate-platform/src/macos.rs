@@ -458,14 +458,22 @@ fn join(last: Option<char>, chunk: &str) -> String {
 }
 
 fn sanitize_for_typing(text: &str) -> String {
+    // Keep intentional '\n' (voice "new line"). Strip Cc controls AND Unicode
+    // Zl/Zp line/paragraph separators (U+2028/U+2029) — Rust's is_control()
+    // only covers Cc, so those would otherwise inject breaks via xdotool/wtype.
     let clean: String = text
         .chars()
-        .filter(|&c| c == '\n' || !c.is_control())
+        .filter(|&c| c == '\n' || (!c.is_control() && !is_unicode_line_break(c)))
         .collect();
     if clean.len() != text.len() {
-        log::warn!("stripped control characters from the transcript before typing");
+        log::warn!("stripped control / line-break characters from the transcript before typing");
     }
     clean
+}
+
+/// U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (Zl / Zp).
+fn is_unicode_line_break(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 fn ensure_accessibility(prompt: bool) -> Result<()> {
