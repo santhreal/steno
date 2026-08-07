@@ -169,6 +169,11 @@ impl SessionBuilder {
     }
 
     /// Copy typing / flash settings from a loaded [`crate::Config`].
+    ///
+    /// Does **not** select an overlay theme — hosts call
+    /// `dictate_platform::create(&cfg.ui)` (or inject their own
+    /// [`OverlayBackend`]) separately. Theme palettes / stage labels are
+    /// available via [`crate::resolve_ui`].
     pub fn from_config(mut self, cfg: &crate::Config) -> Self {
         self.type_output = cfg.type_output;
         self.done_flash_ms = cfg.ui.done_flash_ms;

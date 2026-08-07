@@ -35,6 +35,7 @@
 - [x] Theme palettes (`pill|mono|dusk|dawn|contrast`) + `[ui.colors]` / `[ui.stages]` + `resolve_ui` in dictate-core; platforms consume `ResolvedUi`
 - [x] CLI `dictate config show|get|set`, `dictate model list|use [--provider]`, `dictate theme list|set`
 - [x] Configurable stage labels (`[ui.stages]`; defaults Transcribing/Processing/Done/Error)
+- [x] Library polish: `Engine::{from_parts,with_pipeline,process_text,load_model}`, path helper re-exports, EMBEDDING rewrite
 
 ## Policy (standing)
 

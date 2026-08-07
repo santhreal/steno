@@ -73,6 +73,14 @@ impl TextPipeline {
         Self { cfg, dict, refine }
     }
 
+    /// One-shot: process `raw` with a fresh [`FmtState`].
+    ///
+    /// Equivalent to `process_stream(raw, FmtState::default()).0`. Prefer
+    /// [`Self::process_stream`] when decoding streams segment-by-segment.
+    pub fn process(&self, raw: &str) -> String {
+        self.process_stream(raw, format::FmtState::default()).0
+    }
+
     /// Streaming: process one decoded segment, carrying formatter state
     /// (capitalization, quote state) across segments — pass the returned
     /// state to the next call. `scratch that` can only delete within the

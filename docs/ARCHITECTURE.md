@@ -12,7 +12,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Piece | Status |
 |---|---|
 | Workspace split (`dictate-core` / `dictate-platform` / `dictate`) | **Verified** — builds as a Cargo workspace |
-| `Engine` + `Session` public API | **Verified** — unit-tested pipeline/session wiring; GPU load not in unit tests |
+| `Engine` + `Session` public API | **Verified** — unit-tested; `from_parts` / `with_pipeline` / `process_text` for embedders; GPU load not in unit tests |
 | Single config + `[dict.overrides]` | **Verified** — unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
 | Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path must pass `cfg.provider` (see ROADMAP). |
 | Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |

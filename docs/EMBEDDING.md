@@ -2,12 +2,17 @@
 
 Minimal offline STT for host applications. No cloud. No UI required.
 
+`dictate-core` is the embeddable library. `dictate-platform` is optional OS
+glue (Caps Lock, typing, status chip). The `dictate` binary is one consumer of
+both — hosts should depend on `dictate-core` (+ platform only if they want
+native hotkey/overlay/typing).
+
 ## Add the dependency
 
 ```toml
 [dependencies]
 dictate-core = { path = "…/crates/dictate-core" }
-# optional OS backends (hotkey / typing / X11 overlay):
+# optional OS backends (hotkey / typing / status chip):
 dictate-platform = { path = "…/crates/dictate-platform" }
 ```
 
@@ -28,6 +33,66 @@ Raw decode (skip text pipeline, including refine):
 let text = engine.transcribe_f32_raw(&pcm)?;
 ```
 
+Explicit model directory (same precedence as CLI `--model`):
+
+```rust
+use std::path::Path;
+let engine = Engine::load_model(&cfg, Some(Path::new("/path/to/model-dir")))?;
+```
+
+Reprocess stored transcripts with the loaded dictionary / refine (no STT):
+
+```rust
+let cleaned = engine.process_text("hello vayon world");
+```
+
+### Engine composition (custom pipeline)
+
+Hosts that inject a custom [`RefineBackend`], pre-built dictionary, or test
+double assemble the engine explicitly:
+
+```rust
+use dictate_core::{
+    Config, Dictionary, Engine, NullRefine, RefineBackend, TextConfig, TextPipeline,
+    Transcriber,
+};
+
+struct MyRefine;
+impl RefineBackend for MyRefine {
+    fn refine(&self, text: &str) -> String { /* pure, offline */ text.to_string() }
+}
+
+let cfg = Config::load(None)?;
+let model = dictate_core::resolve_model(None, &cfg)?;
+let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)?;
+let dict = Dictionary::from_map(cfg.dict.overrides.clone());
+let pipeline = TextPipeline::with_refine(cfg.text, dict, Box::new(MyRefine));
+let engine = Engine::from_parts(transcriber, pipeline);
+
+// Or swap after load:
+let engine = Engine::load(&cfg)?.with_pipeline(
+    TextPipeline::with_refine(cfg.text, Dictionary::from_map(Default::default()), Box::new(NullRefine)),
+);
+```
+
+Accessors: `engine.transcriber()`, `engine.pipeline()`.
+
+## Text pipeline
+
+Order is fixed: **commands → dictionary → format → refine**.
+
+```rust
+use dictate_core::{Dictionary, FmtState, TextConfig, TextPipeline, COMMANDS};
+
+let pipeline = TextPipeline::new(TextConfig::default(), Dictionary::from_map(overrides));
+let one_shot = pipeline.process("bank comma next line");
+let (chunk, state) = pipeline.process_stream("first segment", FmtState::default());
+let (next, state) = pipeline.process_stream("second segment", state);
+```
+
+`COMMANDS` is the built-in voice-command table. Dictionary replacements are
+verbatim (formatter never re-cases them).
+
 ## Refine (`RefineBackend`)
 
 `Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
@@ -35,23 +100,10 @@ Default `[refine] enabled = true`, `backend = "rules"` → `RuleRefine`
 (duplicate-word collapse, spaced contractions, space-before-punct; tiny
 offline tables). `enabled = false` → `NullRefine`.
 
-Hosts that want heavier offline GEC inject their own backend:
-
-```rust
-use dictate_core::{NullRefine, RefineBackend, RuleRefine, TextPipeline};
-
-struct MyRefine;
-impl RefineBackend for MyRefine {
-    fn refine(&self, text: &str) -> String { /* pure, offline */ text.to_string() }
-}
-
-let pipeline = TextPipeline::with_refine(cfg.text, dict, Box::new(MyRefine));
-```
-
 `RefineBackend` must stay pure and offline — there is no network path in
-`dictate-core`.
+`dictate-core`. Heavier offline GEC belongs behind the same trait.
 
-## Session (engine + overlay)
+## Session (engine + overlay + optional typer)
 
 `Session` wraps a loaded `Engine` and a `Box<dyn OverlayBackend>`. One-shot
 PCM still goes through the engine; the session drives status stages around
@@ -59,9 +111,8 @@ decode:
 
 `Stage::Recording` → `Stage::Transcribing` → `Stage::Done` (or `Error`).
 
-Default stage labels are still `"Transcribing"` / `"Processing"` /
-`"Done"` / `"Error"`; hosts may remap them via `[ui.stages]` (for example
-Listening / Thinking).
+Default stage labels are `"Transcribing"` / `"Processing"` / `"Done"` /
+`"Error"`; remap via `[ui.stages]` (for example Listening / Thinking).
 
 ```rust
 use dictate_core::{Config, Engine, NullOverlay, OverlayBackend, Session, Stage};
@@ -76,18 +127,16 @@ impl OverlayBackend for MyLoader {
 let cfg = Config::load(None)?;
 let engine = Engine::load(&cfg)?;
 let mut session = Session::builder(engine)
-    .from_config(&cfg)                 // copies type_output + ui.done_flash_ms
+    .from_config(&cfg)                 // copies type_output + ui.done_flash_ms only
     .overlay(MyLoader)                 // custom OverlayBackend animations
-    .build();                          // Session (not Result); default overlay = NullOverlay
+    .build();                          // default overlay = NullOverlay
 
 let text = session.transcribe_f32(&pcm)?;
 ```
 
-Use `NullOverlay` for servers/tests (no GPU / no DISPLAY). Custom status
-animations are a compile-time `OverlayBackend` impl — no plugin ABI.
-`ui.theme` is only a hint for `dictate_platform::create`; hosts that inject
-their own backend may ignore the theme string entirely while still reading
-palette / labels via `resolve_ui` if desired (see below).
+`from_config` does **not** pick a theme overlay — call
+`dictate_platform::create(&cfg.ui)` when you want the built-in chip, or inject
+your own backend. Theme palettes / labels stay available via `resolve_ui`.
 
 Stage order without loading a model (tests / custom decode):
 
@@ -150,14 +199,68 @@ Host apps that never want typing omit `.typer(...)` and leave `type_output = fal
 If `type_output` is armed but no typer was injected, `transcribe_f32` returns an
 error instead of typing.
 
-Linux also implements `dictate_platform::HotkeySource` for `Hotkey` and
-`dictate_platform::Typer` for `Emitter` (Type mode only; Stdout mode refuses).
+Linux / Windows / macOS ship Caps Lock PTT + typing + a status chip (Linux =
+animated X11 pill; Win/mac = simpler chips). All chips call `resolve_ui`.
+`overlay = false` / `theme` `null|none|off` → `NullOverlay`.
 
-Windows and macOS ship the same traits for Caps Lock PTT + typing
-(`SendInput` / `CGEvent`). Overlays: layered HWND chip (Windows) and
-minimal AppKit `NSPanel` chip (macOS); both call `resolve_ui` for palette
-+ labels. `overlay = false` / `theme` `null|none|off` still select
-`NullOverlay`. Not live-session verified on this Linux host.
+## Capture / DSP (optional)
+
+`dictate_core::audio` records 16 kHz mono (`record`, `record_while`,
+`list_input_devices`). `dictate_core::dsp` covers resample / DC-block /
+gain / trim used by the CLI. Most embedders feed their own PCM into
+`Engine::transcribe_f32`.
+
+## Config helpers
+
+```rust
+use dictate_core::{
+    Config, config_get, config_set, default_config_path, default_model_dir,
+    expand_tilde, list_settable_keys, resolve_model,
+};
+
+let path = default_config_path()?;
+let cfg = Config::load(Some(&path))?;
+let model = resolve_model(None, &cfg)?;
+let _ = expand_tilde("~/.local/share/dictate/models".as_ref())?;
+config_set(&path, "ui.theme", "dusk")?;
+let theme = config_get(&path, "ui.theme")?;
+```
+
+Surgical keys are listed by `list_settable_keys()` (`model_path`, `provider`,
+`type_output`, `n_threads`, `ui.*`, `ui.stages.*`, `ui.colors.*`). Typing stays
+fail-closed: arm only via `type_output = true` in the file.
+
+Relevant knobs:
+
+```toml
+type_output = false          # FAIL-CLOSED: must be true to type
+n_threads = 8
+provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
+
+[refine]
+enabled = true               # default; false → NullRefine
+backend = "rules"            # RuleRefine; unknown → warn + rules
+
+[ui]
+overlay = true
+done_flash_ms = 1200
+theme = "dusk"               # hint for platform create; hosts may ignore
+                             # and inject OverlayBackend instead
+
+[ui.colors]                  # optional #RRGGBB / #RRGGBBAA
+fg = "#ECECF0"
+
+[ui.stages]
+recording = "Listening"      # defaults: Transcribing / Processing / Done / Error
+transcribing = "Thinking"
+done = "Done"
+error = "Error"
+show_timer = true
+pulse_ms = 180
+
+[dict.overrides]
+"handy" = "Dictate"
+```
 
 ## Daemon API from another process
 
@@ -189,46 +292,26 @@ assert!(resp.ok);
 
 Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`).
 
-Streaming: send `utterance.start` → `utterance.audio` (pcm_f32_b64) → `utterance.stop`.
+Streaming: `utterance.start` → `utterance.audio` (pcm_f32_b64) → `utterance.stop`.
 Stop returns `{"text":…}`; server may also emit `{"event":"utterance.done","text":…}`.
-CLI helpers: `dictate ping`, `dictate api status` (same socket / optional `--socket`).
+CLI: `dictate ping`, `dictate api status`.
 
-Ops implemented by the daemon today: `ping`, `status`, `transcribe`, `shutdown`.
-`utterance.*` (`start`/`audio`/`stop`/`cancel`) is implemented on the daemon: buffers PCM, returns text on stop (never types). Optional `[api].require_same_uid` (default true) rejects other-uid peers.
+Ops: `ping`, `status`, `transcribe`, `utterance.*`, `shutdown`. Typing is never
+armed through the API. `[api].require_same_uid` (default true) rejects
+other-uid peers.
 
-## Config
+## Library map
 
-Everything lives in one TOML file (`~/.config/dictate/config.toml`).
-Dictionary overrides are `[dict.overrides]`. See `docs/ARCHITECTURE.md`.
+| Module | Role |
+|--------|------|
+| `config` | Single TOML + path helpers + surgical get/set |
+| `ui_theme` | `resolve_ui` / palettes / stage labels |
+| `engine` | High-level STT + pipeline for embedders |
+| `session` | Engine + overlay + fail-closed typing |
+| `stt` | Parakeet via sherpa-onnx (`Transcriber`) |
+| `text` | Commands / dictionary / format / refine |
+| `audio` / `dsp` | Mic capture + preprocess |
+| `api` | NDJSON client + server types |
+| `overlay` | `Stage` + `OverlayBackend` (no OS deps) |
 
-Relevant knobs for embedders:
-
-```toml
-type_output = false          # FAIL-CLOSED: must be true to type
-n_threads = 8
-provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
-
-[refine]
-enabled = true               # default; false → NullRefine
-backend = "rules"            # RuleRefine; unknown → warn + rules
-
-[ui]
-overlay = true
-done_flash_ms = 1200
-theme = "dusk"               # hint for platform create; hosts may ignore
-                             # and inject OverlayBackend instead
-
-[ui.colors]                  # optional #RRGGBB / #RRGGBBAA
-fg = "#ECECF0"
-
-[ui.stages]
-recording = "Listening"      # defaults: Transcribing / Processing / Done / Error
-transcribing = "Thinking"
-done = "Done"
-error = "Error"
-show_timer = true
-pulse_ms = 180
-```
-
-Library helpers: `resolve_ui`, `stage_label`, `ThemePalette`, `ResolvedUi`,
-`list_themes`, plus surgical `config_get` / `config_set` for dotted keys.
+Platform crate: `HotkeySource`, `Typer`, `create(&UiConfig)`, Linux/Win/mac backends.

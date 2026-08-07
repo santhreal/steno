@@ -151,8 +151,8 @@ pub struct DictConfig {
 pub struct ApiConfig {
     /// Listen on the Unix socket when the daemon starts.
     pub enabled: bool,
-    /// Socket path. Empty / unset → `$XDG_RUNTIME_DIR/dictate/dictate.sock`
-    /// (else `~/.cache/dictate/dictate.sock`).
+    /// Socket path. Empty / unset → `$XDG_RUNTIME_DIR/dictate/dictate.sock`,
+    /// else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`.
     pub path: Option<PathBuf>,
     /// If set (non-empty), every request must carry a matching `token`.
     pub token: Option<String>,
