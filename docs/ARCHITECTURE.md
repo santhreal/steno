@@ -63,7 +63,7 @@ unless the main agent asks.
 3. **Daemon API** — local Unix domain socket (Linux/macOS) /
    named pipe (Windows later). Newline-delimited JSON. No HTTP, no
    cloud. Socket path: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (fallback
-   `~/.cache/dictate/dictate.sock`). Optional `[api].token` shared secret. `[api].require_same_uid` (default true) gates peers via `SO_PEERCRED`.
+   `$XDG_CACHE_HOME/dictate/dictate.sock` else `~/.cache/dictate/dictate.sock`). Optional `[api].token` shared secret. `[api].require_same_uid` (default true) gates peers via `SO_PEERCRED`.
 4. **Typing safety stays fail-closed** — `type_output = true` in the
    config file is the only arming path, including for API clients. API
    cannot enable typing by itself. `utterance.*` must not enable typing.
@@ -214,7 +214,7 @@ Server → client:
 `utterance.done` is emitted when an `utterance.stop` completes (same text as the
 response `result`). API utterance/transcribe paths never type.
 
-Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`.
+Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`. Daemon pid/ready/log live under `$XDG_CACHE_HOME/dictate/` (else `~/.cache/dictate/`).
 
 ## Embedder surface (`dictate-core`)
 

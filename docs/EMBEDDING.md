@@ -187,7 +187,7 @@ assert!(resp.ok);
 // resp.result is JSON, typically {"text":"..."}; API never types
 ```
 
-Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (else `~/.cache/dictate/dictate.sock`).
+Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`).
 
 Streaming: send `utterance.start` → `utterance.audio` (pcm_f32_b64) → `utterance.stop`.
 Stop returns `{"text":…}`; server may also emit `{"event":"utterance.done","text":…}`.

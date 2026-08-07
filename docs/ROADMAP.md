@@ -40,3 +40,11 @@
 
 No live-session testing on the operator workstation. Hotkey / typing /
 overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable VM.
+
+## Phase 6 — polish / platform depth
+- [x] Honor `XDG_CACHE_HOME` for daemon pid/ready/log + API socket fallback
+- [x] Win/mac recording timer via `[ui.stages].show_timer` (Win chip + macOS label)
+- [ ] Wayland: typing / hotkey / overlay (portal or native; X11 remains primary on Linux)
+- [ ] Stronger offline GEC backend behind `RefineBackend` (RuleRefine stays default)
+- [ ] Win/mac overlay closer to Linux pill (soft blur shadow, icon parity polish)
+

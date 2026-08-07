@@ -82,7 +82,7 @@ Real minimal backends via `windows-sys`:
   `Transcribing` → "Processing"). Honors `pulse_ms` (0 disables). **Visual
   delta vs Linux X11 pill:** simplified rounded chip (stage label + basic
   icon animation: waveform / spinner / check / x), flat offset shadow only
-  (no soft CSS blur), no recording timer meta (`show_timer` unused),
+  (no soft CSS blur), recording timer honors `show_timer` (flat shadow still, no soft blur),
   no DPI scale factor beyond primary work-area placement. Fail-open on
   HWND/font/GDI errors. Not live-session verified on this Linux host
   (no local UI soak). Full `cargo check -p dictate-platform --target
@@ -109,8 +109,8 @@ Real minimal backends (Accessibility required):
   the chip. Labels/colors from `resolve_ui` (same defaults as Linux).
   **Visual delta:** Linux pill is an animated tiny-skia capsule (icon +
   waveform/spinner/check, shadow, recording timer); macOS is a simpler
-  floating `NSPanel` + `NSTextField` label only (bg/fg from palette; no icon
-  animation / timer / pulse). Fail-open.
+  floating `NSPanel` + `NSTextField` label (bg/fg from palette; optional
+  recording timer via `show_timer`; no icon animation / pulse). Fail-open.
 
 Same public surface as Linux. Not live-session verified on this Linux host.
 

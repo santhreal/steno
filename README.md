@@ -95,8 +95,9 @@ Dictation stopped.
 Hold **Caps Lock**, speak, release. The daemon already has the model in
 memory, so there is no cold-start per utterance. `dictate restart` bounces
 it; `dictate start --foreground` runs in the terminal for debugging.
-Make sure no other app (GNOME custom shortcut, etc.) already owns
-Caps Lock.
+Daemon pid/ready/log files live under `$XDG_CACHE_HOME/dictate/` when that
+env is set, otherwise `~/.cache/dictate/`. Make sure no other app (GNOME
+custom shortcut, etc.) already owns Caps Lock.
 
 **Record and print (one-shot).** Run `dictate`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to
@@ -332,8 +333,8 @@ to take effect in a running hold-to-talk session.
 ## Daemon API
 
 When the daemon is running with `[api].enabled` (the default), it listens on a
-Unix socket — `$XDG_RUNTIME_DIR/dictate/dictate.sock`, or
-`~/.cache/dictate/dictate.sock` if `XDG_RUNTIME_DIR` is unset. Override with
+Unix socket — `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`,
+else `~/.cache/dictate/dictate.sock`. Override with
 `[api].path`. Optional `[api].token` requires every request to carry the same
 `token` field.
 

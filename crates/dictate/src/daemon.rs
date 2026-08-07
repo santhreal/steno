@@ -30,10 +30,16 @@ use dictate_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context(
-        "HOME is unset — cannot locate ~/.cache/dictate (pass a writable HOME or use --foreground)",
-    )?;
-    let dir = PathBuf::from(home).join(".cache/dictate");
+    // XDG Base Directory: `$XDG_CACHE_HOME/dictate`, else `~/.cache/dictate`.
+    let dir = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(d) if !d.is_empty() => PathBuf::from(d).join("dictate"),
+        _ => {
+            let home = std::env::var_os("HOME").context(
+                "HOME is unset and XDG_CACHE_HOME is unset — export one of them, or use --foreground",
+            )?;
+            PathBuf::from(home).join(".cache/dictate")
+        }
+    };
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     Ok(dir)
 }
@@ -843,6 +849,39 @@ mod api_handler_tests {
         buf.cancel();
         let err = buf.stop().expect_err("stop after cancel");
         assert!(err.error.contains("no active utterance"));
+    }
+}
+
+#[cfg(test)]
+mod cache_dir_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn cache_dir_honors_xdg_cache_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "dictate-xdg-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let prev = std::env::var_os("XDG_CACHE_HOME");
+        // SAFETY: serialized under ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", &root) };
+        let got = cache_dir();
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+        }
+        let got = got.expect("cache_dir");
+        assert_eq!(got, root.join("dictate"));
+        assert!(got.is_dir(), "cache_dir must create {}", got.display());
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

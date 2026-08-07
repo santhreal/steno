@@ -381,17 +381,22 @@ fn gate_accepted_peer(stream: &UnixStream, require_same_uid: bool) -> Result<(),
 }
 
 /// Default socket path: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else
-/// `~/.cache/dictate/dictate.sock`.
+/// `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`.
 pub fn default_socket_path() -> Result<PathBuf> {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !runtime.is_empty() {
             return Ok(PathBuf::from(runtime).join("dictate/dictate.sock"));
         }
     }
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        if !cache.is_empty() {
+            return Ok(PathBuf::from(cache).join("dictate/dictate.sock"));
+        }
+    }
     let home = match std::env::var_os("HOME") {
         Some(h) if !h.is_empty() => PathBuf::from(h),
         _ => bail!(
-            "neither XDG_RUNTIME_DIR nor HOME is set — export one of them, or pass an explicit socket path"
+            "neither XDG_RUNTIME_DIR, XDG_CACHE_HOME, nor HOME is set — export one of them, or pass an explicit socket path"
         ),
     };
     Ok(home.join(".cache/dictate/dictate.sock"))
@@ -599,6 +604,32 @@ mod tests {
             match prev_rt {
                 Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_xdg_cache_home() {
+        let prev_rt = std::env::var_os("XDG_RUNTIME_DIR");
+        let prev_cache = std::env::var_os("XDG_CACHE_HOME");
+        // SAFETY: test process; we restore below.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("XDG_CACHE_HOME", "/tmp/dictate-cache-home");
+        }
+        let path = default_socket_path().unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/dictate-cache-home/dictate/dictate.sock")
+        );
+        unsafe {
+            match prev_rt {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match prev_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
             }
         }
     }

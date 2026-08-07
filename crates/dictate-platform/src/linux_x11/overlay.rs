@@ -1065,10 +1065,15 @@ mod backend_tests {
 
     #[test]
     fn custom_stage_label_and_timer_flags_resolve() {
-        let mut cfg = UiConfig::default();
-        cfg.stages.recording = "Listening".into();
-        cfg.stages.show_timer = false;
-        cfg.stages.pulse_ms = 0;
+        let cfg = UiConfig {
+            stages: dictate_core::config::UiStages {
+                recording: "Listening".into(),
+                show_timer: false,
+                pulse_ms: 0,
+                ..Default::default()
+            },
+            ..UiConfig::default()
+        };
         let ui = resolve_ui(&cfg);
         assert_eq!(stage_text(&ui, Stage::Recording), "Listening");
         assert!(!ui.stages.show_timer);
@@ -1077,8 +1082,10 @@ mod backend_tests {
 
     #[test]
     fn dusk_theme_changes_palette_via_resolve_ui() {
-        let mut cfg = UiConfig::default();
-        cfg.theme = "dusk".into();
+        let cfg = UiConfig {
+            theme: "dusk".into(),
+            ..UiConfig::default()
+        };
         let ui = resolve_ui(&cfg);
         assert_eq!(ui.theme, "dusk");
         assert_ne!(ui.colors.bg, resolve_ui(&UiConfig::default()).colors.bg);

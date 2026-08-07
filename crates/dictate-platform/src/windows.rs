@@ -8,8 +8,9 @@
 //! Layered topmost HWND status chip (`UpdateLayeredWindow` + tiny-skia).
 //! Implements [`OverlayBackend`] stages. Visuals are a simplified always-on-top
 //! rounded chip (stage label + basic icon animation)  -  not a pixel-perfect
-//! port of the Linux X11 pill (no soft CSS shadow, no recording timer meta,
-//! coarser motion). Colors/labels come from [`dictate_core::resolve_ui`].
+//! port of the Linux X11 pill (flat shadow only — no soft blur; coarser motion).
+//! Recording timer honors `[ui.stages].show_timer`. Colors/labels come from
+//! [`dictate_core::resolve_ui`].
 //! `UiConfig.overlay = false` / theme `null|none|off` still select
 //! [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font errors
 //! disable the chip without affecting dictation.
@@ -531,7 +532,7 @@ fn sanitize_for_typing(text: &str) -> String {
 /// Layered HWND status chip. Prefer [`create`] for `UiConfig`-aware selection.
 ///
 /// Visual delta vs Linux X11 pill: simpler rounded chip (label + icon
-/// animation), no soft drop shadow / recording timer / pulse scale. Same
+/// animation), flat offset shadow (no soft blur); recording timer honors show_timer. Same
 /// stage API (`set` / `flash` / `active`).
 pub struct Overlay {
     tx: Option<Sender<Stage>>,
@@ -637,6 +638,7 @@ mod chip {
     pub const PAD_X: f32 = 12.0;
     pub const GAP: f32 = 10.0;
     pub const LABEL_PX: f32 = 13.0;
+    pub const META_PX: f32 = 11.0;
     pub const BOTTOM_MARGIN: i32 = 48;
     pub const TOP_PAD: f32 = 12.0;
 }
@@ -664,6 +666,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
 
     let mut stage = Stage::Hidden;
     let mut stage_changed_at = Instant::now();
+    let mut recording_started = Instant::now();
     let anim_start = Instant::now();
     let mut visible = false;
 
@@ -686,6 +689,9 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         loop {
             match rx.try_recv() {
                 Ok(s) => {
+                    if s == Stage::Recording && stage != Stage::Recording {
+                        recording_started = Instant::now();
+                    }
                     stage = s;
                     stage_changed_at = Instant::now();
                     got = true;
@@ -708,6 +714,9 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
             // Idle wait: block briefly for the next stage without spinning.
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(s) => {
+                    if s == Stage::Recording && stage != Stage::Recording {
+                        recording_started = Instant::now();
+                    }
                     stage = s;
                     stage_changed_at = Instant::now();
                 }
@@ -724,7 +733,8 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
 
         let anim_t = anim_start.elapsed().as_secs_f32();
         let stage_age = stage_changed_at.elapsed().as_secs_f32();
-        draw_chip(&mut pixmap, &font, stage, anim_t, stage_age, ui);
+        let rec_secs = recording_started.elapsed().as_secs();
+        draw_chip(&mut pixmap, &font, stage, anim_t, stage_age, rec_secs, ui);
         unsafe {
             layer.blit_skia(&pixmap)?;
             present_chip(hwnd, &layer)?;
@@ -1034,6 +1044,7 @@ fn draw_chip(
     stage: Stage,
     anim_t: f32,
     stage_age: f32,
+    rec_secs: u64,
     ui: &ResolvedUi,
 ) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
@@ -1127,6 +1138,22 @@ fn draw_chip(
         chip::LABEL_PX * pulse,
         rgba(colors.fg),
     );
+
+    // Elapsed timer on live capture when `[ui.stages].show_timer` is true.
+    if stage == Stage::Recording && ui.stages.show_timer {
+        let meta = format!("{}:{:02}", rec_secs / 60, rec_secs % 60);
+        let meta_size = chip::META_PX * pulse;
+        let tw = text_width(font, &meta, meta_size);
+        draw_text(
+            pixmap,
+            font,
+            &meta,
+            px + pw - pad_x - tw,
+            ty,
+            meta_size,
+            rgba(colors.meta),
+        );
+    }
 }
 
 fn draw_wave(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, t: f32, color: Color) {
@@ -1380,6 +1407,12 @@ fn arc_ribbon(cx: f32, cy: f32, r: f32, a0: f32, a1: f32, thickness: f32) -> Opt
     pb.finish()
 }
 
+fn text_width(font: &Font, text: &str, size: f32) -> f32 {
+    text.chars()
+        .map(|ch| font.metrics(ch, size).advance_width)
+        .sum()
+}
+
 fn draw_text(
     pixmap: &mut SkPixmap,
     font: &Font,
@@ -1498,5 +1531,18 @@ mod tests {
         assert_eq!(stage_text(&ui, Stage::Done), "Done");
         assert_eq!(stage_text(&ui, Stage::Error), "Error");
         assert_eq!(stage_text(&ui, Stage::Hidden), "");
+    }
+
+    #[test]
+    fn show_timer_flag_round_trips_resolve() {
+        assert!(resolve_ui(&UiConfig::default()).stages.show_timer);
+        let cfg = UiConfig {
+            stages: dictate_core::config::UiStages {
+                show_timer: false,
+                ..Default::default()
+            },
+            ..UiConfig::default()
+        };
+        assert!(!resolve_ui(&cfg).stages.show_timer);
     }
 }

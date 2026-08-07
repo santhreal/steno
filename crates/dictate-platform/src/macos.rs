@@ -8,7 +8,7 @@
 //! **Visual delta vs Linux X11 pill:** Linux draws an animated tiny-skia capsule
 //! (icon disc + waveform/spinner/check/x, soft shadow, recording timer). macOS
 //! ships a simpler AppKit chip — borderless floating `NSPanel` + `NSTextField`
-//! stage label only (no icon animation, no elapsed timer, system window shadow).
+//! stage label (optional recording timer via show_timer; no icon animation; system window shadow).
 //! Colors/labels come from [`dictate_core::resolve_ui`]. Same bottom-center
 //! placement; fail-open like Linux.
 //!
@@ -679,18 +679,32 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     content.addSubview(&label_view);
 
     let mut current = Stage::Hidden;
-    apply_stage(&panel, &label_view, mtm, current, ui)?;
+    let mut recording_started = Instant::now();
+    apply_stage(&panel, &label_view, mtm, current, ui, 0)?;
 
     loop {
         match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(stage) => {
+                if stage == Stage::Recording && current != Stage::Recording {
+                    recording_started = Instant::now();
+                }
                 current = stage;
                 while let Ok(more) = rx.try_recv() {
+                    if more == Stage::Recording && current != Stage::Recording {
+                        recording_started = Instant::now();
+                    }
                     current = more;
                 }
-                apply_stage(&panel, &label_view, mtm, current, ui)?;
+                let rec_secs = recording_started.elapsed().as_secs();
+                apply_stage(&panel, &label_view, mtm, current, ui, rec_secs)?;
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // Keep the recording timer label live while held.
+                if current == Stage::Recording && ui.stages.show_timer {
+                    let rec_secs = recording_started.elapsed().as_secs();
+                    apply_stage(&panel, &label_view, mtm, current, ui, rec_secs)?;
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
@@ -721,6 +735,7 @@ fn apply_stage(
     mtm: objc2::MainThreadMarker,
     stage: Stage,
     ui: &ResolvedUi,
+    rec_secs: u64,
 ) -> Result<()> {
     use objc2_app_kit::NSScreen;
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -730,8 +745,17 @@ fn apply_stage(
         return Ok(());
     }
 
-    let text = stage_text(ui, stage);
-    let ns = NSString::from_str(text);
+    let text = if stage == Stage::Recording && ui.stages.show_timer {
+        format!(
+            "{}  {}:{:02}",
+            stage_text(ui, stage),
+            rec_secs / 60,
+            rec_secs % 60
+        )
+    } else {
+        stage_text(ui, stage).to_string()
+    };
+    let ns = NSString::from_str(&text);
     label_view.setStringValue(&ns);
     // Error stage uses palette error tint for the label; others stay on fg.
     {
