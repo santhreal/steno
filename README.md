@@ -27,9 +27,12 @@ libraries (or a CPU build) available at build time via
 
 ```
 export SHERPA_ONNX_LIB_DIR=/usr/local/lib/sherpa-onnx
-cargo build --release
-cargo install --path .
+cargo build -p dictate --release
+cargo install --path crates/dictate
 ```
+
+Workspace crates: `dictate-core` (embeddable engine), `dictate-platform`
+(OS backends), `dictate` (CLI/daemon binary).
 
 GPU decode uses the system CUDA/cuDNN install the sherpa libs were built
 against. There is no cargo `--features cuda` flag — provider selection is

@@ -1,15 +1,5 @@
 //! Animated status pill: a small borderless ARGB window at the bottom
-//! center of the primary monitor. Pixel copy of the product mock:
-//!
-//! - Recording    → "Transcribing" (waveform + elapsed timer), 188 px
-//! - Transcribing → "Processing" (spinner), 164 px
-//! - Done         → "Done" (check draw), 118 px
-//! - Error        → "Error" (x mark)
-//!
-//! Geometry is in logical (CSS) px; everything renders at the display's
-//! scale factor (Xft.dpi / 96, default 1.0) so the pill is the SAME size
-//! the mock specifies on any monitor. The window's input shape is empty:
-//! clicks pass straight through to the app below.
+//! center of the primary monitor. Pixel copy of the product mock.
 //!
 //! Pure display: override-redirect, takes no focus. Cosmetic and
 //! fail-open: no DISPLAY / no ARGB visual / any X error simply disables
@@ -27,69 +17,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use dictate_core::config::UiConfig;
+use dictate_core::overlay::{NullOverlay, OverlayBackend, Stage};
 use fontdue::{Font, FontSettings};
-use serde::Deserialize;
 use tiny_skia::{
     Color, FillRule, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint,
     PremultipliedColorU8, Stroke, StrokeDash, Transform,
 };
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct UiConfig {
-    /// Show the bottom-center status overlay (X11 only).
-    pub overlay: bool,
-    /// How long the "done"/"error" stage stays visible before hide.
-    pub done_flash_ms: u64,
-    /// Built-in overlay theme selected by [`create`].
-    ///
-    /// Known values: `"pill"` (default X11 pill), `"null"` / `"none"` /
-    /// `"off"` (no-op). Unknown themes log a warning and fall back to the
-    /// pill — UI is fail-open.
-    #[serde(default = "default_theme")]
-    pub theme: String,
-}
-
-fn default_theme() -> String {
-    "pill".to_string()
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            overlay: true,
-            // Matches the mock's quick Done celebration (~1.2s).
-            done_flash_ms: 1200,
-            theme: "pill".to_string(),
-        }
-    }
-}
-
-/// Status UI sink for the daemon / embedders.
-///
-/// Method names match the concrete [`Overlay`] API so call sites can move
-/// to `Box<dyn OverlayBackend>` without renaming.
-pub trait OverlayBackend: Send {
-    fn set(&self, stage: Stage);
-    fn flash(&self, ms: u64);
-    /// True unless the overlay is disabled or already known-dead.
-    /// True while the backend is live (fail-open UIs may return false).
-    fn active(&self) -> bool;
-}
-
-/// Headless / test / embedder stand-in: every method is a no-op.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullOverlay;
-
-impl OverlayBackend for NullOverlay {
-    fn set(&self, _stage: Stage) {}
-
-    fn flash(&self, _ms: u64) {}
-
-    fn active(&self) -> bool {
-        false
-    }
-}
 
 /// Build an overlay from [`UiConfig`].
 ///
@@ -108,18 +42,6 @@ pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
             Box::new(Overlay::start(cfg))
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
-    /// Window unmapped — idle between utterances.
-    Hidden,
-    /// Live capture (shown as "Transcribing" with waveform + timer).
-    Recording,
-    /// Decode in flight (shown as "Processing" with spinner).
-    Transcribing,
-    Done,
-    Error,
 }
 
 fn label(stage: Stage) -> &'static str {
@@ -179,18 +101,6 @@ impl Overlay {
         if self.active() {
             thread::sleep(Duration::from_millis(ms));
         }
-    }
-}
-
-impl OverlayBackend for Box<dyn OverlayBackend> {
-    fn set(&self, stage: Stage) {
-        (**self).set(stage)
-    }
-    fn flash(&self, ms: u64) {
-        (**self).flash(ms)
-    }
-    fn active(&self) -> bool {
-        (**self).active()
     }
 }
 

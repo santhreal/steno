@@ -77,9 +77,16 @@ fn hermetic_config(dir: &Path) -> PathBuf {
 }
 
 fn dictate(args: &[&str], wav: &Path, extra: &[String]) -> Output {
-    let cfg = hermetic_config(wav.parent().unwrap());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dictate"));
-    cmd.arg(wav).arg("--config").arg(&cfg);
+    cmd.arg(wav);
+    // Prefer an explicit --config from args/extra (dictionary fixtures).
+    // Otherwise force a hermetic empty config so a user-armed
+    // ~/.config/dictate/config.toml can never enable typing in CI.
+    let has_config = args.contains(&"--config") || extra.iter().any(|a| a == "--config");
+    if !has_config {
+        let cfg = hermetic_config(wav.parent().unwrap());
+        cmd.arg("--config").arg(&cfg);
+    }
     for a in args {
         cmd.arg(a);
     }

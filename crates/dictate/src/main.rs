@@ -8,19 +8,13 @@
 //! file. Daemon: `dictate start` keeps the model loaded system-wide; hold
 //! Caps Lock to dictate into the focused window; `dictate stop` tears it down.
 
-mod audio;
-mod config;
 mod daemon;
-mod dsp;
-mod hotkey;
-mod output;
-mod overlay;
-mod stt;
-mod text;
-mod api;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dictate_core::config::{self, Config};
+use dictate_core::{Engine, audio, dsp, text};
+use dictate_platform::{self as platform, OverlayBackend, OutputMode, Stage, create as create_overlay};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -121,12 +115,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cfg = config::Config::load(cli.config.as_deref())?;
+    let cfg = Config::load(cli.config.as_deref())?;
     // Fail closed and fail FAST: a disarmed --type must error before the
     // microphone opens, the model loads, or xdotool is ever spawned.
     let mode = output_mode(cli.r#type, cli.stdout, cfg.type_output)?;
 
-    let overlay = overlay::create(&cfg.ui);
+    let overlay = create_overlay(&cfg.ui);
     log::debug!("overlay active={}", overlay.active());
 
     // Warn about flags that have no effect in the chosen mode; silently
@@ -153,7 +147,7 @@ fn main() -> Result<()> {
             s
         }
         None => {
-            overlay.set(overlay::Stage::Recording);
+            overlay.set(Stage::Recording);
             audio::record(&audio::RecordConfig {
                 device: cli.device.clone(),
                 max_duration: Duration::from_secs(cfg.max_record_secs),
@@ -167,41 +161,54 @@ fn main() -> Result<()> {
         "{:.1}s of audio captured",
         samples.len() as f32 / dsp::STT_RATE as f32
     );
-    overlay.set(overlay::Stage::Transcribing);
+    overlay.set(Stage::Transcribing);
 
-    let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
-    let transcriber = stt::Transcriber::load(&model, cfg.n_threads)?;
-    let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
-    let pipeline = text::TextPipeline::new(cfg.text, dict);
-    emit_transcript(
-        &samples,
-        &transcriber,
-        pipeline,
-        cli.raw,
-        mode,
-        overlay.as_ref(),
-        cfg.ui.done_flash_ms,
-    )
+    // One-shot: prefer Engine (model + dictionary + pipeline in one place).
+    let mut eng_cfg = cfg.clone();
+    if let Some(model) = cli.model.as_ref() {
+        eng_cfg.model_path = Some(model.clone());
+    }
+    let engine = Engine::load(&eng_cfg)?;
+    let text_out = if cli.raw {
+        engine.transcribe_f32_raw(&samples)?
+    } else {
+        engine.transcribe_f32(&samples)?
+    };
+    let mut emitter = platform::Emitter::new(mode);
+    if let Err(e) = emitter.push(&text_out) {
+        overlay.set(Stage::Error);
+        overlay.flash(cfg.ui.done_flash_ms);
+        overlay.set(Stage::Hidden);
+        return Err(e);
+    }
+    emitter.finish()?;
+    if text_out.is_empty() {
+        log::debug!("empty transcript, nothing emitted");
+    }
+    overlay.set(Stage::Done);
+    overlay.flash(cfg.ui.done_flash_ms);
+    overlay.set(Stage::Hidden);
+    Ok(())
 }
 
 /// Run the text pipeline + emitter over `samples`. Shared by one-shot and daemon.
 pub(crate) fn emit_transcript(
     samples: &[f32],
-    transcriber: &stt::Transcriber,
+    transcriber: &dictate_core::Transcriber,
     pipeline: text::TextPipeline,
     raw: bool,
-    mode: output::OutputMode,
-    overlay: &dyn overlay::OverlayBackend,
+    mode: OutputMode,
+    overlay: &dyn OverlayBackend,
     flash_ms: u64,
 ) -> Result<()> {
     struct StreamCtx {
-        emitter: output::Emitter,
+        emitter: platform::Emitter,
         state: text::FmtState,
         /// Sink errors cannot cross the FFI callback; the first one lands here.
         error: Option<String>,
     }
     let ctx = std::rc::Rc::new(std::cell::RefCell::new(StreamCtx {
-        emitter: output::Emitter::new(mode),
+        emitter: platform::Emitter::new(mode),
         state: text::FmtState::default(),
         error: None,
     }));
@@ -227,9 +234,9 @@ pub(crate) fn emit_transcript(
     // The sink closure records its own errors; borrow, don't unwrap.
     let mut ctx = ctx.borrow_mut();
     if let Some(e) = ctx.error.take() {
-        overlay.set(overlay::Stage::Error);
+        overlay.set(Stage::Error);
         overlay.flash(flash_ms);
-        overlay.set(overlay::Stage::Hidden);
+        overlay.set(Stage::Hidden);
         anyhow::bail!("{e}");
     }
     let started = ctx.emitter.started();
@@ -237,9 +244,9 @@ pub(crate) fn emit_transcript(
     if !started {
         log::debug!("empty transcript, nothing emitted");
     }
-    overlay.set(overlay::Stage::Done);
+    overlay.set(Stage::Done);
     overlay.flash(flash_ms);
-    overlay.set(overlay::Stage::Hidden);
+    overlay.set(Stage::Hidden);
     Ok(())
 }
 
@@ -248,9 +255,9 @@ pub(crate) fn emit_transcript(
 /// persistent act by the user. A bare `--type` flag is never sufficient,
 /// so no script, test, or agent can make dictate inject keystrokes into a
 /// live session without the user having armed their own config first.
-fn output_mode(cli_type: bool, cli_stdout: bool, cfg_armed: bool) -> Result<output::OutputMode> {
+fn output_mode(cli_type: bool, cli_stdout: bool, cfg_armed: bool) -> Result<OutputMode> {
     if cli_stdout {
-        return Ok(output::OutputMode::Stdout);
+        return Ok(OutputMode::Stdout);
     }
     if cli_type && !cfg_armed {
         anyhow::bail!(
@@ -261,9 +268,9 @@ fn output_mode(cli_type: bool, cli_stdout: bool, cfg_armed: bool) -> Result<outp
         );
     }
     Ok(if cli_type || cfg_armed {
-        output::OutputMode::Type
+        OutputMode::Type
     } else {
-        output::OutputMode::Stdout
+        OutputMode::Stdout
     })
 }
 
@@ -291,7 +298,7 @@ mod tests {
     fn stdout_when_nothing_requests_typing() {
         assert!(matches!(
             output_mode(false, false, false).unwrap(),
-            output::OutputMode::Stdout
+            OutputMode::Stdout
         ));
     }
 
@@ -313,11 +320,11 @@ mod tests {
     fn armed_config_types_with_or_without_flag() {
         assert!(matches!(
             output_mode(false, false, true).unwrap(),
-            output::OutputMode::Type
+            OutputMode::Type
         ));
         assert!(matches!(
             output_mode(true, false, true).unwrap(),
-            output::OutputMode::Type
+            OutputMode::Type
         ));
     }
 
@@ -325,13 +332,13 @@ mod tests {
     fn stdout_flag_overrides_armed_config() {
         assert!(matches!(
             output_mode(false, true, true).unwrap(),
-            output::OutputMode::Stdout
+            OutputMode::Stdout
         ));
         // --stdout also suppresses the disarmed-typing error: the user
         // explicitly asked for stdout, so nothing would be typed anyway.
         assert!(matches!(
             output_mode(true, true, false).unwrap(),
-            output::OutputMode::Stdout
+            OutputMode::Stdout
         ));
     }
 }

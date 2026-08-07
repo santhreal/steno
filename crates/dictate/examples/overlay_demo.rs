@@ -6,12 +6,8 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-// The demo borrows the module wholesale; it does not use every method.
-#[allow(dead_code)]
-#[path = "../src/overlay.rs"]
-mod overlay;
-
-use overlay::{Overlay, Stage, UiConfig};
+use dictate_core::config::UiConfig;
+use dictate_platform::{Overlay, Stage};
 
 fn main() {
     let ov = Overlay::start(&UiConfig::default());

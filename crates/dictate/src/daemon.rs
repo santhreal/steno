@@ -21,15 +21,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use crate::api::{self, ApiError, ApiHandler, ApiResult};
-use crate::audio;
-use crate::config::{self, ApiConfig, Config};
-use crate::dsp::{self, DspConfig};
-use crate::hotkey::{Hotkey, HotkeyEvent};
-use crate::output::OutputMode;
-use crate::overlay::{self, Stage};
-use crate::stt::Transcriber;
-use crate::text::{self, TextConfig, TextPipeline};
+use dictate_core::api::{self, ApiError, ApiHandler, ApiResult};
+use dictate_core::audio;
+use dictate_core::config::{self, ApiConfig, Config};
+use dictate_core::dsp::{self, DspConfig};
+use dictate_core::stt::Transcriber;
+use dictate_core::text::{self, TextConfig, TextPipeline};
+use dictate_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay};
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
@@ -578,7 +576,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         );
     }
     let text_cfg = cfg.text;
-    let overlay = overlay::create(&cfg.ui);
+    let overlay = create_overlay(&cfg.ui);
     log::debug!("overlay active={}", overlay.active());
     let stage = Arc::new(Mutex::new(String::from("idle")));
 

@@ -1,0 +1,19 @@
+[package]
+name = "dictate-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Embeddable offline STT engine (Parakeet/sherpa-onnx): audio, DSP, text pipeline, config, API types"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+cpal = "0.18"
+hound = "3"
+log = "0.4"
+rubato = { version = "4", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sherpa-onnx = { version = "1.13.4", default-features = false, features = ["shared"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }

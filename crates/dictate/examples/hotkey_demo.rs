@@ -5,10 +5,7 @@
 
 use std::time::Duration;
 
-#[path = "../src/hotkey.rs"]
-mod hotkey;
-
-use hotkey::{Hotkey, HotkeyEvent};
+use dictate_platform::{Hotkey, HotkeyEvent};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

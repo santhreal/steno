@@ -12,8 +12,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::dsp::{DspConfig, VadConfig};
-use crate::overlay::UiConfig;
 use crate::text::{Dictionary, TextConfig};
+
+/// Status overlay section (`[ui]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// Show the bottom-center status overlay (X11 only).
+    pub overlay: bool,
+    /// How long the "done"/"error" stage stays visible before hide.
+    pub done_flash_ms: u64,
+    /// Built-in overlay theme selected by platform `create`.
+    ///
+    /// Known values: `"pill"` (default X11 pill), `"null"` / `"none"` /
+    /// `"off"` (no-op). Unknown themes log a warning and fall back to the
+    /// pill — UI is fail-open.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "pill".to_string()
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            overlay: true,
+            // Matches the mock's quick Done celebration (~1.2s).
+            done_flash_ms: 1200,
+            theme: "pill".to_string(),
+        }
+    }
+}
 
 // deny_unknown_fields: a typo'd key must fail loudly, not be silently
 // ignored. Every nested table sets it too.
