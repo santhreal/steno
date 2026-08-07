@@ -7,12 +7,26 @@
 //!
 //! Limitation: after markers are stripped, refine cannot tell a brand
 //! token from ordinary text. Rules never re-case tokens (duplicate-word
-//! collapse keeps the first spelling; phrase maps use fixed literals).
-//! Tokens with internal capitals or short all-lowercase brands emitted
-//! by format are left alone by case-transform rules — there are none.
+//! collapse keeps the first spelling; phrase maps follow the first
+//! matched token's capitalization when the replacement is not a forced
+//! literal). Tokens with internal capitals or short all-lowercase brands
+//! emitted by format are left alone by case-transform rules — there are
+//! none that rewrite token case beyond first-letter carry for phrase hits.
 //!
-//! Full LLM GEC is a future [`RefineBackend`] only; this module stays
-//! offline and ships [`RuleRefine`] as the default.
+//! ## Honest limits
+//!
+//! [`RuleRefine`] only fixes high-precision, local ASR/grammar glitches
+//! (spaced contractions, a handful of phrase maps, a/an before clear
+//! vowel/consonant starts, duplicate words/short clauses, one leading
+//! filler). It **cannot** repair severe STT garble such as acoustic
+//! hallucinations (`"chromax"` → intended grammar/word). Those belong to
+//! the dictionary (known phrases) and a better acoustic model. Real
+//! grammatical error correction (GEC) is a future [`RefineBackend`] plug
+//! only; this module stays pure offline rules with no LLM or LanguageTool
+//! dependency.
+//!
+//! Full LLM GEC is therefore a future [`RefineBackend`] only; this module
+//! ships [`RuleRefine`] as the default.
 
 use std::borrow::Cow;
 
@@ -104,14 +118,58 @@ const SPACED_CONTRACTIONS: &[(&[&str], &str)] = &[
 ];
 
 /// Frequent ASR garbling → intended text. Keep tiny and documented.
-/// Matched case-insensitively as consecutive whole words; replacement is
-/// inserted literally (fixed casing from the table).
+/// Matched case-insensitively as consecutive whole words; replacement
+/// casing follows the first matched token (not a forced lowercase literal).
 const COMMON_ASR_FIXES: &[(&[&str], &str)] = &[
     // Repeated filler / stutter patterns ASR often doubles.
     (&["gotta", "gotta"], "gotta"),
     (&["kind", "of", "of"], "kind of"),
     (&["sort", "of", "of"], "sort of"),
     (&["a", "lot", "of", "of"], "a lot of"),
+    // Modal "of" → "have" (spoken "should've" misheard as "should of").
+    (&["should", "of"], "should have"),
+    (&["could", "of"], "could have"),
+    (&["would", "of"], "would have"),
+    (&["might", "of"], "might have"),
+    (&["must", "of"], "must have"),
+    // Mixed duplicated articles (identical pairs already collapse via
+    // `collapse_duplicate_words`, including "i i").
+    (&["the", "a"], "the"),
+    (&["a", "the"], "the"),
+    (&["the", "an"], "the"),
+    (&["an", "the"], "the"),
+    (&["a", "an"], "an"),
+    (&["an", "a"], "an"),
+    // Homophone their/there — only before is/are (high confidence).
+    (&["their", "is"], "there is"),
+    (&["their", "are"], "there are"),
+    // Stuttered existential.
+    (&["there", "is", "is"], "there is"),
+    (&["there's", "is"], "there's"),
+    (&["there", "are", "are"], "there are"),
+];
+
+/// Tiny high-precision subject–verb phrase maps. Not a grammar engine:
+/// only fixed spoken pairs that ASR produces with high confidence.
+const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
+    (&["he", "don't"], "he doesn't"),
+    (&["she", "don't"], "she doesn't"),
+    (&["it", "don't"], "it doesn't"),
+    (&["i", "is"], "i am"),
+    (&["you", "is"], "you are"),
+    (&["we", "is"], "we are"),
+    (&["they", "is"], "they are"),
+    (&["he", "are"], "he is"),
+    (&["she", "are"], "she is"),
+    (&["it", "are"], "it is"),
+    (&["i", "are"], "i am"),
+];
+
+/// Leading utterance fillers stripped once. `um`/`uh` stay with the
+/// dictionary — refine does not delete them mid-stream or compete with
+/// `[overrides] "um" = ""`.
+const LEADING_FILLERS: &[&str] = &[
+    "well", "so", "okay", "ok", "alright", "anyway", "basically", "like",
 ];
 
 fn is_orphan_punct_token(tok: &str) -> bool {
@@ -162,9 +220,13 @@ fn rule_refine_line(line: &str) -> String {
 
     let mut words: Vec<Cow<'_, str>> = trimmed.split_whitespace().map(Cow::Borrowed).collect();
 
-    apply_phrase_map(&mut words, COMMON_ASR_FIXES, true);
+    apply_phrase_map(&mut words, COMMON_ASR_FIXES, false);
+    apply_phrase_map(&mut words, SUBJECT_VERB_FIXES, false);
+    fix_indefinite_article(&mut words);
     apply_phrase_map(&mut words, SPACED_CONTRACTIONS, false);
     collapse_duplicate_words(&mut words);
+    collapse_repeated_short_clauses(&mut words);
+    strip_leading_filler_once(&mut words);
     // Drop leading orphan punct tokens (nothing to attach to). Trailing /
     // mid-stream punct is reattached by strip_space_before_punct.
     while words.first().is_some_and(|w| is_orphan_punct_token(w)) {
@@ -238,6 +300,57 @@ fn match_contraction_case(first: &str, repl: &str) -> String {
     }
 }
 
+/// Cheap, safe a/an repair before a following alphabetic word.
+///
+/// Only ASCII vowel/consonant starts. Skips `u…` and `one`/`once` (a-one
+/// is correct) and skips all `h…` targets for `an→a` (hour/honest).
+/// Not a phoneme model — ambiguous cases are left alone.
+fn fix_indefinite_article(words: &mut [Cow<'_, str>]) {
+    if words.len() < 2 {
+        return;
+    }
+    let mut i = 0;
+    while i + 1 < words.len() {
+        let article = words[i].as_ref();
+        let next = words[i + 1].as_ref();
+        if let Some(fixed) = a_an_fix(article, next) {
+            words[i] = Cow::Owned(fixed);
+        }
+        i += 1;
+    }
+}
+
+fn a_an_fix(article: &str, next: &str) -> Option<String> {
+    let next_alpha: String = next
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    if next_alpha.is_empty() {
+        return None;
+    }
+    let first = next_alpha.chars().next()?.to_ascii_lowercase();
+    let next_lower = next_alpha.to_ascii_lowercase();
+
+    if article.eq_ignore_ascii_case("a") {
+        // Vowel start, excluding u- (university) and one/once.
+        if matches!(first, 'a' | 'e' | 'i' | 'o')
+            && next_lower != "one"
+            && next_lower != "once"
+        {
+            return Some(match_contraction_case(article, "an"));
+        }
+        return None;
+    }
+    if article.eq_ignore_ascii_case("an") {
+        // Consonant start; skip h- (hour/honest) and vowels entirely.
+        if first.is_ascii_alphabetic() && !matches!(first, 'a' | 'e' | 'i' | 'o' | 'u' | 'h') {
+            return Some(match_contraction_case(article, "a"));
+        }
+        return None;
+    }
+    None
+}
+
 /// Collapse consecutive duplicate words case-insensitively, keeping the
 /// first token's casing.
 fn collapse_duplicate_words(words: &mut Vec<Cow<'_, str>>) {
@@ -257,6 +370,49 @@ fn collapse_duplicate_words(words: &mut Vec<Cow<'_, str>>) {
     *words = out;
 }
 
+/// Collapse identical consecutive short clauses (2..=4 words), keeping
+/// the first copy's casing. Single-word repeats are already handled by
+/// [`collapse_duplicate_words`].
+fn collapse_repeated_short_clauses(words: &mut Vec<Cow<'_, str>>) {
+    if words.len() < 4 {
+        return;
+    }
+    let mut i = 0;
+    while i < words.len() {
+        let mut collapsed = false;
+        for len in (2..=4).rev() {
+            if i + 2 * len > words.len() {
+                continue;
+            }
+            let same = (0..len).all(|k| words[i + k].eq_ignore_ascii_case(&words[i + len + k]));
+            if same {
+                words.drain(i + len..i + 2 * len);
+                collapsed = true;
+                break;
+            }
+        }
+        if !collapsed {
+            i += 1;
+        }
+    }
+}
+
+/// Strip at most one leading filler word when content remains after it.
+/// Does not touch `um`/`uh` (dictionary-owned).
+fn strip_leading_filler_once(words: &mut Vec<Cow<'_, str>>) {
+    if words.len() < 2 {
+        return;
+    }
+    if words
+        .first()
+        .is_some_and(|w| LEADING_FILLERS.iter().any(|f| w.eq_ignore_ascii_case(f)))
+    {
+        words.remove(0);
+        while words.first().is_some_and(|w| is_orphan_punct_token(w)) {
+            words.remove(0);
+        }
+    }
+}
 
 /// Remove spaces immediately before closing/sentence punctuation, then
 /// collapse any residual multi-space runs.
@@ -283,6 +439,8 @@ fn strip_space_before_punct(s: &str) -> String {
 mod tests {
     //! WHY: RuleRefine must clean high-value ASR glitches without fighting
     //! format capitalization or inventing case changes on brand-like tokens.
+    //! Each new rule has a positive mutation assert and a near-miss that
+    //! must stay unchanged (proves the rule is narrow, not a grammar engine).
 
     use super::*;
 
@@ -291,6 +449,8 @@ mod tests {
         assert_eq!(rule_refine("the the cat"), "the cat");
         assert_eq!(rule_refine("Hello hello world"), "Hello world");
         assert_eq!(rule_refine("the The THE cat"), "the cat");
+        // "i i" is the same mechanism — no special case required.
+        assert_eq!(rule_refine("i i think"), "i think");
     }
 
     #[test]
@@ -391,5 +551,115 @@ mod tests {
         assert!(!cfg.enabled);
         assert_eq!(cfg.backend, "rules");
         assert_eq!(cfg.make_backend().refine("the the"), "the the");
+    }
+
+    #[test]
+    fn modal_of_becomes_have() {
+        assert_eq!(rule_refine("I should of gone"), "I should have gone");
+        assert_eq!(rule_refine("Could of been"), "Could have been");
+        assert_eq!(rule_refine("we would of tried"), "we would have tried");
+        assert_eq!(rule_refine("they might of left"), "they might have left");
+        assert_eq!(rule_refine("you must of known"), "you must have known");
+        // Near-miss: real "of" after a non-modal stays.
+        assert_eq!(rule_refine("think of leaving"), "think of leaving");
+        assert_eq!(rule_refine("a pair of shoes"), "a pair of shoes");
+    }
+
+    #[test]
+    fn mixed_duplicate_articles() {
+        assert_eq!(rule_refine("the a cat"), "the cat");
+        assert_eq!(rule_refine("a the cat"), "the cat");
+        assert_eq!(rule_refine("an a apple"), "an apple");
+        assert_eq!(rule_refine("a an idea"), "an idea");
+        assert_eq!(rule_refine("the an end"), "the end");
+        // Near-miss: legitimate adjacent determiners across real words.
+        assert_eq!(rule_refine("give the award"), "give the award");
+    }
+
+    #[test]
+    fn their_is_are_high_confidence_only() {
+        assert_eq!(rule_refine("their is a bug"), "there is a bug");
+        assert_eq!(rule_refine("Their are options"), "There are options");
+        assert_eq!(rule_refine("there is is a way"), "there is a way");
+        assert_eq!(rule_refine("there's is time"), "there's time");
+        // Near-miss: possessive "their" before a noun must not flip.
+        assert_eq!(rule_refine("their cat sat"), "their cat sat");
+        assert_eq!(rule_refine("see their idea"), "see their idea");
+    }
+
+    #[test]
+    fn subject_verb_tiny_phrase_maps() {
+        assert_eq!(rule_refine("he don't know"), "he doesn't know");
+        assert_eq!(rule_refine("She don't care"), "She doesn't care");
+        assert_eq!(rule_refine("it don't work"), "it doesn't work");
+        assert_eq!(rule_refine("they is ready"), "they are ready");
+        assert_eq!(rule_refine("I is here"), "I am here");
+        assert_eq!(rule_refine("you is late"), "you are late");
+        assert_eq!(rule_refine("he are gone"), "he is gone");
+        // Near-miss: do not invent agreement outside the tiny map.
+        assert_eq!(rule_refine("the cats is ready"), "the cats is ready");
+        assert_eq!(rule_refine("data are clear"), "data are clear");
+    }
+
+    #[test]
+    fn a_an_cheap_safe_vowel_consonant() {
+        assert_eq!(rule_refine("a apple"), "an apple");
+        assert_eq!(rule_refine("A orange"), "An orange");
+        assert_eq!(rule_refine("an book"), "a book");
+        assert_eq!(rule_refine("An dog"), "A dog");
+        // Near-misses left alone (not a phoneme model).
+        assert_eq!(rule_refine("a university"), "a university");
+        assert_eq!(rule_refine("a one"), "a one");
+        assert_eq!(rule_refine("an hour"), "an hour");
+        assert_eq!(rule_refine("a cat"), "a cat");
+    }
+
+    #[test]
+    fn collapses_repeated_short_clauses() {
+        assert_eq!(
+            rule_refine("going home going home now"),
+            "going home now"
+        );
+        assert_eq!(rule_refine("I think I think so"), "I think so");
+        assert_eq!(
+            rule_refine("see the cat see the cat"),
+            "see the cat"
+        );
+        // Triple consecutive short clause collapses to one.
+        assert_eq!(
+            rule_refine("I mean I mean I mean yes"),
+            "I mean yes"
+        );
+        // Near-miss: overlapping but non-identical spans stay.
+        assert_eq!(
+            rule_refine("going home going back"),
+            "going home going back"
+        );
+    }
+
+    #[test]
+    fn strips_one_leading_filler_not_um_uh() {
+        assert_eq!(rule_refine("well I agree"), "I agree");
+        assert_eq!(rule_refine("So we start"), "we start");
+        assert_eq!(rule_refine("okay , let's go"), "let's go");
+        assert_eq!(rule_refine("basically this works"), "this works");
+        // Only once — second filler remains.
+        assert_eq!(rule_refine("well so maybe"), "so maybe");
+        // um/uh: do not fight the dictionary; leave them alone here.
+        assert_eq!(rule_refine("um I agree"), "um I agree");
+        assert_eq!(rule_refine("uh maybe later"), "uh maybe later");
+        // Near-miss: mid-stream filler is not stripped.
+        assert_eq!(rule_refine("I well know"), "I well know");
+        // Lone filler must not wipe the line.
+        assert_eq!(rule_refine("well"), "well");
+    }
+
+    #[test]
+    fn common_asr_stutter_and_severe_garble_untouched() {
+        assert_eq!(rule_refine("gotta gotta go"), "gotta go");
+        assert_eq!(rule_refine("kind of of weird"), "kind of weird");
+        // Severe acoustic garble is out of scope for RuleRefine.
+        assert_eq!(rule_refine("chromax grammar"), "chromax grammar");
+        assert_eq!(rule_refine("open the chromax"), "open the chromax");
     }
 }
