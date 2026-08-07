@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -50,6 +50,14 @@ impl ApiError {
 }
 
 pub type ApiResult = std::result::Result<Option<Value>, ApiError>;
+
+/// Hard cap on a single NDJSON request line (bytes). Prevents a same-uid
+/// client from OOMing the daemon with a multi-GB `pcm_f32_b64` frame.
+pub const MAX_API_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Hard cap on buffered utterance PCM samples (~3 minutes at 16 kHz mono).
+pub const MAX_UTTERANCE_SAMPLES: usize = 16_000 * 180;
+
 
 /// Sync callback surface matching each protocol op.
 ///
@@ -156,6 +164,17 @@ impl UtteranceBuffer {
             ));
         }
         let chunk = decode_pcm_f32_le_b64(pcm_f32_b64)?;
+        let new_len = self.samples.len().saturating_add(chunk.len());
+        if new_len > MAX_UTTERANCE_SAMPLES {
+            self.active = false;
+            self.samples.clear();
+            return Err(ApiError::new(
+                format!(
+                    "utterance exceeds max {MAX_UTTERANCE_SAMPLES} samples (~3 min at 16 kHz)"
+                ),
+                Some("call utterance.cancel and send a shorter utterance".into()),
+            ));
+        }
         self.samples.extend_from_slice(&chunk);
         Ok(())
     }
@@ -433,6 +452,14 @@ pub fn serve_unix_with(
         })?;
     }
     if path.exists() {
+        // If something still answers on this path, do not steal the name
+        // (unlink+bind TOCTOU against a live daemon).
+        if UnixStream::connect(path).is_ok() {
+            bail!(
+                "API socket {} is still live — stop the other dictate daemon before starting another",
+                path.display()
+            );
+        }
         fs::remove_file(path).with_context(|| {
             format!(
                 "failed to remove stale socket {} — stop the other dictate daemon or delete the file",
@@ -447,6 +474,12 @@ pub fn serve_unix_with(
             path.display()
         )
     })?;
+    // Restrict to the owning uid; peer-uid gate is belt-and-suspenders.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
     if stop.is_some() {
         listener
             .set_nonblocking(true)
@@ -503,9 +536,30 @@ fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()
 
     loop {
         buf.clear();
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .context("failed reading NDJSON line from API client")?;
+        // Bound per-line growth: read byte-by-byte until newline or cap.
+        let mut n = 0usize;
+        loop {
+            let mut byte = [0u8; 1];
+            match reader.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    n += 1;
+                    buf.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    if buf.len() > MAX_API_LINE_BYTES {
+                        anyhow::bail!(
+                            "API client sent a line larger than {MAX_API_LINE_BYTES} bytes — \
+                             reject oversized pcm_f32_b64 / JSON frames"
+                        );
+                    }
+                }
+                Err(e) => {
+                    return Err(e).context("failed reading NDJSON line from API client");
+                }
+            }
+        }
         if n == 0 {
             break;
         }
@@ -897,7 +951,24 @@ mod tests {
     }
 
     #[test]
+    fn utterance_append_rejects_over_max_samples() {
+        let mut buf = UtteranceBuffer::default();
+        buf.start();
+        // 4 bytes per f32; build a chunk that alone exceeds the cap.
+        let samples = vec![0.0f32; MAX_UTTERANCE_SAMPLES + 1];
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let err = buf.append_b64(&b64).expect_err("over-cap");
+        assert!(err.error.contains("exceeds max"), "{err:?}");
+        assert!(!buf.is_active());
+    }
+
+    #[test]
     fn utterance_cancel_then_stop_errors_cleanly() {
+
         let handler = UtteranceApiHandler::new(MockTranscoder { label: "mock" });
         assert!(handler.utterance_start().is_ok());
         let mut bytes = Vec::new();

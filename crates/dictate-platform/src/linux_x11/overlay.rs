@@ -782,9 +782,9 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32, colo
     let Some(path) = pb.finish() else { return };
     let len = (p1.0 - p0.0).hypot(p1.1 - p0.1) + (p2.0 - p1.0).hypot(p2.1 - p1.1);
     let progress = ((age - 0.08) / 0.45).clamp(0.0, 1.0);
-    // At progress 0 the dash gap swallows the whole path; tiny-skia
+    // At progress ~0 the dash gap swallows the whole path; tiny-skia
     // fails to dash an empty result and logs "path dashing failed".
-    if progress <= 0.0 {
+    if progress < 0.05 {
         return;
     }
     let mut paint = Paint {
@@ -795,7 +795,11 @@ fn draw_check(pixmap: &mut SkPixmap, ix: f32, iy: f32, icon: f32, age: f32, colo
     let dash = if progress >= 1.0 {
         None // fully drawn: plain stroke
     } else {
-        StrokeDash::new(vec![len.max(0.01), len.max(0.01)], len * (1.0 - progress))
+        // StrokeDash::new returns None for degenerate patterns — skip frame.
+        match StrokeDash::new(vec![len.max(0.01), len.max(0.01)], len * (1.0 - progress)) {
+            Some(d) => Some(d),
+            None => return,
+        }
     };
     let stroke = Stroke {
         width: 2.2 * k,

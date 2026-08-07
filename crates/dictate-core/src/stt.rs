@@ -8,11 +8,14 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::dsp::STT_RATE;
 
 pub struct Transcriber {
-    recognizer: OfflineRecognizer,
+    /// Serialize decode: API thread + Caps Lock path share one model; the
+    /// sherpa binding marks Sync but concurrent CUDA decode is still racy.
+    recognizer: Mutex<OfflineRecognizer>,
 }
 
 impl Transcriber {
@@ -60,7 +63,7 @@ impl Transcriber {
                 )
             }
         })?;
-        Ok(Self { recognizer })
+        Ok(Self { recognizer: Mutex::new(recognizer) })
     }
 
     /// Transcribe 16 kHz mono f32 samples. Parakeet decodes an utterance
@@ -71,9 +74,13 @@ impl Transcriber {
         samples: &[f32],
         mut sink: impl FnMut(&str) + 'static,
     ) -> Result<()> {
-        let stream = self.recognizer.create_stream();
+        let recognizer = self
+            .recognizer
+            .lock()
+            .map_err(|_| anyhow!("transcriber lock poisoned — restart the daemon"))?;
+        let stream = recognizer.create_stream();
         stream.accept_waveform(STT_RATE as i32, samples);
-        self.recognizer.decode(&stream);
+        recognizer.decode(&stream);
         let result = stream
             .get_result()
             .ok_or_else(|| anyhow!("sherpa-onnx returned no result for a decoded stream"))?;

@@ -331,20 +331,33 @@ impl Hotkey {
                         continue;
                     }
                     // X auto-repeat emits a release+press pair with the
-                    // SAME timestamp for a held key. Peek: a matching press
-                    // means the key never went up — swallow both and stay
-                    // held. Without this every hold longer than the repeat
-                    // delay (~600ms) looked like a release and cut the
-                    // utterance.
-                    if let Ok(Some(peeked)) = self.conn.poll_for_event() {
-                        let is_repeat = matches!(
-                            &peeked,
-                            Event::KeyPress(p) if p.detail == ev.detail && p.time == ev.time
-                        );
-                        if is_repeat {
-                            continue;
+                    // SAME timestamp for a held key. Peek past unrelated
+                    // events (esp. XI2 RawKeyPress) for a matching press —
+                    // otherwise an interleaved XI2 event looks like a real
+                    // release and cuts the utterance at the repeat delay.
+                    let mut deferred: Vec<Event> = Vec::new();
+                    let mut is_repeat = false;
+                    while let Ok(Some(peeked)) = self.conn.poll_for_event() {
+                        match &peeked {
+                            Event::KeyPress(p)
+                                if p.detail == ev.detail && p.time == ev.time =>
+                            {
+                                is_repeat = true;
+                                break;
+                            }
+                            Event::KeyPress(_) | Event::KeyRelease(_) => {
+                                deferred.push(peeked);
+                                break;
+                            }
+                            _ => deferred.push(peeked),
                         }
-                        self.pending = Some(peeked);
+                    }
+                    if is_repeat {
+                        // Drop deferred XI2 noise from this coalesce window.
+                        continue;
+                    }
+                    if let Some(first) = deferred.into_iter().next() {
+                        self.pending = Some(first);
                     }
                     *held = false;
                     return Ok(HotkeyEvent::Release);

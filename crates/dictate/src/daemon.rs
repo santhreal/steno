@@ -71,10 +71,15 @@ fn pid_alive(pid: u32) -> bool {
 /// True only when the pid is actually a dictate process. Without this a
 /// recycled pid from a stale pidfile would get our signals.
 fn pid_is_dictate(pid: u32) -> bool {
+    // After `cargo install` replaces a running binary, Linux reports
+    // `dictate (deleted)` — still our process; must not drop the pidfile.
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .is_some_and(|name| name == "dictate")
+        .is_some_and(|name| {
+            let base = name.strip_suffix(" (deleted)").unwrap_or(name.as_str());
+            base == "dictate"
+        })
 }
 
 /// Serialize start/stop/restart across processes: two concurrent starts
@@ -170,26 +175,28 @@ pub fn stop() -> Result<()> {
                 }
             }
             // Wait for a clean exit so Hotkey::Drop can restore Caps Lock.
-            // Mid-transcription does not poll SHUTDOWN, so allow several seconds
-            // before escalating to SIGKILL (which skips Drop).
+            // Mid-transcription blocks in sherpa; allow several seconds before
+            // escalating to SIGKILL (which skips Drop).
             for _ in 0..100 {
-                if !pid_alive(pid) {
+                if !pid_alive(pid) || !pid_is_dictate(pid) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
-            if pid_alive(pid)
-                && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
-            {
-                let e = std::io::Error::last_os_error();
-                if e.raw_os_error() == Some(libc::EPERM) {
-                    anyhow::bail!(
-                        "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
-                        path.display()
-                    );
+            // Re-validate identity before SIGKILL — PID recycle during the wait
+            // must not kill an unrelated process.
+            if pid_alive(pid) && pid_is_dictate(pid) {
+                if unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::EPERM) {
+                        anyhow::bail!(
+                            "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
+                            path.display()
+                        );
+                    }
                 }
             }
-            if pid_alive(pid) {
+            if pid_alive(pid) && pid_is_dictate(pid) {
                 anyhow::bail!(
                     "PID {pid} is still alive after SIGKILL — investigate manually; the pidfile {} was left in place",
                     path.display()
@@ -210,7 +217,7 @@ pub fn stop() -> Result<()> {
 
 /// Spawn the daemon worker (or run it in-process when `foreground`).
 pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
-    let _lock = lifecycle_lock()?;
+    let lock = lifecycle_lock()?;
     if let Some(pid) = is_running()? {
         println!("Dictation already running (PID {pid}).");
         println!("Hotkey: hold Caps Lock to speak; any other key cancels.");
@@ -224,6 +231,9 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     preflight(cli)?;
 
     if foreground {
+        // Must not hold the flock across the daemon lifetime — otherwise
+        // `dictate stop` from another terminal blocks forever.
+        drop(lock);
         return run_daemon(cli);
     }
 
@@ -262,6 +272,31 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     let ready = ready_path()?;
     let _ = fs::remove_file(&ready);
     let child = cmd.spawn().context("failed to spawn dictate daemon")?;
+
+    // Wait briefly for the pidfile under the lock so a concurrent `start`
+    // cannot spawn a second worker, then release so `stop` can SIGTERM a
+    // slow model load instead of blocking for up to 60s on the flock.
+    let mut claimed = false;
+    for _ in 0..50 {
+        if read_pid(&pid_path()?) == Some(child.id()) && pid_is_dictate(child.id()) {
+            claimed = true;
+            break;
+        }
+        if !pid_alive(child.id()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    drop(lock);
+    if !claimed && !pid_alive(child.id()) {
+        let tail = log_tail();
+        if tail.is_empty() {
+            bail!("daemon exited before writing pidfile — see {}", log_file.display());
+        }
+        bail!("daemon exited before writing pidfile — see {}:
+{tail}", log_file.display());
+    }
+
     let mut ok = false;
     for _ in 0..600 {
         if read_pid(&ready) == Some(child.id()) {
@@ -274,8 +309,20 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
     if !ok {
-        unsafe {
-            libc::kill(child.id() as i32, libc::SIGKILL);
+        if pid_alive(child.id()) && pid_is_dictate(child.id()) {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGKILL);
+            }
+        }
+        // SIGKILL skips PidGuard — scrub pidfile / ready / possible API socket.
+        let _ = fs::remove_file(pid_path()?);
+        let _ = fs::remove_file(&ready);
+        if let Ok(cfg) = Config::load(cli.config.as_deref()) {
+            if cfg.api.enabled {
+                if let Ok(sock) = resolve_api_socket(&cfg.api) {
+                    let _ = fs::remove_file(&sock);
+                }
+            }
         }
         // Child may have remapped Caps Lock before dying / before ready.
         repair_caps_lock_if_needed();
@@ -283,7 +330,8 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         if tail.is_empty() {
             bail!("daemon failed to become ready in 60s — see {}", log_file.display());
         }
-        bail!("daemon failed to become ready — see {}:\n{tail}", log_file.display());
+        bail!("daemon failed to become ready — see {}:
+{tail}", log_file.display());
     }
     let _ = fs::remove_file(&ready);
 
@@ -401,18 +449,35 @@ struct DaemonHandler {
 
 impl DaemonHandler {
     fn load_wav(&self, path: &Path) -> Result<Vec<f32>, ApiError> {
+        // Same-uid API can pass any path; still bound decode size so a huge
+        // WAV cannot OOM the resident daemon.
         let (raw, rate) = dsp::read_wav(path).map_err(|e| {
             ApiError::new(
                 format!("failed to read wav_path: {e:#}"),
                 Some("pass a mono/stereo WAV file path readable by the daemon".into()),
             )
         })?;
+        if raw.len() > api::MAX_UTTERANCE_SAMPLES.saturating_mul(4) {
+            return Err(ApiError::new(
+                "wav_path is too large to decode in-process",
+                Some("trim the WAV or send pcm_f32_b64 in smaller utterance.audio chunks".into()),
+            ));
+        }
         let mut samples = dsp::resample(&raw, rate, dsp::STT_RATE).map_err(|e| {
             ApiError::new(
                 format!("failed to resample WAV to 16 kHz: {e:#}"),
                 Some("re-export the WAV with a positive sample rate".into()),
             )
         })?;
+        if samples.len() > api::MAX_UTTERANCE_SAMPLES {
+            return Err(ApiError::new(
+                format!(
+                    "wav exceeds max {} samples (~3 min at 16 kHz)",
+                    api::MAX_UTTERANCE_SAMPLES
+                ),
+                Some("trim the recording before transcribe".into()),
+            ));
+        }
         let mut dc = dsp::DcBlock::new(dsp::STT_RATE);
         dc.process(&mut samples);
         dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
@@ -730,6 +795,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         if let Ok(mut g) = stage.lock() {
                             *g = "idle".into();
                         }
+                        if SHUTDOWN.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
                         continue;
                     }
                     Err(_) => {
@@ -739,6 +807,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                         overlay.set(Stage::Hidden);
                         if let Ok(mut g) = stage.lock() {
                             *g = "idle".into();
+                        }
+                        if SHUTDOWN.load(Ordering::Relaxed) {
+                            return Ok(());
                         }
                         continue;
                     }
@@ -760,6 +831,9 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     overlay.set(Stage::Hidden);
                     if let Ok(mut g) = stage.lock() {
                         *g = "idle".into();
+                    }
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        return Ok(());
                     }
                     continue;
                 }
@@ -792,6 +866,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                 // Typing just injected keys: drop any late raw events so
                 // they cannot cancel the next utterance.
                 hotkey.drain_pending();
+                // Transcription is a blocking sherpa call; honor SIGTERM now.
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
             }
             HotkeyEvent::Release | HotkeyEvent::Cancel => {
                 // Spurious release/cancel with no press — ignore.
