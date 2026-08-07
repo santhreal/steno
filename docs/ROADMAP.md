@@ -27,9 +27,9 @@
 - [x] RuleRefine post-STT + RefineBackend hook (offline; not full LLM GEC)
 
 - [ ] GPU soak (100× en.wav) + nvidia-smi memory delta — **axiomexec / disposable VM only**
-- [ ] Socket framing fuzz / partial lines
-- [ ] Caps Lock restore on SIGKILL documentation + Drop tests
-- [ ] axiomexec remote verify (no local live typing)
+- [x] Socket framing fuzz / partial lines (`api::server` framing_* tests)
+- [x] Caps Lock restore Drop helpers + SIGKILL recovery docs (keycode 66)
+- [ ] axiomexec remote verify (no local live typing) — **BLOCKED**: Tailscale SSH interactive auth; see `local/axiom-verify-summary.md`
 - [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`; live path Unverified)
 - [ ] README + EMBEDDING.md finalized after Phase 5 proofs
 
