@@ -23,6 +23,8 @@ pub use traits::{HotkeySource, Typer};
 
 #[cfg(target_os = "linux")]
 pub use linux::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create};
+#[cfg(target_os = "linux")]
+pub use linux_x11::restore_caps_lock_mapping;
 #[cfg(target_os = "windows")]
 pub use windows::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create};
 #[cfg(target_os = "macos")]

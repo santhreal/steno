@@ -98,6 +98,9 @@ it; `dictate start --foreground` runs in the terminal for debugging.
 Daemon pid/ready/log files live under `$XDG_CACHE_HOME/dictate/` when that
 env is set, otherwise `~/.cache/dictate/`. Make sure no other app (GNOME
 custom shortcut, etc.) already owns Caps Lock.
+If Caps Lock ever feels "dead" after a hard kill (`kill -9` / crashed
+daemon), run `dictate stop` (or `dictate start`) — it restores the X11
+mapping. Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
 
 **Record and print (one-shot).** Run `dictate`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to

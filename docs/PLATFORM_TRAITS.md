@@ -50,18 +50,32 @@ original keysyms (ungrab + `ChangeKeyboardMapping`) on clean exit, panic
 unwinding, or graceful stop.
 
 **SIGKILL limitation.** `kill -9` / `SIGKILL` never runs `Drop`, so the
-keycode stays mapped to `NoSymbol` and Caps Lock appears "dead" until
-something remaps it. The next daemon start detects an all-`NoSymbol` mapping
-and synthesizes plain `Caps_Lock` as the restore payload, so a subsequent
-clean exit hands the key back. Manual recovery on a typical PC keyboard
-(X11 keycode **66**):
+keycode stays mapped to `NoSymbol` and Caps Lock appears "dead" even with
+the daemon gone. Looking up `Caps_Lock` by keysym alone also fails in that
+state, so older builds could not self-heal on the next start.
+
+Recovery order now:
+
+1. `dictate stop` / `dictate start` call `restore_caps_lock_mapping()` —
+   resolves the keycode via live keysym, then `~/.cache/dictate/caps_keycode`,
+   then PC fallback **66**, and writes plain `Caps_Lock` when the slot is
+   all-`NoSymbol`.
+2. Next `grab_caps_lock()` uses the same resolver before remapping again.
+3. Failed grabs after remap use an RAII guard so Caps Lock is restored even
+   when `Hotkey` was never constructed.
+
+Manual recovery on a typical PC keyboard (X11 keycode **66**):
 
 ```bash
 xmodmap -e 'keycode 66 = Caps_Lock'
+# or:
+dictate stop
 ```
 
 Restore helpers (`recover_orig_keysyms`, `nosymbol_mapping`,
-`caps_lock_restore_keysyms`) are unit-tested without a live display.
+`caps_lock_restore_keysyms`, `resolve_caps_trigger`) are unit-tested without
+a live display. `dictate stop` waits longer before escalating to SIGKILL so
+a clean `Drop` is more likely mid-transcription.
 
 
 ### Linux Wayland (`linux_wayland` + `linux` facade)

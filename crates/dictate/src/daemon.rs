@@ -26,7 +26,7 @@ use dictate_core::config::{self, ApiConfig, Config};
 use dictate_core::dsp::{self, DspConfig};
 use dictate_core::stt::Transcriber;
 use dictate_core::text::{self, RefineConfig, TextConfig, TextPipeline};
-use dictate_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay};
+use dictate_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay, restore_caps_lock_mapping};
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
@@ -143,6 +143,18 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
+
+/// Best-effort: if a prior SIGKILL left Caps Lock as NoSymbol, put it back.
+fn repair_caps_lock_if_needed() {
+    match restore_caps_lock_mapping() {
+        Ok(true) => eprintln!(
+            "dictate: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("could not check/restore Caps Lock mapping: {e:#}"),
+    }
+}
+
 pub fn stop() -> Result<()> {
     let _lock = lifecycle_lock()?;
     let path = pid_path()?;
@@ -157,12 +169,14 @@ pub fn stop() -> Result<()> {
                     );
                 }
             }
-            // Wait briefly for a clean exit; escalate once.
-            for _ in 0..20 {
+            // Wait for a clean exit so Hotkey::Drop can restore Caps Lock.
+            // Mid-transcription does not poll SHUTDOWN, so allow several seconds
+            // before escalating to SIGKILL (which skips Drop).
+            for _ in 0..100 {
                 if !pid_alive(pid) {
                     break;
                 }
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(100));
             }
             if pid_alive(pid)
                 && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
@@ -189,6 +203,8 @@ pub fn stop() -> Result<()> {
             println!("Dictation not running.");
         }
     }
+    // SIGKILL (escalate below) skips Hotkey::Drop — repair NoSymbol Caps Lock.
+    repair_caps_lock_if_needed();
     Ok(())
 }
 
@@ -200,6 +216,9 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         println!("Hotkey: hold Caps Lock to speak; any other key cancels.");
         return Ok(());
     }
+
+    // Heal Caps Lock if a previous SIGKILL left it as NoSymbol.
+    repair_caps_lock_if_needed();
 
     // Fail before claiming "running" or writing a pidfile.
     preflight(cli)?;
@@ -258,6 +277,8 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         unsafe {
             libc::kill(child.id() as i32, libc::SIGKILL);
         }
+        // Child may have remapped Caps Lock before dying / before ready.
+        repair_caps_lock_if_needed();
         let tail = log_tail();
         if tail.is_empty() {
             bail!("daemon failed to become ready in 60s — see {}", log_file.display());

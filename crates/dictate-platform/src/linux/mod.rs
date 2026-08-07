@@ -40,6 +40,15 @@ impl Hotkey {
         }
     }
 
+    /// Restore Caps Lock if a prior daemon left it mapped to NoSymbol.
+    /// No-op on pure Wayland (no X11 mapping to repair).
+    pub fn restore_caps_lock_mapping() -> Result<bool> {
+        match hotkey_backend() {
+            HotkeyBackend::X11 => linux_x11::hotkey::restore_caps_lock_mapping(),
+            HotkeyBackend::Unavailable => Ok(false),
+        }
+    }
+
     pub fn drain_pending(&mut self) {
         self.inner.drain_pending();
     }
