@@ -33,13 +33,37 @@ overlay (`create(&UiConfig)`), xdotool typing via `Emitter` in `OutputMode::Type
 Null*: `NullHotkey` / `NullTyper` / `NullOverlay` — no-ops for tests and
 headless embedders.
 
-Windows / macOS: compile stubs in `windows.rs` / `macos.rs`.
-Same public surface as Linux (`Hotkey`, `HotkeyEvent`, `Overlay`/`create`,
-`Emitter`, `OutputMode`). Capability methods `bail!` with a corrective hint
-(`… not implemented yet — use Linux X11 or Null*`).
-`create` always returns `NullOverlay` so headless embeds work.
-Real backends next: RegisterHotKey + SendInput + layered window; CGEventTap +
-CGEvent + NSPanel.
+### Windows (`windows.rs`)
+
+Real minimal backends via `windows-sys`:
+
+- **Hotkey** — `WH_KEYBOARD_LL` Caps Lock hold (press/release). Caps Lock is
+  swallowed so Lock does not latch. Non-modifier physical keys while held
+  emit `Cancel` (injected `SendInput` keystrokes ignored via `LLKHF_INJECTED`).
+- **Typer / Emitter** — `SendInput` Unicode (`KEYEVENTF_UNICODE`); `'\n'`
+  uses `VK_RETURN`. Other control characters are stripped. `OutputMode::Type`
+  only; stdout mode refuses typing (fail-closed). Arming stays in core/session.
+- **Overlay** — **NullOverlay only for v1** (no layered HWND pill yet).
+  `create` returns `NullOverlay`; loud module docs mark the gap.
+
+Same public surface as Linux. Not live-session verified on this Linux host.
+
+### macOS (`macos.rs`)
+
+Real minimal backends (Accessibility required):
+
+- **Hotkey** — `CGEventTap` at HID for Caps Lock hold (KeyDown/KeyUp). Caps
+  Lock events are swallowed so Lock does not latch. Non-modifier keys while
+  held emit `Cancel`. Errors tell you to grant Accessibility to the
+  terminal/app under System Settings → Privacy & Security → Accessibility.
+- **Typer / Emitter** — `CGEvent` keyboard events with
+  `CGEventKeyboardSetUnicodeString` (no clipboard). `'\n'` uses Return;
+  other control characters are stripped. `OutputMode::Type` only; stdout
+  mode refuses typing (fail-closed). Arming stays in core/session.
+- **Overlay** — **NullOverlay only for v1** (no NSPanel yet). `create`
+  returns `NullOverlay`; loud module docs mark the gap.
+
+Same public surface as Linux. Not live-session verified on this Linux host.
 
 ## Verification
 
@@ -47,4 +71,5 @@ CGEvent + NSPanel.
 |---|---|
 | Linux X11 hotkey / type / pill | Implemented; live-session re-verify on axiomexec only |
 | Null* | Unit-tested / headless |
-| Windows / macOS | Compile stubs only — not runtime-verified |
+| macOS hotkey / type / NullOverlay | Implemented in tree; needs Accessibility on a Mac to runtime-verify |
+| Windows hotkey / type / NullOverlay | Implemented in tree; needs a Windows host to runtime-verify |
