@@ -228,9 +228,10 @@ enabled = true         # daemon listens on a local Unix socket
 
 Post-format **refine** (`[refine]`) collapses duplicate words, fixes a tiny
 set of spaced contractions / common ASR glitches, and strips space-before
-punctuation. It is offline-only (`backend = "rules"`); set `enabled = false`
-to skip it. Limits: tiny fixed tables, no re-casing of tokens, no network /
-LLM — embedders can swap a custom `RefineBackend` in-process.
+punctuation. Config knobs are only `enabled` and `backend = "rules"`; set
+`enabled = false` to skip it. RuleRefine stays offline (tiny fixed tables, no
+token re-casing, no network/LLM) — embedders can swap a custom
+`RefineBackend` in-process.
 
 ## Daemon API
 

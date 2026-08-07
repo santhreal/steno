@@ -1,9 +1,15 @@
-//! macOS OS backends: CGEvent typing, CGEventTap Caps Lock hotkey, NullOverlay.
+//! macOS OS backends: CGEvent typing, CGEventTap Caps Lock hotkey, AppKit overlay.
 //!
-//! ## Overlay (v1)
-//! There is **no NSPanel overlay yet**. [`create`] always returns
-//! [`NullOverlay`]. Status UI on macOS is intentionally headless until a
-//! real AppKit panel lands; hotkey + typing work without it.
+//! ## Overlay
+//! Minimal bottom-center [`NSPanel`] status chip (`objc2-app-kit`) implementing
+//! [`OverlayBackend`]. [`create`] returns [`NullOverlay`] when `ui.overlay =
+//! false` or `theme` is `null`/`none`/`off`; otherwise the chip.
+//!
+//! **Visual delta vs Linux X11 pill:** Linux draws an animated tiny-skia capsule
+//! (icon disc + waveform/spinner/check/x, soft shadow, recording timer). macOS
+//! ships a simpler AppKit chip — borderless floating `NSPanel` + `NSTextField`
+//! stage label only (no icon animation, no elapsed timer, system window shadow).
+//! Same stage labels and bottom-center placement; fail-open like Linux.
 //!
 //! ## Permissions
 //! Global taps and synthetic keystrokes require Accessibility trust. Failures
@@ -483,22 +489,70 @@ unsafe extern "C" {
     ) -> bool;
 }
 
-/// Status overlay stub. Prefer [`create`] — v1 ships [`NullOverlay`] only
-/// (no NSPanel yet). Methods are no-ops so accidental construction is safe.
-pub struct Overlay;
+/// Stage label shared with the Linux pill (Recording→"Transcribing", etc.).
+fn label(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Hidden => "",
+        Stage::Recording => "Transcribing",
+        Stage::Transcribing => "Processing",
+        Stage::Done => "Done",
+        Stage::Error => "Error",
+    }
+}
+
+/// Minimal AppKit status chip (`NSPanel` + `NSTextField`).
+///
+/// Pure display: nonactivating floating panel, ignores mouse, takes no focus.
+/// Cosmetic and fail-open — AppKit/init failures disable the overlay without
+/// affecting dictation.
+pub struct Overlay {
+    tx: Option<Sender<Stage>>,
+    /// Set when the overlay thread failed to start or aborted.
+    failed: Arc<AtomicBool>,
+}
 
 impl Overlay {
-    pub fn start(_cfg: &UiConfig) -> Self {
-        Self
+    /// Start the AppKit overlay thread, or a no-op handle when disabled.
+    pub fn start(cfg: &UiConfig) -> Self {
+        let failed = Arc::new(AtomicBool::new(false));
+        if !cfg.overlay {
+            return Self { tx: None, failed };
+        }
+        let (tx, rx) = mpsc::channel::<Stage>();
+        let failed2 = failed.clone();
+        match thread::Builder::new()
+            .name("dictate-overlay".into())
+            .spawn(move || run_overlay(rx, failed2))
+        {
+            Ok(_) => Self {
+                tx: Some(tx),
+                failed,
+            },
+            Err(e) => {
+                log::debug!("overlay disabled: cannot spawn thread: {e}");
+                Self { tx: None, failed }
+            }
+        }
     }
 
-    pub fn set(&self, _stage: Stage) {}
+    pub fn set(&self, stage: Stage) {
+        if let Some(tx) = &self.tx {
+            // A dead overlay thread must never block dictation.
+            let _ = tx.send(stage);
+        }
+    }
 
+    /// True unless the overlay is disabled or already known-dead.
     pub fn active(&self) -> bool {
-        false
+        self.tx.is_some() && !self.failed.load(Ordering::Relaxed)
     }
 
-    pub fn flash(&self, _ms: u64) {}
+    /// Keep the final stage visible briefly before the caller hides it.
+    pub fn flash(&self, ms: u64) {
+        if self.active() {
+            thread::sleep(Duration::from_millis(ms));
+        }
+    }
 }
 
 impl OverlayBackend for Overlay {
@@ -515,10 +569,221 @@ impl OverlayBackend for Overlay {
     }
 }
 
-/// Always returns [`NullOverlay`].
+/// Build an overlay from [`UiConfig`].
 ///
-/// **macOS v1 has no visual overlay** (NSPanel deferred). Headless embeds and
-/// daemon status still work; use Linux X11 for the pill UI.
-pub fn create(_cfg: &UiConfig) -> Box<dyn OverlayBackend> {
-    Box::new(NullOverlay)
+/// - `overlay = false` → [`NullOverlay`]
+/// - `theme` of `"null"` / `"none"` / `"off"` → [`NullOverlay`]
+/// - `"pill"`, empty, or unknown → AppKit [`Overlay`] (unknown logs a warning)
+pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
+    if !cfg.overlay {
+        return Box::new(NullOverlay);
+    }
+    match cfg.theme.as_str() {
+        "null" | "none" | "off" => Box::new(NullOverlay),
+        "pill" | "" => Box::new(Overlay::start(cfg)),
+        other => {
+            log::warn!("unknown ui.theme {other:?}; falling back to pill");
+            Box::new(Overlay::start(cfg))
+        }
+    }
+}
+
+/// Logical padding / placement for the status chip (not a pixel-match of the
+/// Linux pill — see module docs for the visual delta).
+mod chip {
+    pub const PAD_X: f64 = 14.0;
+    pub const PAD_Y: f64 = 8.0;
+    pub const LABEL_PX: f64 = 13.0;
+    pub const BOTTOM_MARGIN: f64 = 48.0;
+}
+
+fn run_overlay(rx: Receiver<Stage>, failed: Arc<AtomicBool>) {
+    if let Err(e) = run_overlay_inner(rx) {
+        log::debug!("overlay disabled: {e}");
+        failed.store(true, Ordering::Relaxed);
+    }
+}
+
+fn run_overlay_inner(rx: Receiver<Stage>) -> Result<()> {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEventMask,
+        NSFont, NSPanel, NSStatusWindowLevel, NSTextAlignment, NSTextField,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
+    };
+    use objc2_foundation::{
+        NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, ns_string,
+    };
+
+    // AppKit is main-thread-affine. This dedicated overlay thread becomes the
+    // AppKit "main" for the accessory NSApp we create here (daemon has no UI
+    // run loop of its own). Fail-open on any subsequent AppKit error.
+    // SAFETY: we never hand this marker to another thread; all AppKit calls
+    // below stay on this worker for its lifetime.
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+    let app = NSApplication::sharedApplication(mtm);
+    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(120.0, 36.0)),
+        style,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    // SAFETY: panel is retained by this thread until we order it out and drop.
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(true);
+    panel.setLevel(NSStatusWindowLevel);
+    panel.setIgnoresMouseEvents(true);
+    panel.setFloatingPanel(true);
+    panel.setBecomesKeyOnlyIfNeeded(true);
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+
+    let label_view = NSTextField::labelWithString(ns_string!(""), mtm);
+    label_view.setEditable(false);
+    label_view.setSelectable(false);
+    label_view.setBezeled(false);
+    label_view.setDrawsBackground(true);
+    label_view.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        1.0, 1.0, 1.0, 0.94,
+    )));
+    label_view.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+        17.0 / 255.0,
+        17.0 / 255.0,
+        17.0 / 255.0,
+        1.0,
+    )));
+    label_view.setAlignment(NSTextAlignment::Center);
+    label_view.setFont(Some(&NSFont::systemFontOfSize(chip::LABEL_PX)));
+
+    let content = panel
+        .contentView()
+        .ok_or_else(|| anyhow::anyhow!("NSPanel missing contentView"))?;
+    content.setWantsLayer(true);
+    // label_view is an NSTextField (NSView subclass); retained by content.
+    content.addSubview(&label_view);
+
+    let mut current = Stage::Hidden;
+    apply_stage(&panel, &label_view, mtm, current)?;
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(stage) => {
+                current = stage;
+                while let Ok(more) = rx.try_recv() {
+                    current = more;
+                }
+                apply_stage(&panel, &label_view, mtm, current)?;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Non-blocking AppKit pump so orderFront/orderOut take effect.
+        loop {
+            // SAFETY: NSDefaultRunLoopMode is a process-wide immutable CFString.
+            let event = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::Any,
+                Some(&NSDate::distantPast()),
+                unsafe { NSDefaultRunLoopMode },
+                true,
+            );
+            match event {
+                Some(ev) => app.sendEvent(&ev),
+                None => break,
+            }
+        }
+    }
+
+    panel.orderOut(None);
+    drop(panel);
+    Ok(())
+}
+
+fn apply_stage(
+    panel: &objc2_app_kit::NSPanel,
+    label_view: &objc2_app_kit::NSTextField,
+    mtm: objc2::MainThreadMarker,
+    stage: Stage,
+) -> Result<()> {
+    use objc2_app_kit::NSScreen;
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    if stage == Stage::Hidden {
+        panel.orderOut(None);
+        return Ok(());
+    }
+
+    let text = label(stage);
+    let ns = NSString::from_str(text);
+    label_view.setStringValue(&ns);
+    label_view.sizeToFit();
+
+    let lf = label_view.frame();
+    let chip_w = lf.size.width + chip::PAD_X * 2.0;
+    let chip_h = lf.size.height + chip::PAD_Y * 2.0;
+    label_view.setFrame(NSRect::new(
+        NSPoint::new(chip::PAD_X, chip::PAD_Y),
+        lf.size,
+    ));
+
+    let screen = NSScreen::mainScreen(mtm)
+        .ok_or_else(|| anyhow::anyhow!("no main NSScreen for overlay"))?;
+    let vis = screen.visibleFrame();
+    let x = vis.origin.x + (vis.size.width - chip_w) * 0.5;
+    let y = vis.origin.y + chip::BOTTOM_MARGIN;
+    panel.setFrame_display(
+        NSRect::new(NSPoint::new(x, y), NSSize::new(chip_w, chip_h)),
+        true,
+    );
+    panel.orderFrontRegardless();
+    Ok(())
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn create_with_overlay_false_is_null() {
+        let cfg = UiConfig {
+            overlay: false,
+            ..UiConfig::default()
+        };
+        let ov = create(&cfg);
+        ov.set(Stage::Recording);
+        ov.flash(0);
+        assert!(!ov.active());
+    }
+
+    #[test]
+    fn create_theme_null_aliases_are_null() {
+        for theme in ["null", "none", "off"] {
+            let cfg = UiConfig {
+                theme: theme.to_string(),
+                ..UiConfig::default()
+            };
+            let ov = create(&cfg);
+            ov.set(Stage::Done);
+            assert!(!ov.active(), "theme {theme}");
+        }
+    }
+
+    #[test]
+    fn stage_labels_match_linux() {
+        assert_eq!(label(Stage::Recording), "Transcribing");
+        assert_eq!(label(Stage::Transcribing), "Processing");
+        assert_eq!(label(Stage::Done), "Done");
+        assert_eq!(label(Stage::Error), "Error");
+        assert_eq!(label(Stage::Hidden), "");
+    }
 }

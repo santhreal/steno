@@ -65,8 +65,20 @@ Real minimal backends via `windows-sys`:
 - **Typer / Emitter** — `SendInput` Unicode (`KEYEVENTF_UNICODE`); `'\n'`
   uses `VK_RETURN`. Other control characters are stripped. `OutputMode::Type`
   only; stdout mode refuses typing (fail-closed). Arming stays in core/session.
-- **Overlay** — **NullOverlay only for v1** (no layered HWND pill yet).
-  `create` returns `NullOverlay`; loud module docs mark the gap.
+- **Overlay** — layered topmost HWND status chip via `UpdateLayeredWindow`
+  + tiny-skia/fontdue. `create(&UiConfig)` returns the real `Overlay` when
+  `overlay = true` and theme is not `null|none|off`; those cases (and
+  `overlay = false`) still select `NullOverlay`. Stages match Linux labels
+  (`Recording` → "Transcribing", `Transcribing` → "Processing"). **Visual
+  delta vs Linux X11 pill:** simplified rounded chip (stage label + basic
+  icon animation: waveform / spinner / check / x), flat offset shadow only
+  (no soft CSS blur), no recording timer meta, no stage-change scale pulse,
+  no DPI scale factor beyond primary work-area placement. Fail-open on
+  HWND/font/GDI errors. Not live-session verified on this Linux host
+  (no local UI soak). Full `cargo check -p dictate-platform --target
+  x86_64-pc-windows-gnu` is blocked by `dictate-core` Unix-socket API
+  (`std::os::unix`); `windows.rs` itself typechecks green for that target
+  in isolation.
 
 Same public surface as Linux. Not live-session verified on this Linux host.
 
@@ -82,8 +94,12 @@ Real minimal backends (Accessibility required):
   `CGEventKeyboardSetUnicodeString` (no clipboard). `'\n'` uses Return;
   other control characters are stripped. `OutputMode::Type` only; stdout
   mode refuses typing (fail-closed). Arming stays in core/session.
-- **Overlay** — **NullOverlay only for v1** (no NSPanel yet). `create`
-  returns `NullOverlay`; loud module docs mark the gap.
+- **Overlay** — minimal AppKit `NSPanel` status chip (`create(&UiConfig)`).
+  `overlay = false` or `theme` `null`/`none`/`off` → `NullOverlay`; otherwise
+  the chip. Same `OverlayBackend` stages/labels as Linux. **Visual delta:**
+  Linux pill is an animated tiny-skia capsule (icon + waveform/spinner/check,
+  shadow, recording timer); macOS is a simpler floating `NSPanel` +
+  `NSTextField` label only (no icon animation / timer). Fail-open.
 
 Same public surface as Linux. Not live-session verified on this Linux host.
 
@@ -93,5 +109,5 @@ Same public surface as Linux. Not live-session verified on this Linux host.
 |---|---|
 | Linux X11 hotkey / type / pill | Implemented; live-session re-verify on axiomexec only |
 | Null* | Unit-tested / headless |
-| macOS hotkey / type / NullOverlay | Implemented in tree; needs Accessibility on a Mac to runtime-verify |
-| Windows hotkey / type / NullOverlay | Implemented in tree; needs a Windows host to runtime-verify |
+| macOS hotkey / type / NSPanel chip | Implemented in tree; needs Accessibility + AppKit session on a Mac to runtime-verify |
+| Windows hotkey / type / status chip | Implemented in tree (layered HWND chip); needs a Windows host to runtime-verify |

@@ -76,9 +76,10 @@ unless the main agent asks.
    `Transcriber::load`. No silent fallback between providers.
 7. **Text pipeline order** — commands → dictionary → format → refine.
    Refine is wired and **on by default** (`[refine] enabled = true`,
-   `backend = "rules"` → `RuleRefine`). Offline only; embedders may inject
-   a custom `RefineBackend`. `enabled = false` → `NullRefine`. Limits:
-   tiny fixed rule tables, no token re-casing, no network/LLM in-tree.
+   `backend = "rules"` → `RuleRefine`). Config fields are only `enabled` +
+   `backend` (no max_* keys). Offline only; embedders may inject a custom
+   `RefineBackend`. `enabled = false` → `NullRefine`. RuleRefine scope: tiny
+   fixed rule tables, no token re-casing, no network/LLM in-tree.
 
 ## Text pipeline
 
