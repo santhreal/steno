@@ -453,7 +453,15 @@ fn trim_leading_silence(samples: &mut Vec<f32>, threshold: f32) {
     let mut cut = 0;
     while cut + hop <= samples.len() {
         let w = &samples[cut..cut + hop];
-        let rms = (w.iter().map(|s| s * s).sum::<f32>() / hop as f32).sqrt();
+        let rms = (w
+            .iter()
+            .map(|s| {
+                let val = if s.is_finite() { s.abs() } else { 0.0 };
+                val * val
+            })
+            .sum::<f32>()
+            / hop as f32)
+            .sqrt();
         if rms >= threshold {
             break;
         }
@@ -540,6 +548,16 @@ mod tests {
         // Leading silence followed by speech: exactly the silent prefix
         // (3 full windows) is removed, the loud tail is untouched.
         let mut s = vec![0.0f32; 480];
+        s.extend_from_slice(&vec![0.5f32; 320]);
+        trim_leading_silence(&mut s, 0.01);
+        assert_eq!(s.len(), 320);
+        assert!(s.iter().all(|&v| v == 0.5));
+    }
+    /// WHY: trim_leading_silence must treat non-finite samples (NaN/Inf) as
+    /// silence (0.0 magnitude) rather than energy > threshold or causing panics/NaNs.
+    #[test]
+    fn trim_leading_silence_handles_nan_samples_safely() {
+        let mut s = vec![f32::NAN; 480];
         s.extend_from_slice(&vec![0.5f32; 320]);
         trim_leading_silence(&mut s, 0.01);
         assert_eq!(s.len(), 320);

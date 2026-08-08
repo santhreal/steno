@@ -655,31 +655,36 @@ fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()
             continue;
         }
 
-        let line = std::str::from_utf8(&buf).map_err(|_| {
-            anyhow::anyhow!(
-                "API client sent non-UTF-8 data — send UTF-8 NDJSON lines ending with \\n"
-            )
-        })?;
+        let line = match std::str::from_utf8(&buf) {
+            Ok(s) => s,
+            Err(_) => {
+                let id = peek_request_id(&String::from_utf8_lossy(&buf)).unwrap_or(0);
+                let response = Response::err(
+                    id,
+                    "API client sent non-UTF-8 data — send UTF-8 NDJSON lines ending with \\n",
+                    Some("send UTF-8 NDJSON lines ending with \\n".into()),
+                );
+                let _ = write_response(&mut writer, &response);
+                return Ok(());
+            }
+        };
 
         let response = match decode_line::<Request>(line) {
             Ok(req) => dispatch(handler, req),
-            Err(err) => match peek_request_id(line) {
-                Some(id) => Response::err(
+            Err(err) => {
+                let id = peek_request_id(line).unwrap_or(0);
+                let response = Response::err(
                     id,
                     format!("invalid request JSON: {err}"),
                     Some(
                         "send one JSON object per line with fields id (u64) and op (string)"
                             .into(),
                     ),
-                ),
-                None => {
-                    // No id → cannot correlate a reply; drop the frame.
-                    log::warn!("dropping unparseable API line without id: {err}");
-                    continue;
-                }
-            },
+                );
+                let _ = write_response(&mut writer, &response);
+                return Ok(());
+            }
         };
-
         write_response(&mut writer, &response)?;
     }
     Ok(())
@@ -1302,14 +1307,15 @@ mod tests {
 
     #[test]
     fn framing_malformed_and_unknown_method_errors() {
-        // WHY: unknown op / bad shape with an id must reply Error(id); frames
-        // without a peekable id are dropped so a later valid request still works.
+        // WHY: unknown op, bad shape, or non-UTF-8 line must send an Error(id) response frame
+        // and then close the socket connection.
         let (path, stop, thread) = spawn_stub_server("badframe");
+
+        // 1. Unknown method with peekable id → err reply (id=9), then socket closed.
         let stream = connect_raw_with_retry(&path);
         let mut writer = stream.try_clone().expect("clone for write");
         let mut reader = BufReader::new(stream);
 
-        // Unknown method: valid JSON, peeks id, Request decode fails → err reply.
         writer
             .write_all(br#"{"id":9,"op":"nope"}
 "#)
@@ -1332,36 +1338,71 @@ mod tests {
                 .is_some_and(|h| h.contains("id") && h.contains("op")),
             "hint should guide wire shape: {unknown:?}"
         );
+        let mut eof_buf = Vec::new();
+        assert_eq!(
+            reader.read_until(b'\n', &mut eof_buf).expect("read eof"),
+            0,
+            "socket connection must close after sending error response"
+        );
+        drop(writer);
+        drop(reader);
 
-        // Malformed JSON that still carries a peekable id → err reply.
-        writer
-            .write_all(br#"{"id":10,"op":123}
-"#)
-            .expect("bad op type write");
-        writer.flush().expect("flush bad op type");
-        let bad_shape = read_response_line(&mut reader);
-        assert!(!bad_shape.ok, "{bad_shape:?}");
-        assert_eq!(bad_shape.id, 10);
+        // 2. Malformed JSON without peekable id → err reply (id=0), then socket closed.
+        let stream2 = connect_raw_with_retry(&path);
+        let mut writer2 = stream2.try_clone().expect("clone for write");
+        let mut reader2 = BufReader::new(stream2);
+
+        writer2
+            .write_all(b"not-json-at-all\n")
+            .expect("malformed write");
+        writer2.flush().expect("flush malformed");
+        let no_id = read_response_line(&mut reader2);
+        assert!(!no_id.ok, "{no_id:?}");
+        assert_eq!(no_id.id, 0);
         assert!(
-            bad_shape
+            no_id
                 .error
                 .as_deref()
                 .is_some_and(|e| e.contains("invalid request JSON")),
-            "unexpected error: {bad_shape:?}"
+            "unexpected error: {no_id:?}"
         );
+        let mut eof_buf2 = Vec::new();
+        assert_eq!(
+            reader2.read_until(b'\n', &mut eof_buf2).expect("read eof"),
+            0,
+            "socket connection must close after sending error response"
+        );
+        drop(writer2);
+        drop(reader2);
 
-        // Unparseable line with no id is dropped; following ping must still work.
-        writer
-            .write_all(b"not-json-at-all\n{\"id\":11,\"op\":\"ping\"}\n")
-            .expect("drop+ping write");
-        writer.flush().expect("flush drop+ping");
-        let ping = read_response_line(&mut reader);
-        assert!(ping.ok, "{ping:?}");
-        assert_eq!(ping.id, 11);
-        assert_eq!(ping.result, Some(json!({"pong": true})));
+        // 3. Invalid UTF-8 → err reply (id=0), then socket closed.
+        let stream3 = connect_raw_with_retry(&path);
+        let mut writer3 = stream3.try_clone().expect("clone for write");
+        let mut reader3 = BufReader::new(stream3);
 
-        drop(writer);
-        drop(reader);
+        writer3
+            .write_all(b"\xFF\xFE\xFD\n")
+            .expect("invalid utf-8 write");
+        writer3.flush().expect("flush invalid utf-8");
+        let bad_utf8 = read_response_line(&mut reader3);
+        assert!(!bad_utf8.ok, "{bad_utf8:?}");
+        assert_eq!(bad_utf8.id, 0);
+        assert!(
+            bad_utf8
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("non-UTF-8")),
+            "unexpected error: {bad_utf8:?}"
+        );
+        let mut eof_buf3 = Vec::new();
+        assert_eq!(
+            reader3.read_until(b'\n', &mut eof_buf3).expect("read eof"),
+            0,
+            "socket connection must close after sending error response"
+        );
+        drop(writer3);
+        drop(reader3);
+
         shutdown_server(&path, &stop, thread);
     }
 }

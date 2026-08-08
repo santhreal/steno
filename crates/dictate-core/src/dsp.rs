@@ -230,13 +230,21 @@ impl DcBlock {
             r,
         }
     }
+    /// Process a single sample, guarding against non-finite samples.
+    pub fn process_sample(&mut self, x: f32) -> f32 {
+        if !x.is_finite() {
+            return 0.0;
+        }
+        let y = x - self.x1 + self.r * self.y1;
+        self.x1 = x;
+        self.y1 = y;
+        y
+    }
+
     /// Process audio samples in-place to remove DC offset.
     pub fn process(&mut self, samples: &mut [f32]) {
         for s in samples.iter_mut() {
-            let y = *s - self.x1 + self.r * self.y1;
-            self.x1 = *s;
-            self.y1 = y;
-            *s = y;
+            *s = self.process_sample(*s);
         }
     }
 }
@@ -253,7 +261,11 @@ pub fn normalize(samples: &mut [f32], target_rms: f32, max_gain: f32) {
     if samples.is_empty() || !target_rms.is_finite() || target_rms <= 0.0 {
         return;
     }
-    // f32::max discards a NaN operand, so NaN/<=0/<1 all become 1.0 and
+    for s in samples.iter_mut() {
+        if !s.is_finite() {
+            *s = 0.0f32;
+        }
+    }
     // the clamp range below degenerates to [1.0, 1.0] (a no-op) instead
     // of panicking on min > max.
     let max_gain = max_gain.max(1.0);
@@ -918,5 +930,33 @@ mod tests {
         let nan_chunk = vec![f32::NAN; CHUNK];
         assert_eq!(ep.feed(&nan_chunk), VadEvent::WaitingForSpeech);
         assert!(!ep.speech_started());
+    }
+    /// WHY: Non-finite samples (NaN/Inf) must not poison DcBlock state (y1) or
+    /// normalize RMS computation. DcBlock must replace non-finite inputs with
+    /// 0.0 without corrupting future samples, and normalize must clean non-finite
+    /// samples before computing RMS and scaling.
+    #[test]
+    fn dcblock_handles_nan_and_non_finite_samples_safely() {
+        let mut dc = DcBlock::new(16_000);
+        let mut signal = vec![0.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.5];
+        dc.process(&mut signal);
+
+        assert!(signal.iter().all(|s| s.is_finite()), "all samples must be finite");
+        assert_eq!(signal[1], 0.0, "NaN sample must be replaced with 0.0");
+        assert_eq!(signal[2], 0.0, "+Inf sample must be replaced with 0.0");
+        assert_eq!(signal[3], 0.0, "-Inf sample must be replaced with 0.0");
+        // State y1 was not poisoned: sample at index 4 is non-NaN.
+        assert!(signal[4].is_finite() && signal[4] != 0.0);
+    }
+
+    #[test]
+    fn normalize_handles_nan_and_non_finite_samples_safely() {
+        let mut signal = vec![0.02, f32::NAN, f32::INFINITY, -0.02];
+        normalize(&mut signal, 0.1, 8.0);
+
+        assert!(signal.iter().all(|s| s.is_finite()), "all samples must be finite");
+        assert_eq!(signal[1], 0.0, "NaN sample must be replaced with 0.0");
+        assert_eq!(signal[2], 0.0, "Inf sample must be replaced with 0.0");
+        assert!(signal[0] > 0.02, "valid finite samples must be scaled properly");
     }
 }

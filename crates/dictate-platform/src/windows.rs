@@ -670,7 +670,8 @@ fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>, ui: Reso
 
 fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     let font = load_font().context("overlay font")?;
-    let hwnd = unsafe { create_chip_window() }.context("create status chip HWND")?;
+    let raw_hwnd = unsafe { create_chip_window() }.context("create status chip HWND")?;
+    let mut hwnd = HwndGuard(raw_hwnd);
     let mut layer = unsafe { LayerBuffer::new(chip::WIN_W as i32, chip::WIN_H as i32) }
         .context("CreateDIBSection for status chip")?;
     let mut pixmap = SkPixmap::new(chip::WIN_W, chip::WIN_H)
@@ -690,7 +691,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_QUIT {
-                    destroy_chip(hwnd, &mut layer);
+                    destroy_chip(&mut hwnd, &mut layer);
                     return Ok(());
                 }
                 let _ = TranslateMessage(&msg);
@@ -712,7 +713,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    destroy_chip(hwnd, &mut layer);
+                    destroy_chip(&mut hwnd, &mut layer);
                     return Ok(());
                 }
             }
@@ -721,7 +722,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         if stage == Stage::Hidden {
             if visible {
                 unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    let _ = ShowWindow(hwnd.raw(), SW_HIDE);
                 }
                 visible = false;
             }
@@ -736,7 +737,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
-                    destroy_chip(hwnd, &mut layer);
+                    destroy_chip(&mut hwnd, &mut layer);
                     return Ok(());
                 }
             }
@@ -751,9 +752,9 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         draw_chip(&mut pixmap, &mut shadow_mask, &font, stage, anim_t, stage_age, rec_secs, ui);
         unsafe {
             layer.blit_skia(&pixmap)?;
-            present_chip(hwnd, &layer)?;
+            present_chip(hwnd.raw(), &layer)?;
             if !visible {
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(hwnd.raw(), SW_SHOWNOACTIVATE);
                 visible = true;
             }
         }
@@ -825,13 +826,35 @@ unsafe extern "system" fn chip_wnd_proc(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-fn destroy_chip(hwnd: HWND, layer: &mut LayerBuffer) {
-    layer.destroy();
-    if !hwnd.is_null() {
-        unsafe {
-            let _ = DestroyWindow(hwnd);
+/// RAII cleanup guard for a Win32 HWND. Destroys the window handle via
+/// `DestroyWindow` on drop if non-null, ensuring HWND resources are cleaned up
+/// on early return paths or panics.
+struct HwndGuard(HWND);
+
+impl HwndGuard {
+    fn raw(&self) -> HWND {
+        self.0
+    }
+
+    fn destroy(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
+            self.0 = std::ptr::null_mut();
         }
     }
+}
+
+impl Drop for HwndGuard {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
+fn destroy_chip(hwnd: &mut HwndGuard, layer: &mut LayerBuffer) {
+    layer.destroy();
+    hwnd.destroy();
 }
 
 unsafe fn present_chip(hwnd: HWND, layer: &LayerBuffer) -> Result<()> {
@@ -1657,5 +1680,15 @@ mod tests {
         let edge = pm.pixel(32, 20).expect("edge").alpha();
         assert!(center > edge, "center {center} should exceed edge {edge} after blur");
         assert!(edge > 0, "blur must spill alpha past the hard disc");
+    }
+
+    #[test]
+    fn hwnd_guard_null_and_destroy_safety() {
+        // WHY: HWND guard must safely handle null handles without panicking,
+        // and explicit destroy() must set the handle to null so drop() is idempotent.
+        let mut guard = super::HwndGuard(std::ptr::null_mut());
+        assert!(guard.raw().is_null());
+        guard.destroy();
+        assert!(guard.raw().is_null());
     }
 }
