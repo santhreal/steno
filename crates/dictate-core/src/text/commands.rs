@@ -280,6 +280,8 @@ pub fn apply(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Voice dictation commands (punctuation, newlines, paragraphs, scratch-that deletion)
+    //! must execute predictably and keep docs in sync with phrase matching.
     use super::*;
 
     /// Every documented phrase must actually trigger its action, and the

@@ -4,6 +4,7 @@ pub mod hotkey;
 pub mod output;
 pub mod overlay;
 
-pub use hotkey::{Hotkey, HotkeyEvent, restore_caps_lock_mapping};
-pub use output::{Emitter, OutputMode};
+pub use hotkey::{Hotkey, restore_caps_lock_mapping};
+pub use output::Emitter;
 pub use overlay::{Overlay, create};
+pub use crate::traits::{HotkeyEvent, OutputMode};

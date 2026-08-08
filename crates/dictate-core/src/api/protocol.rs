@@ -129,6 +129,8 @@ pub fn peek_request_id(line: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Protocol framing, request/response serialization, op discrimination, and error payload
+    //! formatting must stay wire-compatible across IPC API updates.
     use super::*;
     use serde_json::json;
 

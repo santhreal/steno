@@ -9,7 +9,7 @@ use crate::HotkeyEvent;
 pub use dictate_core::overlay::NullOverlay;
 
 /// Never emits hotkey events (polls as Cancel-free idle).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NullHotkey;
 
 impl NullHotkey {
@@ -29,7 +29,7 @@ impl HotkeySource for NullHotkey {
 }
 
 /// Never types. Prefer this whenever typing must stay disarmed.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NullTyper;
 
 impl NullTyper {
@@ -52,6 +52,8 @@ impl InjectTyper for NullTyper {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Headless/fallback platform implementations (`NullHotkey`, `NullTyper`) must operate
+    //! without side effects or panics when running in headless environments or tests.
     use super::*;
 
     #[test]
@@ -66,5 +68,12 @@ mod tests {
         let mut typer = NullTyper::new();
         assert!(crate::traits::Typer::type_text(&mut typer, "test").is_ok());
         assert!(InjectTyper::type_text(&mut typer, "test").is_ok());
+    }
+
+    /// WHY: Verify `NullHotkey` and `NullTyper` derive `PartialEq, Eq` for equivalence checks in test environments.
+    #[test]
+    fn test_null_types_partial_eq() {
+        assert_eq!(NullHotkey::new(), NullHotkey::default());
+        assert_eq!(NullTyper::new(), NullTyper::default());
     }
 }

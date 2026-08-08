@@ -20,16 +20,82 @@ pub mod macos;
 pub use dictate_core::InjectTyper;
 pub use dictate_core::overlay::{NullOverlay, OverlayBackend, Stage};
 pub use null::{NullHotkey, NullTyper};
-pub use traits::{HotkeySource, Typer};
+pub use traits::{HotkeyEvent, HotkeySource, OutputMode, Typer};
 
 #[cfg(target_os = "linux")]
-pub use linux::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create, create as create_overlay};
+pub use linux::{Emitter, Hotkey, Overlay, create, create as create_overlay};
 #[cfg(target_os = "linux")]
 pub use linux_x11::restore_caps_lock_mapping;
 #[cfg(target_os = "windows")]
-pub use windows::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create, create as create_overlay};
+pub use windows::{Emitter, Hotkey, Overlay, create, create as create_overlay};
 #[cfg(target_os = "macos")]
-pub use macos::{Emitter, Hotkey, HotkeyEvent, OutputMode, Overlay, create, create as create_overlay};
+pub use macos::{Emitter, Hotkey, Overlay, create, create as create_overlay};
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+pub mod fallback {
+    use anyhow::Result;
+    use dictate_core::config::UiConfig;
+    use dictate_core::overlay::{NullOverlay, OverlayBackend};
+
+    use crate::null::{NullHotkey, NullTyper};
+    use crate::traits::{HotkeySource, OutputMode, Typer};
+
+    /// Fallback hotkey source returning `NullHotkey`.
+    pub type Hotkey = FallbackHotkey;
+    /// Fallback keystroke injector returning `NullTyper`.
+    pub type Emitter = FallbackEmitter;
+    /// Fallback overlay backend returning `NullOverlay`.
+    pub type Overlay = NullOverlay;
+
+    /// Fallback hotkey wrapper for non-tier-1 targets.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct FallbackHotkey(NullHotkey);
+
+    impl FallbackHotkey {
+        pub fn grab_caps_lock() -> Result<Self> {
+            Ok(Self(NullHotkey::new()))
+        }
+    }
+
+    impl HotkeySource for FallbackHotkey {
+        fn next_event(&mut self) -> Result<crate::traits::HotkeyEvent> {
+            self.0.next_event()
+        }
+
+        fn drain_pending(&mut self) {
+            self.0.drain_pending();
+        }
+    }
+
+    /// Fallback typer wrapper for non-tier-1 targets.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct FallbackEmitter(NullTyper);
+
+    impl FallbackEmitter {
+        pub fn new(_mode: OutputMode) -> Self {
+            Self(NullTyper::new())
+        }
+    }
+
+    impl Typer for FallbackEmitter {
+        fn type_text(&mut self, text: &str) -> Result<()> {
+            self.0.type_text(text)
+        }
+    }
+
+    impl dictate_core::InjectTyper for FallbackEmitter {
+        fn type_text(&mut self, text: &str) -> Result<()> {
+            dictate_core::InjectTyper::type_text(&mut self.0, text)
+        }
+    }
+
+    pub fn create(_ui_cfg: &UiConfig) -> Box<dyn OverlayBackend> {
+        Box::new(NullOverlay)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+pub use fallback::{Emitter, Hotkey, Overlay, create, create as create_overlay};
 
 /// Create a platform hotkey source bound to Caps Lock.
 pub fn create_hotkey() -> anyhow::Result<Box<dyn HotkeySource>> {
@@ -49,6 +115,16 @@ pub struct PlatformBackends {
     pub overlay: Box<dyn OverlayBackend>,
 }
 
+impl std::fmt::Debug for PlatformBackends {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformBackends")
+            .field("hotkey", &"Box<dyn HotkeySource>")
+            .field("typer", &"Box<dyn InjectTyper>")
+            .field("overlay", &"Box<dyn OverlayBackend>")
+            .finish()
+    }
+}
+
 /// Construct all platform backends from output mode and UI configuration.
 pub fn create_platform_backends(
     mode: OutputMode,
@@ -66,6 +142,8 @@ pub fn create_platform_backends(
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Platform backend creation functions (`create_typer`, `create_overlay`, `create_platform_backends`)
+    //! must instantiate valid backends across supported target platforms.
     use super::*;
     use dictate_core::config::UiConfig;
 
@@ -105,5 +183,20 @@ mod tests {
     #[test]
     fn test_create_hotkey_call() {
         let _res = create_hotkey();
+    }
+
+    /// WHY: Verify `PlatformBackends` `Debug` implementation formats cleanly without unwrapping or panicking.
+    #[test]
+    fn test_platform_backends_debug() {
+        let hk: Box<dyn HotkeySource> = Box::new(null::NullHotkey::new());
+        let typer: Box<dyn InjectTyper> = Box::new(null::NullTyper::new());
+        let overlay: Box<dyn OverlayBackend> = Box::new(NullOverlay);
+        let backends = PlatformBackends {
+            hotkey: hk,
+            typer,
+            overlay,
+        };
+        let debug_str = format!("{backends:?}");
+        assert!(debug_str.contains("PlatformBackends"));
     }
 }

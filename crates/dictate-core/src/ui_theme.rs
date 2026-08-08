@@ -250,6 +250,8 @@ pub(crate) fn validate_color_overrides(colors: &UiColors, path: &std::path::Path
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Theme presets, hex color parsing, partial color overrides, and color range
+    //! validation must remain stable and reject malformed color strings.
     use super::*;
 
     #[test]

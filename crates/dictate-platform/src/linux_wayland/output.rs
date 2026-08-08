@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::linux_x11::OutputMode;
+use crate::traits::OutputMode;
 use crate::traits::Typer;
 use dictate_core::InjectTyper;
 use std::process::Command;

@@ -20,7 +20,8 @@ use selection::{
     pure_wayland_hotkey_error, pure_wayland_overlay_warn, typing_backend,
 };
 
-pub use linux_x11::{HotkeyEvent, OutputMode, Overlay};
+pub use linux_x11::Overlay;
+pub use crate::traits::{HotkeyEvent, OutputMode};
 
 /// Caps Lock hotkey. Pure Wayland without `DISPLAY` fails loudly; hybrid
 /// XWayland sessions reuse the X11 grab.

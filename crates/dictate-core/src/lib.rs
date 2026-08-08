@@ -10,7 +10,7 @@
 //! let text = engine.transcribe_f32(&pcm_16k)?;
 //! ```
 //!
-//! See `docs/EMBEDDING.md` for Session, OverlayBackend, RefineBackend, themes,
+//! See `docs/EMBEDDING.md` for [`Session`], [`OverlayBackend`], [`RefineBackend`], themes,
 //! and the daemon NDJSON API.
 
 pub mod api;
