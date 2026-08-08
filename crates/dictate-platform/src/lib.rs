@@ -149,13 +149,13 @@ mod tests {
 
     #[test]
     fn test_create_typer() {
-        // WHY: create_typer must instantiate a functional Box<dyn InjectTyper> for each OutputMode variant.
+        // WHY: create_typer must instantiate a functional Box<dyn InjectTyper> for each OutputMode variant
+        // without emitting live keystrokes into the host desktop during unit tests.
         for mode in [OutputMode::Stdout, OutputMode::Type] {
             let mut typer = create_typer(mode);
-            let res = typer.type_text("test string");
             if mode == OutputMode::Stdout {
                 // Stdout mode fails fail-closed in library unit tests
-                assert!(res.is_err());
+                assert!(typer.type_text("test string").is_err());
             }
         }
     }
