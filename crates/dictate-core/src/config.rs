@@ -416,6 +416,11 @@ fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Ite
                 item.type_name()
             );
         }
+        if item.is_inline_table() {
+            if let Some(inline) = item.as_inline_table().cloned() {
+                *item = toml_edit::Item::Table(inline.into_table());
+            }
+        }
         table = item.as_table_mut().expect("checked table");
         // Prefer explicit `[ui.colors]` style over dotted keys when we create.
         table.set_implicit(false);
@@ -562,7 +567,10 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
         models.sort();
     }
     match models.len() {
-        1 => Ok(models.into_iter().next().unwrap()),
+        1 => Ok(models
+            .into_iter()
+            .next()
+            .expect("single model directory guaranteed by len == 1 check")),
         0 => bail!("no sherpa-onnx model found in '{}' — {DOWNLOAD_HINT}", dir.display()),
         _ => bail!(
             "multiple models in '{}': {} — set model_path in the config to pick one",
@@ -1315,5 +1323,46 @@ theme = "pill"
         let err = error_of(config_set(&path, "ui.colour", "x"));
         fs::remove_file(&path).ok();
         assert!(err.contains("unsupported config key"), "{err}");
+    }
+
+    #[test]
+    fn set_dotted_converts_inline_table_to_standard_table() {
+        // WHY: setting nested keys inside an inline table must convert it to a standard Table
+        // rather than panicking on as_table_mut().
+        let mut doc = "ui = { theme = \"pill\" }"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        set_dotted(&mut doc, "ui.theme", toml_edit::value("dusk")).unwrap();
+        set_dotted(&mut doc, "ui.colors.fg", toml_edit::value("#112233FF")).unwrap();
+
+        assert_eq!(
+            get_dotted(&doc, "ui.theme").and_then(item_display).as_deref(),
+            Some("dusk")
+        );
+        assert_eq!(
+            get_dotted(&doc, "ui.colors.fg").and_then(item_display).as_deref(),
+            Some("#112233FF")
+        );
+    }
+
+    #[test]
+    fn config_set_handles_inline_tables_without_panic() {
+        let path = temp_file("inline-table.toml", b"ui = { theme = \"pill\" }\n");
+        config_set(&path, "ui.theme", "dusk").unwrap();
+        config_set(&path, "ui.colors.fg", "#AABBCCFF").unwrap();
+
+        assert_eq!(
+            config_get(&path, "ui.theme").unwrap().as_deref(),
+            Some("dusk")
+        );
+        assert_eq!(
+            config_get(&path, "ui.colors.fg").unwrap().as_deref(),
+            Some("#AABBCCFF")
+        );
+
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert_eq!(cfg.ui.theme, "dusk");
+        assert_eq!(cfg.ui.colors.fg.as_deref(), Some("#AABBCCFF"));
     }
 }

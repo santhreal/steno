@@ -21,10 +21,11 @@
 //! 2. Next `grab_caps_lock()` resolves the keycode via keysym, then a
 //!    persisted keycode cache, then PC-keyboard fallback 66 — looking
 //!    up Caps_Lock by keysym alone fails once the mapping is empty.
-//! Manual: `xmodmap -e 'keycode 66 = Caps_Lock'`
+//!
+//! Manual fix: `xmodmap -e 'keycode 66 = Caps_Lock'`
 
 use anyhow::{Context, Result, anyhow, bail};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -81,8 +82,8 @@ pub struct Hotkey {
     /// Keys whose XI2 presses arrived during CANCEL_GRACE (already held
     /// before Caps Lock). Their auto-repeats must not Cancel after grace.
     suppress_cancel: HashSet<Keycode>,
-    /// One peeked event held back from auto-repeat coalescing.
-    pending: Option<Event>,
+    /// Peeked events held back from auto-repeat coalescing.
+    pending: VecDeque<Event>,
     /// Modifier masks we grabbed (plain + Caps/NumLock variants).
     masks: Vec<ModMask>,
     /// Hold state for [`crate::HotkeySource::next_event`]. The daemon still
@@ -243,7 +244,7 @@ impl Hotkey {
             xtest_device,
             press_at: None,
             suppress_cancel: HashSet::new(),
-            pending: None,
+            pending: VecDeque::new(),
             masks,
             source_held: false,
         })
@@ -255,6 +256,7 @@ impl Hotkey {
     /// device filter).
     #[allow(dead_code)] // used by the daemon binary, not the example harness
     pub fn drain_pending(&mut self) {
+        self.pending.clear();
         let _ = self.conn.flush();
         while let Ok(Some(_)) = self.conn.poll_for_event() {}
     }
@@ -295,7 +297,7 @@ impl Hotkey {
             self.conn
                 .flush()
                 .context("X11 flush failed while waiting for Caps Lock")?;
-            let ev = match self.pending.take() {
+            let ev = match self.pending.pop_front() {
                 Some(e) => Some(e),
                 None => self.conn.poll_for_event().context("X11 poll failed")?,
             };
@@ -377,9 +379,7 @@ impl Hotkey {
                         // Drop deferred XI2 noise from this coalesce window.
                         continue;
                     }
-                    if let Some(first) = deferred.into_iter().next() {
-                        self.pending = Some(first);
-                    }
+                    self.pending.extend(deferred);
                     *held = false;
                     self.suppress_cancel.clear();
                     return Ok(HotkeyEvent::Release);
@@ -741,5 +741,63 @@ mod tests {
     #[test]
     fn pad_keysyms_fills_slots() {
         assert_eq!(pad_keysyms(&[XK_CAPS_LOCK], 4), vec![XK_CAPS_LOCK, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pending_queue_preserves_multiple_deferred_events_in_fifo_order() {
+        let mut queue: VecDeque<Event> = VecDeque::new();
+        let deferred = vec![
+            Event::KeyPress(x11rb::protocol::xproto::KeyPressEvent {
+                detail: 1,
+                time: 100,
+                response_type: 0,
+                sequence: 0,
+                root: 0,
+                event: 0,
+                child: 0,
+                root_x: 0,
+                root_y: 0,
+                event_x: 0,
+                event_y: 0,
+                state: 0u16.into(),
+                same_screen: false,
+            }),
+            Event::KeyPress(x11rb::protocol::xproto::KeyPressEvent {
+                detail: 2,
+                time: 200,
+                response_type: 0,
+                sequence: 0,
+                root: 0,
+                event: 0,
+                child: 0,
+                root_x: 0,
+                root_y: 0,
+                event_x: 0,
+                event_y: 0,
+                state: 0u16.into(),
+                same_screen: false,
+            }),
+            Event::KeyPress(x11rb::protocol::xproto::KeyPressEvent {
+                detail: 3,
+                time: 300,
+                response_type: 0,
+                sequence: 0,
+                root: 0,
+                event: 0,
+                child: 0,
+                root_x: 0,
+                root_y: 0,
+                event_x: 0,
+                event_y: 0,
+                state: 0u16.into(),
+                same_screen: false,
+            }),
+        ];
+        queue.extend(deferred);
+        assert_eq!(queue.len(), 3);
+        assert!(matches!(queue.pop_front(), Some(Event::KeyPress(e)) if e.detail == 1));
+        assert!(matches!(queue.pop_front(), Some(Event::KeyPress(e)) if e.detail == 2));
+        assert!(matches!(queue.pop_front(), Some(Event::KeyPress(e)) if e.detail == 3));
+        assert!(queue.pop_front().is_none());
     }
 }

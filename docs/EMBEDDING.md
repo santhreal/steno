@@ -321,6 +321,7 @@ Embedders running the socket server or embedding custom socket handlers use the 
 - **`serve_unix_with`**: Server accept loop function (`pub fn serve_unix_with(path: impl AsRef<Path>, handler: impl ApiHandler, stop: Option<Arc<AtomicBool>>, opts: ServeOptions) -> Result<()>`) that binds the socket, enforces directory permissions, authorizes peer UID (`opts.require_same_uid`), and dispatches incoming request lines.
 
 ## Library map
+
 | Module | Role |
 |--------|------|
 | `config` | Single TOML + path helpers + surgical get/set |

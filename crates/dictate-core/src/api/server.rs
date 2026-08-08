@@ -182,7 +182,16 @@ impl UtteranceBuffer {
                 Some("call utterance.start before utterance.audio".into()),
             ));
         }
-        let chunk = decode_pcm_f32_le_b64(pcm_f32_b64)?;
+        let chunk = match decode_pcm_f32_le_b64(pcm_f32_b64) {
+            Ok(c) => c,
+            Err(e) => {
+                if e.error.contains("exceeds max") {
+                    self.active = false;
+                    self.samples.clear();
+                }
+                return Err(e);
+            }
+        };
         let new_len = self.samples.len().saturating_add(chunk.len());
         if new_len > MAX_UTTERANCE_SAMPLES {
             self.active = false;

@@ -41,7 +41,7 @@ Linux: `linux` facade selects X11 vs Wayland. X11 path
 `Emitter` implements both `Typer` and `dictate_core::InjectTyper`. Pure Wayland
 uses `linux_wayland::Emitter` (`wtype` / `ydotool`); see below.
 
-#### Overlay themes (all platforms)
+### Overlay themes (all platforms)
 
 `create(&UiConfig)` still maps `overlay = false` and `theme` `null|none|off` to
 `NullOverlay`. Otherwise the platform overlay calls `resolve_ui` once at
@@ -50,7 +50,7 @@ uses `linux_wayland::Emitter` (`wtype` / `ydotool`); see below.
 `[ui.colors]` hex overrides and `[ui.stages]` labels apply through the same
 path. Unknown themes fall back to pill colors (fail-open).
 
-#### Caps Lock (Linux X11)
+### Caps Lock (Linux X11)
 
 Hold Caps Lock to record; release to stop. While the daemon runs, the Caps
 Lock keycode is remapped to `NoSymbol` so XKB cannot latch Lock — a passive

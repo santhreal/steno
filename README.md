@@ -11,7 +11,7 @@ the text up, and prints it — or types it into whatever window is focused.
 Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
 keeps the model loaded and listens for **Caps Lock** (hold to talk).
 
-```
+```console
 $ dictate
 This is a test of the Dictate System.
 The quick brown fox jumps over the lazy dog?
@@ -26,7 +26,7 @@ You need a Rust toolchain, a C compiler, and the sherpa-onnx CUDA shared
 libraries (or a CPU build) available at build time via
 `SHERPA_ONNX_LIB_DIR` (e.g. `/usr/local/lib/sherpa-onnx`).
 
-```
+```bash
 export SHERPA_ONNX_LIB_DIR=/usr/local/lib/sherpa-onnx
 cargo build -p dictate --release
 cargo install --path crates/dictate
@@ -52,7 +52,7 @@ DISPLAY, or GPU soak.
 `dictate` uses a sherpa-onnx **model directory** (encoder/decoder/joiner
 ONNX + `tokens.txt`). Recommended: NVIDIA Parakeet TDT v3 int8.
 
-```
+```bash
 mkdir -p ~/.local/share/dictate/models
 cd ~/.local/share/dictate/models
 curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
@@ -78,7 +78,7 @@ type_output = true
 model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 ```
 
-```
+```console
 $ dictate start
 Dictation running (PID 12345).
 Hotkey: hold Caps Lock to speak.
@@ -314,7 +314,7 @@ reloads config: `dictate restart`.
 
 Surgical helpers over the same TOML file (`--config` overrides the path):
 
-```
+```console
 $ dictate config show
 $ dictate config get ui.theme
 $ dictate config set ui.theme dusk
@@ -360,7 +360,7 @@ printf '%s\n' '{"id":3,"op":"transcribe","wav_path":"/path/to/clip.wav"}' \
 
 CLI helpers (same socket; optional `--socket`):
 
-```
+```console
 $ dictate ping
 $ dictate api status
 ```
@@ -372,7 +372,7 @@ types). `[api].require_same_uid` defaults true (SO_PEERCRED).
 
 ## How it works
 
-```
+```text
 mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── sherpa-onnx decode on the GPU (Parakeet TDT)

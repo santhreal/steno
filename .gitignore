@@ -9,3 +9,6 @@
 .vscode/
 .idea/
 .DS_Store
+
+# Local worker summary artifacts
+local/

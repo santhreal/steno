@@ -194,15 +194,16 @@ pub fn stop() -> Result<()> {
             }
             // Re-validate identity before SIGKILL — PID recycle during the wait
             // must not kill an unrelated process.
-            if pid_alive(pid) && pid_is_dictate(pid) {
-                if unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0 {
-                    let e = std::io::Error::last_os_error();
-                    if e.raw_os_error() == Some(libc::EPERM) {
-                        anyhow::bail!(
-                            "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
-                            path.display()
-                        );
-                    }
+            if pid_alive(pid)
+                && pid_is_dictate(pid)
+                && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
+            {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EPERM) {
+                    anyhow::bail!(
+                        "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
+                        path.display()
+                    );
                 }
             }
             if pid_alive(pid) && pid_is_dictate(pid) {
@@ -367,6 +368,7 @@ fn write_pid(pid: u32) -> Result<()> {
 
 struct PidGuard {
     socket: Option<PathBuf>,
+    ready: Option<PathBuf>,
     api_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -379,6 +381,9 @@ impl Drop for PidGuard {
             // Unblock a non-blocking accept loop waiting on WouldBlock / connect.
             let _ = std::os::unix::net::UnixStream::connect(&sock);
             let _ = fs::remove_file(&sock);
+        }
+        if let Some(ready) = self.ready.take() {
+            let _ = fs::remove_file(ready);
         }
         if let Ok(path) = pid_path() {
             let _ = fs::remove_file(path);
@@ -418,8 +423,25 @@ fn preflight(cli: &Cli) -> Result<()> {
     // fail inside Config::load above — surface them before advertising
     // "running".
     let _ = text::Dictionary::from_map(cfg.dict.overrides.clone());
-    if std::env::var_os("DISPLAY").is_none() {
-        bail!("DISPLAY is unset — the daemon needs X11 for Caps Lock and typing");
+    let display = std::env::var_os("DISPLAY");
+    let display_missing_or_empty = display.as_deref().is_none_or(std::ffi::OsStr::is_empty);
+    if display_missing_or_empty {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let wayland_set = wayland.as_deref().is_some_and(|s| !s.is_empty());
+        if wayland_set {
+            #[cfg(target_os = "linux")]
+            {
+                bail!("{}", dictate_platform::linux::selection::pure_wayland_hotkey_error());
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                bail!(
+                    "Caps Lock hotkey is unavailable on a pure Wayland session (WAYLAND_DISPLAY is set, DISPLAY is not)."
+                );
+            }
+        } else {
+            bail!("DISPLAY is unset or empty — the daemon needs X11 for Caps Lock and typing");
+        }
     }
     Ok(())
 }
@@ -707,6 +729,8 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
         libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
     }
 
     // The worker owns its pidfile: the parent must not publish the pid
@@ -715,6 +739,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     write_pid(std::process::id())?;
     let mut pid_guard = PidGuard {
         socket: None,
+        ready: None,
         api_stop: None,
     };
 
@@ -793,6 +818,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     // Ready: model loaded AND hotkey grabbed. Tell the parent.
     if let Ok(ready) = ready_path() {
         let _ = fs::write(&ready, format!("{}", std::process::id()));
+        pid_guard.ready = Some(ready);
     }
     println!(
         "Dictation running (PID {}). Hold Caps Lock to speak.",
@@ -1042,6 +1068,35 @@ mod cache_dir_tests {
         assert_eq!(got, root.join("dictate"));
         assert!(got.is_dir(), "cache_dir must create {}", got.display());
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod pid_guard_tests {
+    use super::*;
+
+    #[test]
+    fn pid_guard_unlinks_ready_file_on_drop() {
+        let tmp = std::env::temp_dir().join(format!(
+            "dictate-pidguard-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&tmp, "12345").unwrap();
+        assert!(tmp.exists());
+
+        {
+            let _guard = PidGuard {
+                socket: None,
+                ready: Some(tmp.clone()),
+                api_stop: None,
+            };
+        }
+
+        assert!(!tmp.exists(), "ready file must be unlinked on drop");
     }
 }
 

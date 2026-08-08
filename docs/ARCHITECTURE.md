@@ -89,7 +89,7 @@ unless the main agent asks.
 
 ## Text pipeline
 
-```
+```text
 raw STT text
   → voice commands
   → dictionary ([dict.overrides]; legacy dictionary.toml import-in-memory)
@@ -100,7 +100,7 @@ raw STT text
 
 ## Crate layout
 
-```
+```text
 light-dictate/                      # workspace root
   Cargo.toml
   crates/

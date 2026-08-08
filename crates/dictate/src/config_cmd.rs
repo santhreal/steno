@@ -1,6 +1,6 @@
 //! CLI for config / model / theme: `dictate config|model|theme …`.
 //!
-//! Uses [`dictate_core`] helpers (`config_get` / `config_set` /
+//! Uses `dictate_core` helpers (`config_get` / `config_set` /
 //! `list_settable_keys` / `list_themes` / `resolve_model`). Does not
 //! start or stop the daemon. Typing stays fail-closed: arm it only via
 //! `dictate config set type_output true` (never a one-shot CLI flag).

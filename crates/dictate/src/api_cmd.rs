@@ -92,13 +92,10 @@ pub fn ping(config_path: Option<&Path>, socket: Option<PathBuf>) -> Result<()> {
         .unwrap_or(false);
     if pong {
         println!("pong  {ms:.1} ms");
+        Ok(())
     } else {
-        println!("ok  {ms:.1} ms");
-        if let Some(result) = resp.result {
-            println!("{result}");
-        }
+        bail!("ping rejected: missing pong in response");
     }
-    Ok(())
 }
 
 /// `dictate api status` — print daemon status JSON from the API socket.
@@ -191,6 +188,37 @@ mod tests {
         let (stop, handle) = spawn_stub(path.clone());
 
         ping(None, Some(path.clone())).expect("ping against mock");
+
+        stop_server(&path, &stop, handle);
+    }
+    struct NoPongHandler;
+    impl dictate_core::api::ApiHandler for NoPongHandler {
+        fn ping(&self) -> dictate_core::api::ApiResult {
+            Ok(Some(serde_json::json!({"status": "ok"})))
+        }
+    }
+
+    #[test]
+    fn ping_missing_pong_in_response_bails() {
+        let path = temp_sock("nopong");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let serve_path = path.clone();
+        let handle = thread::spawn(move || {
+            let _ = dictate_core::api::serve_unix_until(&serve_path, NoPongHandler, Some(stop2));
+        });
+        for _ in 0..100 {
+            if path.exists() && ApiClient::connect(&path).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let err = ping(None, Some(path.clone())).unwrap_err().to_string();
+        assert!(
+            err.contains("ping rejected: missing pong in response"),
+            "error was: {err}"
+        );
 
         stop_server(&path, &stop, handle);
     }

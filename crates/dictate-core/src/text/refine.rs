@@ -427,7 +427,7 @@ fn match_contraction_case(first: &str, repl: &str) -> String {
 }
 
 
-/// Fix utterance "lets <imperative>" → "let's <imperative>" unless the
+/// Fix utterance "lets `imperative`" → "let's `imperative`" unless the
 /// preceding token is a subject pronoun ("he lets go" must stay).
 fn fix_lets_imperatives(words: &mut Vec<Cow<'_, str>>) {
     if words.len() < 2 {
