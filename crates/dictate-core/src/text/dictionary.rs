@@ -31,6 +31,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// In-memory phrase replacement dictionary.
 #[derive(Debug, Default, Clone)]
 pub struct Dictionary {
     // Sorted longest-phrase-first so greedy matching is stable.
@@ -49,8 +50,8 @@ impl Dictionary {
     ///
     /// Standalone `[overrides]` TOML file entry (legacy dictionary.toml).
     /// Runtime callers build from `Config.dict.overrides` via
-    /// [`from_entries`] / [`from_map`]; migration uses this plus
-    /// [`load_overrides`].
+    /// [`Self::from_entries`] / [`Self::from_map`]; migration uses this plus
+    /// [`Self::load_overrides`].
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let Some(path) = path else {
             return Ok(Self::default());
@@ -113,7 +114,7 @@ impl Dictionary {
 
 
     /// Entries as a map (order not significant). Used when Config stores
-    /// overrides after a legacy [`load`].
+    /// overrides after a legacy [`Self::load`].
     pub fn to_map(&self) -> HashMap<String, String> {
         self.entries.iter().cloned().collect()
     }

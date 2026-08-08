@@ -11,9 +11,12 @@ use crate::traits::Typer;
 use dictate_core::InjectTyper;
 use std::process::Command;
 
+/// Transcript delivery target mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
+    /// Print transcripts to standard output.
     Stdout,
+    /// Inject synthetic keystrokes into the active focused window.
     Type,
 }
 

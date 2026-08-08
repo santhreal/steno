@@ -33,7 +33,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub model: Option<PathBuf>,
 
-    /// Type the result into the focused window via xdotool (X11) instead
+    /// Type the result into the focused window via platform keystroke emitter instead
     /// of printing. SAFETY: requires `type_output = true` in the config
     /// file — typing is never enabled from the command line alone.
     /// Arm it persistently with `dictate config set type_output true`.

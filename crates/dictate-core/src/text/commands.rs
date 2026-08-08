@@ -113,7 +113,7 @@ pub const COMMANDS: &[VoiceCommand] = &[
     },
 ];
 
-/// One input token. Whisper attaches sentence punctuation to the
+/// One input token. STT engine attaches sentence punctuation to the
 /// neighboring word ("mark."); edge punctuation is split off into its
 /// own token so whole-word matching stays honest on real transcripts.
 /// Interior punctuation (apostrophes, hyphens, decimal points) stays

@@ -29,6 +29,7 @@ pub use refine::{NullRefine, RefineBackend, RefineConfig, RuleRefine, rule_refin
 
 use serde::Deserialize;
 
+/// Text pipeline configuration (`[text]`).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TextConfig {
@@ -55,6 +56,7 @@ impl Default for TextConfig {
 const VERBATIM_START: char = '\u{E000}';
 const VERBATIM_END: char = '\u{E001}';
 
+/// Post-transcription text processing pipeline.
 pub struct TextPipeline {
     cfg: TextConfig,
     dict: Dictionary,

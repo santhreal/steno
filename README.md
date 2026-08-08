@@ -94,7 +94,7 @@ Dictation stopped.
 
 Hold **Caps Lock**, speak, release. The daemon already has the model in
 memory, so there is no cold-start per utterance. `dictate restart` bounces
-it; `dictate start --foreground` runs in the terminal for debugging.
+it; pass `--foreground` to `dictate start` or `dictate restart` to run in the terminal for debugging.
 Daemon pid/ready/log files live under `$XDG_CACHE_HOME/dictate/` when that
 env is set, otherwise `~/.cache/dictate/`. Make sure no other app (GNOME
 custom shortcut, etc.) already owns Caps Lock.
@@ -246,6 +246,7 @@ pulse_ms = 180
 enabled = true         # daemon listens on a local Unix socket
 # path = ""            # empty → $XDG_RUNTIME_DIR/dictate/dictate.sock
 # token = ""           # optional shared secret on each request
+# require_same_uid = true    # SO_PEERCRED same-uid gate (default true)
 
 [dict.overrides]
 "handy" = "Dictate"
@@ -328,9 +329,7 @@ $ dictate theme set dusk
 $ dictate theme set null                # disable overlay via ui.theme
 ```
 
-`dictate config set` creates the file when missing and only accepts the
-settable dotted keys (`model_path`, `provider`, `type_output`, `n_threads`,
-`ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.*`, `ui.colors.*`).
+`dictate config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (such as `model_path`, `provider`, `type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
 Typing stays fail-closed: `--type` alone never arms keystroke injection.
 
 Theme and model writes update the file only — restart the daemon for them
@@ -372,7 +371,6 @@ f32 @ 16 kHz mono), `utterance.start` / `utterance.audio` / `utterance.stop` /
 types). `[api].require_same_uid` defaults true (SO_PEERCRED).
 
 ## How it works
-
 
 ```
 mic ── capture (cpal/ALSA)

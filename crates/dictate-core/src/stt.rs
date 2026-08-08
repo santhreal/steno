@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use crate::dsp::STT_RATE;
 
+/// Resident sherpa-onnx Parakeet TDT speech-to-text recognizer.
 pub struct Transcriber {
     /// Serialize decode: API thread + Caps Lock path share one model; the
     /// sherpa binding marks Sync but concurrent CUDA decode is still racy.
@@ -69,6 +70,7 @@ impl Transcriber {
     /// Transcribe 16 kHz mono f32 samples. Parakeet decodes an utterance
     /// in one shot (there are no partial segments), so `sink` is invoked
     /// exactly once with the raw transcript when it is non-empty.
+    /// The callback requires a `'static` lifetime.
     pub fn transcribe_streaming(
         &self,
         samples: &[f32],

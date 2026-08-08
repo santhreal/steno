@@ -82,8 +82,9 @@ Accessors: `engine.transcriber()`, `engine.pipeline()`.
 Order is fixed: **commands → dictionary → format → refine**.
 
 ```rust
-use dictate_core::{Dictionary, FmtState, TextConfig, TextPipeline, COMMANDS};
+use dictate_core::{Dictionary, FmtState, TextConfig, TextPipeline};
 
+let overrides = std::collections::HashMap::from([("handy".into(), "Dictate".into())]);
 let pipeline = TextPipeline::new(TextConfig::default(), Dictionary::from_map(overrides));
 let one_shot = pipeline.process("bank comma next line");
 let (chunk, state) = pipeline.process_stream("first segment", FmtState::default());
@@ -94,6 +95,14 @@ let (next, state) = pipeline.process_stream("second segment", state);
 verbatim (formatter never re-cases them).
 
 ## Refine (`RefineBackend`)
+
+`RefineBackend` requires `Send + Sync` so pipeline instances can be shared safely across threads:
+
+```rust
+pub trait RefineBackend: Send + Sync {
+    fn refine(&self, text: &str) -> String;
+}
+```
 
 `Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
 Default `[refine] enabled = true`, `backend = "rules"` → `RuleRefine`
@@ -106,7 +115,6 @@ offline tables only — not acoustic-garble repair). `enabled = false` →
 `dictate-core`. Heavier offline GEC belongs behind the same trait.
 
 ## Session (engine + overlay + optional typer)
-
 `Session` wraps a loaded `Engine` and a `Box<dyn OverlayBackend>`. One-shot
 PCM still goes through the engine; the session drives status stages around
 decode:
@@ -229,9 +237,7 @@ let theme = config_get(&path, "ui.theme")?;
 ```
 
 Surgical keys are listed by `list_settable_keys()` (`model_path`, `provider`,
-`type_output`, `n_threads`, `ui.*`, `ui.stages.*`, `ui.colors.*`). Typing stays
-fail-closed: arm only via `type_output = true` in the file.
-
+`type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`, `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`, `ui.colors.bg`, `ui.colors.fg`, `ui.colors.border`, `ui.colors.icon_bg`, `ui.colors.icon_fg`, `ui.colors.meta`, `ui.colors.shadow`, `ui.colors.accent`, `ui.colors.error`). `list_settable_keys()` returns an explicit slice of exact key strings and rejects wildcard patterns. Typing stays fail-closed: arm only via `type_output = true` in the file.
 Relevant knobs:
 
 ```toml
@@ -302,8 +308,19 @@ Ops: `ping`, `status`, `transcribe`, `utterance.*`, `shutdown`. Typing is never
 armed through the API. `[api].require_same_uid` (default true) rejects
 other-uid peers.
 
-## Library map
 
+## In-process socket server API (`dictate_core::api::server`)
+
+Embedders running the socket server or embedding custom socket handlers use the API server infrastructure in `dictate_core::api::server` (`dictate_core::api`):
+
+- **`ApiHandler`**: Trait (`pub trait ApiHandler`) providing synchronous callbacks matching each protocol operation (`authorize`, `ping`, `status`, `transcribe`, `utterance_start`, `utterance_audio`, `utterance_stop`, `utterance_cancel`, `shutdown`). Includes default stub implementations (`StubHandler`).
+- **`UtteranceApiHandler<T: PcmTranscoder>`**: Standard `ApiHandler` implementation for streaming utterance ops (`utterance.start` / `audio` / `stop` / `cancel`). It buffers audio into an `UtteranceBuffer` and delegates transcription on `utterance.stop` to a pluggable transcoder.
+- **`PcmTranscoder`**: Trait (`pub trait PcmTranscoder: Send + Sync`) exposing `fn transcribe_pcm(&self, samples: &[f32]) -> Result<String, ApiError>` executed by `UtteranceApiHandler`.
+- **`UtteranceBuffer`**: In-memory buffer (`start()`, `append_b64()`, `stop()`, `cancel()`) managing streaming PCM audio state and sample bounds.
+- **`MAX_UTTERANCE_SAMPLES`**: Constant `16_000 * 180` (2,880,000 samples, ~3 minutes at 16 kHz mono). Audio appends and decodes fail closed if total sample count exceeds this limit.
+- **`serve_unix_with`**: Server accept loop function (`pub fn serve_unix_with(path: impl AsRef<Path>, handler: impl ApiHandler, stop: Option<Arc<AtomicBool>>, opts: ServeOptions) -> Result<()>`) that binds the socket, enforces directory permissions, authorizes peer UID (`opts.require_same_uid`), and dispatches incoming request lines.
+
+## Library map
 | Module | Role |
 |--------|------|
 | `config` | Single TOML + path helpers + surgical get/set |

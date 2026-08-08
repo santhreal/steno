@@ -69,10 +69,12 @@ pub trait ApiHandler {
         Ok(())
     }
 
+    /// Handle `ping` operation: return health status.
     fn ping(&self) -> ApiResult {
         Ok(Some(json!({"pong": true})))
     }
 
+    /// Handle `status` operation: return process metadata and state.
     fn status(&self) -> ApiResult {
         Ok(Some(json!({
             "pid": std::process::id(),
@@ -81,6 +83,7 @@ pub trait ApiHandler {
         })))
     }
 
+    /// Handle `transcribe` operation: transcribe audio from file path or base64 PCM.
     fn transcribe(
         &self,
         _wav_path: Option<PathBuf>,
@@ -89,22 +92,27 @@ pub trait ApiHandler {
         Err(ApiError::not_implemented("transcribe"))
     }
 
+    /// Handle `utterance.start` operation: initialize streaming utterance session.
     fn utterance_start(&self) -> ApiResult {
         Err(ApiError::not_implemented("utterance.start"))
     }
 
+    /// Handle `utterance.audio` operation: append audio data to active utterance session.
     fn utterance_audio(&self, _pcm_f32_b64: String) -> ApiResult {
         Err(ApiError::not_implemented("utterance.audio"))
     }
 
+    /// Handle `utterance.stop` operation: finalize active utterance session and return transcript.
     fn utterance_stop(&self) -> ApiResult {
         Err(ApiError::not_implemented("utterance.stop"))
     }
 
+    /// Handle `utterance.cancel` operation: discard active utterance session without transcribing.
     fn utterance_cancel(&self) -> ApiResult {
         Err(ApiError::not_implemented("utterance.cancel"))
     }
 
+    /// Handle `shutdown` operation: request daemon server termination.
     fn shutdown(&self) -> ApiResult {
         Err(ApiError::not_implemented("shutdown"))
     }
@@ -135,7 +143,18 @@ pub fn decode_pcm_f32_le_b64(b64: &str) -> Result<Vec<f32>, ApiError> {
             Some("encode little-endian f32 samples (4 bytes each) before base64".into()),
         ));
     }
-    let mut samples = Vec::with_capacity(bytes.len() / 4);
+    let n = bytes.len() / 4;
+    // Reject before allocating a multi-million-sample Vec when a single
+    // NDJSON frame (up to MAX_API_LINE_BYTES) would exceed the utterance cap.
+    if n > MAX_UTTERANCE_SAMPLES {
+        return Err(ApiError::new(
+            format!(
+                "pcm_f32_b64 exceeds max {MAX_UTTERANCE_SAMPLES} samples (~3 min at 16 kHz)"
+            ),
+            Some("trim the PCM or send shorter utterance.audio chunks".into()),
+        ));
+    }
+    let mut samples = Vec::with_capacity(n);
     for chunk in bytes.chunks_exact(4) {
         samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
@@ -686,12 +705,17 @@ mod tests {
     use crate::api::client::ApiClient;
     use crate::api::protocol::{Op, Request};
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    /// Serialize tests that mutate process-global env (XDG_*).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_socket_path_prefers_xdg_runtime() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let prev_rt = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: test process; we restore below.
+        // SAFETY: held under ENV_LOCK; restored before unlock.
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
         }
@@ -707,9 +731,10 @@ mod tests {
 
     #[test]
     fn default_socket_path_falls_back_to_xdg_cache_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let prev_rt = std::env::var_os("XDG_RUNTIME_DIR");
         let prev_cache = std::env::var_os("XDG_CACHE_HOME");
-        // SAFETY: test process; we restore below.
+        // SAFETY: held under ENV_LOCK; restored before unlock.
         unsafe {
             std::env::remove_var("XDG_RUNTIME_DIR");
             std::env::set_var("XDG_CACHE_HOME", "/tmp/dictate-cache-home");
@@ -1025,6 +1050,20 @@ mod tests {
         let err = buf.append_b64(&b64).expect_err("over-cap");
         assert!(err.error.contains("exceeds max"), "{err:?}");
         assert!(!buf.is_active());
+    }
+
+    #[test]
+    fn decode_pcm_rejects_over_max_samples_before_alloc() {
+        // 4 bytes/sample; one past the cap must fail closed without hanging.
+        let n = MAX_UTTERANCE_SAMPLES + 1;
+        let bytes = vec![0u8; n * 4];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let err = decode_pcm_f32_le_b64(&b64).expect_err("oversize pcm");
+        assert!(
+            err.error.contains("exceeds max"),
+            "error must mention the cap: {}",
+            err.error
+        );
     }
 
     #[test]

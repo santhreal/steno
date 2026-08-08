@@ -12,6 +12,7 @@ use std::path::Path;
 /// Input rate expected by the STT engine (16 kHz mono).
 pub const STT_RATE: u32 = 16_000;
 
+/// DSP normalization configuration settings (`[dsp]`).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DspConfig {
@@ -32,6 +33,7 @@ impl Default for DspConfig {
     }
 }
 
+/// Voice activity detection (VAD) configuration settings (`[vad]`).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VadConfig {
@@ -205,7 +207,7 @@ pub fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>>
     Ok(out.take_data())
 }
 
-/// First-order DC-blocking high-pass: y[n] = x[n] - x[n-1] + r * y[n-1],
+/// First-order DC-blocking high-pass: `y[n] = x[n] - x[n-1] + r * y[n-1]`,
 /// r tuned so the corner sits near 5 Hz. Removes mic DC offset and rumble.
 #[derive(Debug, Clone)]
 pub struct DcBlock {
@@ -215,6 +217,7 @@ pub struct DcBlock {
 }
 
 impl DcBlock {
+    /// Create a new DC blocker tuned for sample rate `rate` Hz.
     pub fn new(rate: u32) -> Self {
         let r = if rate == 0 {
             0.0
@@ -227,6 +230,7 @@ impl DcBlock {
             r,
         }
     }
+    /// Process audio samples in-place to remove DC offset.
     pub fn process(&mut self, samples: &mut [f32]) {
         for s in samples.iter_mut() {
             let y = *s - self.x1 + self.r * self.y1;
@@ -290,6 +294,7 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// Create a new VAD endpoint detector.
     pub fn new(cfg: VadConfig, rate: u32) -> Self {
         Self {
             cfg,
@@ -302,6 +307,7 @@ impl Endpoint {
         }
     }
 
+    /// Feed a chunk of mono f32 samples and return the updated VAD state.
     pub fn feed(&mut self, chunk: &[f32]) -> VadEvent {
         if let Some(e) = self.latched {
             return e;

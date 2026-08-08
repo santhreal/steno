@@ -25,10 +25,8 @@
 //! (`"chromax"` → intended grammar/word). Those belong to the dictionary
 //! (known phrases) and a better acoustic model. Real grammatical error
 //! correction (GEC) is a future [`RefineBackend`] plug only; this module
-//! stays pure offline rules with no LLM or LanguageTool dependency.
-//!
-//! Full LLM GEC is therefore a future [`RefineBackend`] only; this module
-//! ships [`RuleRefine`] as the default.
+//! ships [`RuleRefine`] as the default with pure offline rules and no LLM or
+//! LanguageTool dependency.
 
 use std::borrow::Cow;
 

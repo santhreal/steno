@@ -68,7 +68,7 @@ impl Default for UiStages {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
-    /// Show the bottom-center status overlay (X11 only).
+    /// Show the bottom-center status overlay (X11, macOS, and Windows).
     pub overlay: bool,
     /// How long the "done"/"error" stage stays visible before hide.
     pub done_flash_ms: u64,
@@ -121,7 +121,7 @@ pub struct Config {
     /// Hard cap on one recording.
     pub max_record_secs: u64,
     /// ARMS typing: when true, results are typed into the focused window
-    /// via xdotool. This is the ONLY way typing can be enabled — a
+    /// via platform keystroke emitter. This is the ONLY way typing can be enabled — a
     /// deliberate, persistent act. The `--type` CLI flag alone errors
     /// out, so no script or test can inject keystrokes into a live
     /// session without the user having armed this file first.
@@ -501,6 +501,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Default path for the dictate configuration file (`~/.config/dictate/config.toml`).
 pub fn default_config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("dictate/config.toml"))
 }
@@ -523,6 +524,7 @@ fn legacy_dictionary_candidate(loaded_from: &Path, explicit: bool) -> Result<Opt
     Ok(loaded_from.parent().map(|dir| dir.join("dictionary.toml")))
 }
 
+/// Default directory for sherpa-onnx model storage (`~/.local/share/dictate/models`).
 pub fn default_model_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("dictate/models"))
 }

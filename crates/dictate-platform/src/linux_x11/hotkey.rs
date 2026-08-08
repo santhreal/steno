@@ -44,9 +44,12 @@ const NO_SYMBOL: Keysym = 0;
 /// Typical PC keyboard Caps Lock keycode (evdev / xfree86).
 const FALLBACK_CAPS_KEYCODE: Keycode = 66;
 
+/// Push-to-talk hotkey event emitted during recording lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
+    /// Hotkey pressed: start recording.
     Press,
+    /// Hotkey released: stop recording and begin transcription.
     Release,
     /// A non-modifier key other than the hotkey was pressed while
     /// recording: the user wants the utterance dropped.
@@ -55,6 +58,7 @@ pub enum HotkeyEvent {
     Shutdown,
 }
 
+/// Global X11 Caps Lock push-to-talk hotkey grabber.
 pub struct Hotkey {
     conn: RustConnection,
     root: Window,
@@ -319,17 +323,19 @@ impl Hotkey {
                     if ev.detail != self.trigger {
                         // While the grab is active (key held), other keys
                         // are delivered to us: that is the user cancelling.
+                        // Same rules as XI2 RawKeyPress (grace + pre-held).
                         if *held
-                            && !self.modifiers.contains(&ev.detail)
-                            && self.past_grace()
-                            && !self.suppress_cancel.contains(&ev.detail)
+                            && should_cancel_key(
+                                ev.detail,
+                                self.trigger,
+                                &self.modifiers,
+                                !self.past_grace(),
+                                &mut self.suppress_cancel,
+                            )
                         {
                             *held = false;
                             self.suppress_cancel.clear();
                             return Ok(HotkeyEvent::Cancel);
-                        }
-                        if *held && !self.past_grace() && !self.modifiers.contains(&ev.detail) {
-                            self.suppress_cancel.insert(ev.detail);
                         }
                         continue;
                     }

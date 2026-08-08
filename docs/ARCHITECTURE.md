@@ -14,7 +14,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Workspace split (`dictate-core` / `dictate-platform` / `dictate`) | **Verified** — builds as a Cargo workspace |
 | `Engine` + `Session` public API | **Verified** — unit-tested; `from_parts` / `with_pipeline` / `process_text` for embedders; GPU load not in unit tests |
 | Single config + `[dict.overrides]` | **Verified** — unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
-| Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path must pass `cfg.provider` (see ROADMAP). |
+| Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path passes `cfg.provider` (**Implemented/Verified**). |
 | Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |
 | Dictionary + verbatim case protection | **Verified** in unit tests; daemon needs restart after edits |
 | Typing (`type_output`) | Fail-closed in code; **Unverified** on live session after engine cutover |
@@ -25,7 +25,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Embeddable lib | **Yes** — depend on `dictate-core` (+ optional `dictate-platform`) |
 | Daemon IPC | **Yes** — Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin — needs Phase 5 hardening |
-| `provider = cuda\|cpu` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI: `.github/workflows/ci-cpu.yml` / `scripts/ci-cpu.sh` |
+| `provider = "cuda" \| "cpu"` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI: `.github/workflows/ci-cpu.yml` / `scripts/ci-cpu.sh` |
 
 ## Operator testing policy
 
@@ -45,7 +45,6 @@ unless the main agent asks.
 ## Locked decisions
 
 0. **Post-STT refine** — `commands → dictionary → format → refine`. Default `RuleRefine` (offline ASR cleanup). Embedders can swap `RefineBackend` for heavier GEC; no network.
-
 
 1. **Single config file** — `~/.config/dictate/config.toml` owns everything,
    including dictionary overrides under `[dict.overrides]`. Legacy
@@ -73,8 +72,8 @@ unless the main agent asks.
    from `ResolvedUi`. Default Linux path = X11 pill via
    `dictate_platform::create`. Hosts may ignore `ui.theme` and inject their
    own backend while still reading the palette if desired. Config can
-   disable (`overlay = false`) or select `theme = "pill"|"mono"|"dusk"|
-   "dawn"|"contrast"` / `"null"` (aliases `"none"` / `"off"`). Custom draw
+   disable (`overlay = false`) or select `theme = "pill" | "mono" | "dusk" |
+   "dawn" | "contrast"` / `"null"` (aliases `"none"` / `"off"`). Custom draw
    code is a trait impl, not a scripting language.
 6. **STT stays Parakeet/sherpa** — no whisper shims. `provider = "cuda"`
    (default) or `"cpu"` in config; unknown values fail at config load /
@@ -84,7 +83,9 @@ unless the main agent asks.
    `backend = "rules"` → `RuleRefine`). Config fields are only `enabled` +
    `backend` (no max_* keys). Offline only; embedders may inject a custom
    `RefineBackend`. `enabled = false` → `NullRefine`. RuleRefine scope: tiny
-   fixed rule tables, no token re-casing, no network/LLM in-tree.
+   fixed rule tables (space-before-punctuation stripping, duplicate words/clauses,
+   contractions, ASR phrase maps, subject-verb map, a/an edges, fillers), no token
+   re-casing, no network/LLM in-tree.
 
 ## Text pipeline
 
@@ -93,7 +94,7 @@ raw STT text
   → voice commands
   → dictionary ([dict.overrides]; legacy dictionary.toml import-in-memory)
   → format (sentence case; verbatim markers protect dictionary casing)
-  → refine (RuleRefine by default; RefineBackend hook; NullRefine if disabled)
+  → refine (RuleRefine by default: collapses duplicates/contractions/fillers, strips space-before punctuation; RefineBackend hook; NullRefine if disabled)
   → stdout / typer (typer only when type_output armed)
 ```
 
@@ -130,10 +131,20 @@ light-dictate/                      # workspace root
     dictate/
       src/
         main.rs
+        api_cmd.rs          # dictate ping | dictate api status
         config_cmd.rs       # dictate config|model|theme
         daemon.rs           # hotkey loop + API thread when [api].enabled
   docs/
 ```
+
+## CLI subcommand summary
+
+- `dictate start` / `stop` / `status` / `restart` — daemon lifecycle management (`start` and `restart` accept `--foreground`)
+- `dictate config` — `show`, `get <key>`, `set <key> <val>` (inspect or set individual configuration keys)
+- `dictate model` — `list`, `use <name_or_path> [--provider cuda|cpu]` (list or select sherpa-onnx model directory)
+- `dictate theme` — `list`, `set <name>` (list built-in overlay themes or set `ui.theme`)
+- `dictate ping` — check daemon API socket connectivity and round-trip latency
+- `dictate api status` — query daemon API for process, model, stage, and arming status
 
 ## Single-config shape
 
@@ -174,9 +185,6 @@ enabled = true               # daemon listens on the socket
 # path = ""                  # empty → default runtime path
 # token = ""                 # empty → no shared-secret check
 # require_same_uid = true    # SO_PEERCRED same-uid gate (default true)
-
-[hotkey]
-# key = "Caps_Lock"          # reserved; Linux X11 Caps Lock for now
 
 [dsp]
 # …existing DspConfig fields…

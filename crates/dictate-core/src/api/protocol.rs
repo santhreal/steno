@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Client → server request. Optional `token` is carried for future auth;
-/// enforcement is out of scope for v0.
+/// Client → server request. Optional `token` is evaluated against configured API token auth.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
+    /// Unique request identifier for matching responses.
     pub id: u64,
+    /// Optional authentication token for request authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Operation discriminant and payload.
     #[serde(flatten)]
     pub op: Op,
 }
@@ -51,12 +53,17 @@ pub enum Op {
 /// Server → client reply to a request `id`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
+    /// Request identifier matching the client request.
     pub id: u64,
+    /// Indicates whether the operation succeeded.
     pub ok: bool,
+    /// Operation result payload on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Error message on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Actionable hint or remediation advice on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }

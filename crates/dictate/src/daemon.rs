@@ -240,8 +240,11 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     preflight(cli)?;
 
     if foreground {
-        // Must not hold the flock across the daemon lifetime — otherwise
-        // `dictate stop` from another terminal blocks forever.
+        // Claim the pidfile under the lock so a concurrent `start` cannot
+        // race past `is_running()` during the window before run_daemon's
+        // write_pid. Then drop the flock — holding it across the daemon
+        // lifetime would block `dictate stop` forever.
+        write_pid(std::process::id())?;
         drop(lock);
         return run_daemon(cli);
     }
@@ -545,6 +548,15 @@ impl DaemonHandler {
 
     fn decode_pcm_b64(&self, b64: &str) -> Result<Vec<f32>, ApiError> {
         let mut samples = decode_pcm_f32_le_b64(b64)?;
+        if samples.len() > api::MAX_UTTERANCE_SAMPLES {
+            return Err(ApiError::new(
+                format!(
+                    "pcm_f32_b64 exceeds max {} samples (~3 min at 16 kHz)",
+                    api::MAX_UTTERANCE_SAMPLES
+                ),
+                Some("trim the PCM or send shorter utterance.audio chunks".into()),
+            ));
+        }
         dsp::normalize(&mut samples, self.dsp.target_rms, self.dsp.max_gain);
         Ok(samples)
     }

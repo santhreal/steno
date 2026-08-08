@@ -15,6 +15,11 @@ pub trait Typer: Send {
     fn type_text(&mut self, text: &str) -> anyhow::Result<()>;
 }
 
+// dictate_core::session::InjectTyper (re-exported by dictate-platform)
+pub trait InjectTyper: Send {
+    fn type_text(&mut self, text: &str) -> anyhow::Result<()>;
+}
+
 // dictate_core::overlay (re-exported by dictate-platform)
 pub trait OverlayBackend: Send {
     fn set(&self, stage: Stage);
@@ -25,6 +30,10 @@ pub trait OverlayBackend: Send {
 pub enum HotkeyEvent { Press, Release, Cancel, Shutdown }
 pub enum Stage { Hidden, Recording, Transcribing, Done, Error }
 ```
+
+## Feature Flags & Build Configuration
+
+`dictate-platform` requires **no Cargo feature flags**. Target platform backends are selected automatically at compile time using standard Rust OS target conditionals (`cfg(target_os = "linux")`, `cfg(target_os = "windows")`, `cfg(target_os = "macos")`).
 
 Linux: `linux` facade selects X11 vs Wayland. X11 path
 `linux_x11::{hotkey, overlay, output}` — real Caps Lock grab, pill overlay
@@ -97,7 +106,7 @@ Public re-exports on Linux still come from the `linux` facade:
 `Hotkey`, `Emitter`, `OutputMode`, `Overlay`, `create`, `HotkeyEvent`.
 
 Null*: `NullHotkey` / `NullTyper` / `NullOverlay` — no-ops for tests and
-headless embedders.
+headless embedders. `NullHotkey::next_event()` sleeps for 50ms and returns `HotkeyEvent::Shutdown` to terminate event loops in tests and headless mode.
 
 ### Windows (`windows.rs`)
 

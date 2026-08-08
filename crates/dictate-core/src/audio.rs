@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::dsp::{self, Endpoint, VadConfig, VadEvent, STT_RATE};
 
+/// Configuration parameters for microphone recording.
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
     /// Substring match on the input device name; `None` = system default.
@@ -130,8 +131,10 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
 
 
 /// Record while `stop` is clear. Ends on `stop`, `max_duration`, or capture
-/// failure. Returns processed 16 kHz mono samples, or an empty `Vec` when
-/// the hold produced no usable speech (caller should skip transcription).
+/// failure. If `discard` is set, all DSP is skipped and an empty `Vec` is
+/// returned immediately (canceling transcription). Returns processed 16 kHz
+/// mono samples, or an empty `Vec` when the hold produced no usable speech or
+/// was canceled.
 pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool) -> Result<Vec<f32>> {
     let host = cpal::default_host();
     let device = select_device(&host, cfg.device.as_deref())?;
