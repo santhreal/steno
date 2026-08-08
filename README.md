@@ -1,22 +1,22 @@
-# light-dictate
+# steno
 
 Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
 out. No cloud. Default decode uses CUDA; set `provider = "cpu"` for CPU-only
 hosts. One-shot or a background daemon.
 
-`dictate` records from your microphone, transcribes locally with
+`steno` records from your microphone, transcribes locally with
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Parakeet TDT), cleans
 the text up, and prints it - or types it into whatever window is focused.
 
-Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
+Use it one-shot (`steno`) or as a system-wide daemon (`steno start`) that
 keeps the model loaded and listens for **Caps Lock** (hold to talk).
 
 ```console
-$ dictate
+$ steno
 This is a test of the Dictate System.
 The quick brown fox jumps over the lazy dog?
 
-$ dictate meeting-note.wav
+$ steno meeting-note.wav
 The budget is approved, see attached.
 ```
 
@@ -28,12 +28,12 @@ libraries (or a CPU build) available at build time via
 
 ```bash
 export SHERPA_ONNX_LIB_DIR=/usr/local/lib/sherpa-onnx
-cargo build -p dictate --release
-cargo install --path crates/dictate
+cargo build -p steno --release
+cargo install --path crates/steno
 ```
 
-Workspace crates: `dictate-core` (embeddable engine), `dictate-platform`
-(OS backends), `dictate` (CLI/daemon binary).
+Workspace crates: `steno-core` (embeddable engine), `steno-platform`
+(OS backends), `steno` (CLI/daemon binary).
 
 There is no cargo `--features cuda` flag: pick the execution provider in
 config (`provider = "cuda"` default, or `"cpu"`). CUDA builds still need the
@@ -43,18 +43,18 @@ provider values fail closed (no silent fallback).
 **CPU CI.** GitHub Actions (`.github/workflows/ci-cpu.yml`) and the local
 gate `./scripts/ci-cpu.sh` download the CPU sherpa-onnx shared libs
 (`linux-x64-shared-lib`, never CUDA), then run
-`cargo test -p dictate-core --lib`, `cargo test -p dictate-platform --lib`,
-and clippy on `dictate-core` / `dictate-platform` / `dictate`. No daemon,
+`cargo test -p steno-core --lib`, `cargo test -p steno-platform --lib`,
+and clippy on `steno-core` / `steno-platform` / `steno`. No daemon,
 DISPLAY, or GPU soak.
 
 ## Get a model
 
-`dictate` uses a sherpa-onnx **model directory** (encoder/decoder/joiner
+`steno` uses a sherpa-onnx **model directory** (encoder/decoder/joiner
 ONNX + `tokens.txt`). Recommended: NVIDIA Parakeet TDT v3 int8.
 
 ```bash
-mkdir -p ~/.local/share/dictate/models
-cd ~/.local/share/dictate/models
+mkdir -p ~/.local/share/steno/models
+cd ~/.local/share/steno/models
 curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 ```
@@ -63,8 +63,8 @@ tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 | --- | --- | --- |
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | ~600 MB | Default; multilingual; GPU-fast |
 
-When `--model` is not set, `dictate` picks the single model directory under
-`~/.local/share/dictate/models`. With several, set `model_path` in the
+When `--model` is not set, `steno` picks the single model directory under
+`~/.local/share/steno/models`. With several, set `model_path` in the
 config (or pass `--model /path/to/model-dir`).
 
 ## Use it
@@ -73,44 +73,44 @@ config (or pass `--model /path/to/model-dir`).
 resident model:
 
 ```toml
-# ~/.config/dictate/config.toml
+# ~/.config/steno/config.toml
 type_output = true
-model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+model_path = "~/.local/share/steno/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 ```
 
 ```console
-$ dictate start
+$ steno start
 Dictation running (PID 12345).
 Hotkey: hold Caps Lock to speak.
-Log: /home/you/.cache/dictate/dictate.log
+Log: /home/you/.cache/steno/steno.log
 
-$ dictate status
+$ steno status
 Dictation running (PID 12345).
 Hotkey: hold Caps Lock to speak.
 
-$ dictate stop
+$ steno stop
 Dictation stopped.
 ```
 
 Hold **Caps Lock**, speak, release. The daemon already has the model in
-memory, so there is no cold-start per utterance. `dictate restart` bounces
-it; pass `--foreground` to `dictate start` or `dictate restart` to run in the terminal for debugging.
-Daemon pid/ready/log files live under `$XDG_CACHE_HOME/dictate/` when that
-env is set, otherwise `~/.cache/dictate/`. Make sure no other app (GNOME
+memory, so there is no cold-start per utterance. `steno restart` bounces
+it; pass `--foreground` to `steno start` or `steno restart` to run in the terminal for debugging.
+Daemon pid/ready/log files live under `$XDG_CACHE_HOME/steno/` when that
+env is set, otherwise `~/.cache/steno/`. Make sure no other app (GNOME
 custom shortcut, etc.) already owns Caps Lock.
 If Caps Lock ever feels "dead" after a hard kill (`kill -9` / crashed
-daemon), run `dictate stop` (or `dictate start`): it restores the X11
+daemon), run `steno stop` (or `steno start`): it restores the X11
 mapping. Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
 
-**Record and print (one-shot).** Run `dictate`, speak, pause. Recording
+**Record and print (one-shot).** Run `steno`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to
 stdout segment by segment as it is decoded, so it composes:
-`dictate | xclip -selection clipboard`.
+`steno | xclip -selection clipboard`.
 
 **Record and type (one-shot).** Typing is fail-closed: it works only after
-you arm it once in `~/.config/dictate/config.toml` (`type_output = true`).
-Then `dictate` (or `dictate --type`) types into the focused window via
-`xdotool` on X11 (`sudo apt install xdotool`) or `wtype` on pure Wayland (`sudo apt install wtype`), and `dictate --stdout`
+you arm it once in `~/.config/steno/config.toml` (`type_output = true`).
+Then `steno` (or `steno --type`) types into the focused window via
+`xdotool` on X11 (`sudo apt install xdotool`) or `wtype` on pure Wayland (`sudo apt install wtype`), and `steno --stdout`
 prints instead for one run. Typed text streams as it is decoded; the
 clipboard is never touched.
 
@@ -121,13 +121,13 @@ no input, and hides itself after Done. Pick a palette with `ui.theme`,
 override colors / labels under `[ui.colors]` / `[ui.stages]`, or disable
 with `overlay = false` / `theme = "null"`. See [Themes](#themes).
 
-A bare `dictate --type` without the config entry fails with an error:
+A bare `steno --type` without the config entry fails with an error:
 typing is deliberately not enableable from a one-shot flag. Arm it once
-with `dictate config set type_output true` (or edit the TOML). Control
+with `steno config set type_output true` (or edit the TOML). Control
 characters other than newline are stripped before typing, so a transcript
 can never smuggle Tab or Escape keystrokes into the target.
 
-**Transcribe a file.** `dictate clip.wav` reads a WAV instead of recording (any
+**Transcribe a file.** `steno clip.wav` reads a WAV instead of recording (any
 PCM or 32-bit float WAV, resampled to 16 kHz mono internally), also useful for
 testing your setup without a microphone.
 
@@ -137,12 +137,12 @@ Useful flags: `--list-devices` and `--device <name>` pick a microphone,
 `-v`/`-vv` shows what the pipeline is doing.
 
 One-shot invocations load the model from disk each time (a few seconds of
-startup). `dictate start` keeps the model resident so hold-to-talk skips
+startup). `steno start` keeps the model resident so hold-to-talk skips
 that cost. Smaller models start faster either way.
 
 ## Voice commands
 
-Spoken commands are replaced inline. `dictate --list-commands` prints this
+Spoken commands are replaced inline. `steno --list-commands` prints this
 table:
 
 | Say | Get |
@@ -175,7 +175,7 @@ terms the recognizer gets wrong. Put overrides in the same config file under
 `[dict.overrides]`:
 
 ```toml
-# ~/.config/dictate/config.toml
+# ~/.config/steno/config.toml
 [dict.overrides]
 "handy" = "Dictate"
 "main street" = "Main Street"
@@ -185,23 +185,23 @@ terms the recognizer gets wrong. Put overrides in the same config file under
 Matching is case-insensitive and whole-word; longer phrases win. The
 replacement's case is used exactly as written.
 
-If you still have a legacy `~/.config/dictate/dictionary.toml`, it is
+If you still have a legacy `~/.config/steno/dictionary.toml`, it is
 imported into memory once when loading the **default** config and
 `[dict.overrides]` is empty (with a deprecation warning). An explicit
 `--config /path/to.toml` only considers a sibling `dictionary.toml` beside
 that file, never the operator XDG path. Copy entries under
 `[dict.overrides]` and remove
-the old file; `dictate` never rewrites your config for you. Restart the
-daemon after edits (`dictate restart`).
+the old file; `steno` never rewrites your config for you. Restart the
+daemon after edits (`steno restart`).
 
 ## Configuration
 
-Everything has a default; `~/.config/dictate/config.toml` overrides it; CLI
+Everything has a default; `~/.config/steno/config.toml` overrides it; CLI
 flags override the file (`--config <path>` loads a different file). A full
 config looks like:
 
 ```toml
-model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+model_path = "~/.local/share/steno/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 n_threads = 8            # CPU threads for feature extraction; default: half your CPUs
 max_record_secs = 120    # hard cap per recording
 type_output = false      # arm typing (xdotool/wtype); the ONLY way to enable it
@@ -244,7 +244,7 @@ pulse_ms = 180
 
 [api]
 enabled = true         # daemon listens on a local Unix socket
-# path = ""            # empty → $XDG_RUNTIME_DIR/dictate/dictate.sock
+# path = ""            # empty → $XDG_RUNTIME_DIR/steno/steno.sock
 # token = ""           # optional shared secret on each request
 # require_same_uid = true    # SO_PEERCRED same-uid gate (default true)
 
@@ -266,7 +266,7 @@ a custom `RefineBackend` in-process for heavier GEC.
 
 ## Themes
 
-Built-in overlay palettes (also listed by `dictate theme list`):
+Built-in overlay palettes (also listed by `steno theme list`):
 
 | Theme | Role |
 | --- | --- |
@@ -308,31 +308,31 @@ pulse_ms = 180
 ```
 
 Restart the daemon after theme (or model) changes so the resident process
-reloads config: `dictate restart`.
+reloads config: `steno restart`.
 
 ## CLI config
 
 Surgical helpers over the same TOML file (`--config` overrides the path):
 
 ```console
-$ dictate config show
-$ dictate config get ui.theme
-$ dictate config set ui.theme dusk
-$ dictate config set max_record_secs 180
-$ dictate config set api.enabled true
-$ dictate config set api.token mysecret
-$ dictate config set type_output true   # only persistent typing arm path
+$ steno config show
+$ steno config get ui.theme
+$ steno config set ui.theme dusk
+$ steno config set max_record_secs 180
+$ steno config set api.enabled true
+$ steno config set api.token mysecret
+$ steno config set type_output true   # only persistent typing arm path
 
-$ dictate model list
-$ dictate model use sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
-$ dictate model use ~/models/my-parakeet --provider cpu
+$ steno model list
+$ steno model use sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+$ steno model use ~/models/my-parakeet --provider cpu
 
-$ dictate theme list
-$ dictate theme set dusk
-$ dictate theme set null                # disable overlay via ui.theme
+$ steno theme list
+$ steno theme set dusk
+$ steno theme set null                # disable overlay via ui.theme
 ```
 
-`dictate config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`; API: `api.enabled`, `api.path`, `api.token`; UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
+`steno config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`; API: `api.enabled`, `api.path`, `api.token`; UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
 Typing stays fail-closed: `--type` alone never arms keystroke injection.
 
 Theme and model writes update the file only: restart the daemon for them
@@ -341,8 +341,8 @@ to take effect in a running hold-to-talk session.
 ## Daemon API
 
 When the daemon is running with `[api].enabled` (the default), it listens on a
-Unix socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`,
-else `~/.cache/dictate/dictate.sock`. Override with
+Unix socket: `$XDG_RUNTIME_DIR/steno/steno.sock`, else `$XDG_CACHE_HOME/steno/steno.sock`,
+else `~/.cache/steno/steno.sock`. Override with
 `[api].path`. Optional `[api].token` requires every request to carry the same
 `token` field.
 
@@ -351,21 +351,21 @@ in the config file remains the only arming path.
 
 ```bash
 # ping
-printf '%s\n' '{"id":1,"op":"ping"}' | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+printf '%s\n' '{"id":1,"op":"ping"}' | nc -U "$XDG_RUNTIME_DIR/steno/steno.sock"
 
 # status
-printf '%s\n' '{"id":2,"op":"status"}' | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+printf '%s\n' '{"id":2,"op":"status"}' | nc -U "$XDG_RUNTIME_DIR/steno/steno.sock"
 
 # transcribe a WAV (returns {"text":"..."}; does not type)
 printf '%s\n' '{"id":3,"op":"transcribe","wav_path":"/path/to/clip.wav"}' \
-  | nc -U "$XDG_RUNTIME_DIR/dictate/dictate.sock"
+  | nc -U "$XDG_RUNTIME_DIR/steno/steno.sock"
 ```
 
 CLI helpers (same socket; optional `--socket`):
 
 ```console
-$ dictate ping
-$ dictate api status
+$ steno ping
+$ steno api status
 ```
 
 Ops: `ping`, `status`, `transcribe` (`wav_path` **or** `pcm_f32_b64` little-endian
@@ -390,7 +390,7 @@ fresh decode state: nothing leaks between them.
 ## Notes and limits
 
 - Typing sends keystrokes to the **focused** window. That is the feature;
-  it is also why you should not dictate while a password field is focused.
+  it is also why you should not steno while a password field is focused.
   It is armed only via `type_output = true` in your config, never from a
   CLI flag (see above).
 - **No live-session testing on the operator workstation.** Agents and local
@@ -398,7 +398,7 @@ fresh decode state: nothing leaks between them.
   Caps Lock, inject keystrokes, or run GPU soaks here. Hotkey / typing /
   overlay / soak verification belongs on **axiomexec** (Tailscale) or a
   disposable VM (e.g. Firecracker) only. Unit tests stay off the live session.
-- If no speech starts within `start_timeout_secs`, `dictate` exits non-zero
+- If no speech starts within `start_timeout_secs`, `steno` exits non-zero
   with an error, so scripts can tell silence apart from an empty result.
 - Typing: X11/XWayland uses `xdotool`; pure Wayland (`WAYLAND_DISPLAY` without `DISPLAY`) uses `wtype` (optional `ydotool` fallback). Install with `sudo apt install wtype`. Caps Lock hotkey still needs `DISPLAY` (XWayland); otherwise the daemon errors with corrective actions. Overlay on pure Wayland is a no-op until layer-shell lands; use stdout mode or XWayland for the pill.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
