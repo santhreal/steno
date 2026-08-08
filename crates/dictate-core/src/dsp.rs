@@ -1,8 +1,8 @@
 //! Sample-domain DSP: WAV reading, resampling, DC blocking, gain
 //! normalization, and energy-based endpoint (voice activity) detection.
 //!
-//! Everything here is pure logic over `&[f32]` — no device access (that is
-//! `audio.rs`) — so every piece is unit-testable without a microphone.
+//! Everything here is pure logic over `&[f32]`: no device access (that is
+//! `audio.rs`), so every piece is unit-testable without a microphone.
 
 use anyhow::{Context, Result, bail};
 use rubato::Resampler;
@@ -247,7 +247,7 @@ impl DcBlock {
 ///
 /// `target_rms` and `max_gain` come from user config. A non-positive or
 /// non-finite `target_rms` skips normalization; a `max_gain` below 1,
-/// non-finite, or NaN degenerates to "no gain change" — never a panic in
+/// non-finite, or NaN degenerates to "no gain change": never a panic in
 /// `f32::clamp` (which requires min <= max and non-NaN bounds).
 pub fn normalize(samples: &mut [f32], target_rms: f32, max_gain: f32) {
     if samples.is_empty() || !target_rms.is_finite() || target_rms <= 0.0 {
@@ -358,6 +358,9 @@ impl Endpoint {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: DSP algorithms (WAV decoding, sample rate conversion, bandpass filtering, AGC,
+    //! and VAD speech end-pointing) must accurately process audio data without clipping,
+    //! aliasing, or misclassifying speech boundaries.
     use super::*;
     use std::f32::consts::PI;
 
@@ -827,7 +830,7 @@ mod tests {
 
     /// WHY: target_rms and max_gain come straight from user TOML.
     /// max_gain < 1.0 made the clamp range [1/max_gain, max_gain] have
-    /// min > max, and NaN bounds panic inside f32::clamp — a config typo
+    /// min > max, and NaN bounds panic inside f32::clamp: a config typo
     /// crashed the process. Invalid gain parameters must degrade to a
     /// no-op, never a panic and never NaN samples.
     #[test]
@@ -890,7 +893,7 @@ mod tests {
     }
 
     /// WHY: Endpoint::feed must never panic or miscount on boundary input
-    /// — a zero device rate (pathological cpal config) or an empty chunk
+    /// -- a zero device rate (pathological cpal config) or an empty chunk
     /// (drained capture buffer) are no-ops, not state transitions.
     #[test]
     fn endpoint_zero_rate_and_empty_chunk_are_safe_noops() {

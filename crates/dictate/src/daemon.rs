@@ -2,10 +2,10 @@
 //! Caps Lock, hold-to-talk → type into the focused window.
 //!
 //! Lifecycle mirrors the old `speak` helper:
-//!   dictate start   — spawn daemon, print "running" + hotkey
-//!   dictate stop    — kill via pidfile
-//!   dictate status  — pid / not running
-//!   dictate restart — stop then start
+//!   dictate start   : spawn daemon, print "running" + hotkey
+//!   dictate stop    : kill via pidfile
+//!   dictate status  : pid / not running
+//!   dictate restart : stop then start
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -499,12 +499,12 @@ fn resolve_api_socket(api: &ApiConfig) -> Result<PathBuf> {
     }
 }
 
-/// NDJSON handler backed by the resident model. Typing is never armed here —
+/// NDJSON handler backed by the resident model. Typing is never armed here:
 /// API clients only receive text; `type_output` stays config-only.
 ///
 /// `utterance.*` and `transcribe` return JSON text only. The daemon process
 /// still requires `type_output = true` to start (hotkey PTT path), but the
-/// Emitter/typer is never invoked from these API ops — fail-closed for API.
+/// Emitter/typer is never invoked from these API ops: fail-closed for API.
 struct DaemonHandler {
     transcriber: Arc<Transcriber>,
     text_cfg: TextConfig,
@@ -968,7 +968,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
 #[cfg(test)]
 mod api_handler_tests {
     //! WHY: API must reject ambiguous/missing audio payloads and never treat
-    //! typing as API-controllable — unit-test the pure validation path without
+    //! typing as API-controllable; unit-test the pure validation path without
     //! loading a GPU model.
     use super::*;
 

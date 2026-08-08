@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Resolve `--config` or the default path (tilde-expanded). Does not require
-/// the file to exist — `config set` creates it.
+/// the file to exist: `config set` creates it.
 pub fn resolve_config_path(cli: Option<&Path>) -> Result<PathBuf> {
     match cli {
         Some(p) => config::expand_tilde(p),
@@ -23,7 +23,7 @@ pub fn resolve_config_path(cli: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-/// `dictate config show` — effective path, settable keys, resolved model,
+/// `dictate config show`: effective path, settable keys, resolved model,
 /// and `dict.overrides` count (not the map itself).
 pub fn config_show(config_path: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config_path)?;
@@ -45,7 +45,7 @@ pub fn config_show(config_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// `dictate config get <key>` — file value when present, else the effective
+/// `dictate config get <key>`: file value when present, else the effective
 /// default from `Config::load` (so omitted `provider` still prints `cuda`).
 pub fn config_get_cmd(config_path: Option<&Path>, key: &str) -> Result<()> {
     let path = resolve_config_path(config_path)?;
@@ -68,7 +68,7 @@ pub fn config_get_cmd(config_path: Option<&Path>, key: &str) -> Result<()> {
     }
 }
 
-/// `dictate config set <key> <value>` — surgical write; creates the file when
+/// `dictate config set <key> <value>`: surgical write; creates the file when
 /// missing. Unknown keys are refused with the allowed list.
 pub fn config_set_cmd(config_path: Option<&Path>, key: &str, value: &str) -> Result<()> {
     let path = resolve_config_path(config_path)?;
@@ -122,7 +122,7 @@ pub fn config_set_cmd(config_path: Option<&Path>, key: &str, value: &str) -> Res
     Ok(())
 }
 
-/// `dictate model list` — directories under the default models dir; mark current.
+/// `dictate model list`: directories under the default models dir; mark current.
 pub fn model_list(config_path: Option<&Path>) -> Result<()> {
     let models_dir = default_model_dir()?;
     let cfg = Config::load(config_path)?;
@@ -172,7 +172,7 @@ pub fn model_list(config_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// `dictate model use <name-or-path>` — write `model_path` (and optional provider).
+/// `dictate model use <name-or-path>`: write `model_path` (and optional provider).
 pub fn model_use(
     config_path: Option<&Path>,
     name_or_path: &str,
@@ -232,7 +232,7 @@ pub fn theme_list(config_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// `dictate theme set <name>` — validates then writes `ui.theme`.
+/// `dictate theme set <name>`: validates then writes `ui.theme`.
 pub fn theme_set(config_path: Option<&Path>, name: &str) -> Result<()> {
     let name = name.trim();
     ensure!(

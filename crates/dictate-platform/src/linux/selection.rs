@@ -15,7 +15,7 @@ pub enum TypingBackend {
 pub enum HotkeyBackend {
     /// Reuse the X11 grab (including XWayland when `DISPLAY` is set).
     X11,
-    /// No global Wayland grab yet — callers must fail loudly.
+    /// No global Wayland grab yet: callers must fail loudly.
     Unavailable,
 }
 
@@ -24,7 +24,7 @@ pub enum HotkeyBackend {
 pub enum OverlayBackendChoice {
     /// Existing X11 pill (works under XWayland too).
     X11,
-    /// No layer-shell chip yet — `NullOverlay` + warning.
+    /// No layer-shell chip yet: `NullOverlay` + warning.
     NullWarn,
 }
 

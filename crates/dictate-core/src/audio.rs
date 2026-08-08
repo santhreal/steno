@@ -1,7 +1,7 @@
 //! Microphone capture via cpal.
 //!
-//! - `record()` — open stream, collect until the VAD endpoint / timeout, tear down.
-//! - `record_while()` — open stream, collect until a stop flag or `max_duration`, tear down.
+//! - `record()` -- open stream, collect until the VAD endpoint / timeout, tear down.
+//! - `record_while()` -- open stream, collect until a stop flag or `max_duration`, tear down.
 //!
 //! Both leave no capture threads running after they return.
 
@@ -28,12 +28,12 @@ pub struct RecordConfig {
 pub fn list_input_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();
     let devices = host.input_devices().context(
-        "failed to enumerate audio input devices — check that PipeWire/PulseAudio is running",
+        "failed to enumerate audio input devices: check that PipeWire/PulseAudio is running",
     )?;
     let names: Vec<String> = devices.map(|d| d.to_string()).collect();
     if names.is_empty() {
         bail!(
-            "no audio input devices found — connect a microphone and check that PipeWire/PulseAudio is running"
+            "no audio input devices found: connect a microphone and check that PipeWire/PulseAudio is running"
         );
     }
     Ok(names)
@@ -59,7 +59,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
     let ranges: Vec<_> = device
         .supported_input_configs()
         .with_context(|| {
-            format!("failed to query input formats of device '{dev_name}' — is it still connected?")
+            format!("failed to query input formats of device '{dev_name}': is it still connected?")
         })?
         .collect();
     let range = ranges
@@ -67,7 +67,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         .max_by(|a, b| a.cmp_default_heuristics(b))
         .ok_or_else(|| {
             anyhow!(
-                "device '{dev_name}' supports no input stream formats — pick another device (`dictate --list-devices`)"
+                "device '{dev_name}' supports no input stream formats: pick another device (`dictate --list-devices`)"
             )
         })?;
     let chosen = range
@@ -96,11 +96,11 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         }
         cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
         other => bail!(
-            "device '{dev_name}' only offers unsupported sample format {other:?} — pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`dictate --list-devices`)"
         ),
     }?;
     stream.play().with_context(|| {
-        format!("failed to start capture on device '{dev_name}' — check microphone permissions")
+        format!("failed to start capture on device '{dev_name}': check microphone permissions")
     })?;
 
     let result = capture_loop(&rx, &stream, cfg, dev_rate, &dev_name);
@@ -110,7 +110,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
 
     if captured.is_empty() || !speech_started {
         bail!(
-            "no speech detected on device '{dev_name}' — check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
+            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
         );
     }
 
@@ -123,7 +123,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
     trim_leading_silence(&mut samples, cfg.vad.speech_threshold);
     if samples.is_empty() {
         bail!(
-            "no speech detected on device '{dev_name}' — check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
+            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
         );
     }
     Ok(samples)
@@ -143,7 +143,7 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
     let ranges: Vec<_> = device
         .supported_input_configs()
         .with_context(|| {
-            format!("failed to query input formats of device '{dev_name}' — is it still connected?")
+            format!("failed to query input formats of device '{dev_name}': is it still connected?")
         })?
         .collect();
     let range = ranges
@@ -151,7 +151,7 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
         .max_by(|a, b| a.cmp_default_heuristics(b))
         .ok_or_else(|| {
             anyhow!(
-                "device '{dev_name}' supports no input stream formats — pick another device (`dictate --list-devices`)"
+                "device '{dev_name}' supports no input stream formats: pick another device (`dictate --list-devices`)"
             )
         })?;
     let chosen = range
@@ -182,17 +182,17 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
         }
         cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
         other => bail!(
-            "device '{dev_name}' only offers unsupported sample format {other:?} — pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`dictate --list-devices`)"
         ),
     }?;
     stream.play().with_context(|| {
-        format!("failed to start capture on device '{dev_name}' — check microphone permissions")
+        format!("failed to start capture on device '{dev_name}': check microphone permissions")
     })?;
 
     let result = capture_until_stop(&rx, &stream, cfg, dev_rate, &dev_name, stop);
     drop(stream);
     let captured = result?;
-    // A cancelled utterance skips all DSP and returns empty immediately —
+    // A cancelled utterance skips all DSP and returns empty immediately --
     // seconds of sinc resampling must not delay the cancel.
     if discard.load(Ordering::Relaxed) || captured.is_empty() {
         return Ok(Vec::new());
@@ -214,7 +214,7 @@ fn select_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device
     let devices: Vec<cpal::Device> = host
         .input_devices()
         .context(
-            "failed to enumerate audio input devices — check that PipeWire/PulseAudio is running",
+            "failed to enumerate audio input devices: check that PipeWire/PulseAudio is running",
         )?
         .collect();
     let names: Vec<String> = devices.iter().map(|d| d.to_string()).collect();
@@ -225,11 +225,11 @@ fn select_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device
             }
             if names.is_empty() {
                 bail!(
-                    "no audio input devices found — connect a microphone and check that PipeWire/PulseAudio is running"
+                    "no audio input devices found: connect a microphone and check that PipeWire/PulseAudio is running"
                 );
             }
             bail!(
-                "no default input device — select one with `dictate --device` (available: {})",
+                "no default input device: select one with `dictate --device` (available: {})",
                 names.join(", ")
             );
         }
@@ -240,7 +240,7 @@ fn select_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device
                 .find(|d| d.to_string().to_lowercase().contains(&lower))
                 .ok_or_else(|| {
                     anyhow!(
-                        "no input device matching '{n}' — available devices: {}",
+                        "no input device matching '{n}': available devices: {}",
                         names.join(", ")
                     )
                 })
@@ -263,7 +263,7 @@ enum Msg {
 fn mono_channels(config: &cpal::StreamConfig, dev_name: &str) -> Result<usize> {
     if config.channels == 0 {
         bail!(
-            "device '{dev_name}' reports an input stream with 0 channels — pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' reports an input stream with 0 channels: pick another device (`dictate --list-devices`)"
         );
     }
     Ok(config.channels as usize)
@@ -383,7 +383,7 @@ fn capture_loop(
 
 
 /// Collect frames until `stop` is set, `max_duration` elapses, or the
-/// backend goes silent past the wall-clock guard. No VAD endpoint — the
+/// backend goes silent past the wall-clock guard. No VAD endpoint; the
 /// hotkey release is the endpoint.
 fn capture_until_stop(
     rx: &mpsc::Receiver<Msg>,
@@ -466,6 +466,9 @@ fn trim_leading_silence(samples: &mut Vec<f32>, threshold: f32) {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Audio device configuration, deadline calculation, and silence trimming
+    //! must handle edge cases like 0-channel devices, duration overflow, and short buffers
+    //! safely without panics or FFI unwind violations.
     use super::*;
 
     fn stream_config(channels: u16) -> cpal::StreamConfig {
@@ -477,7 +480,7 @@ mod tests {
     }
 
     /// WHY: a device reporting 0 channels used to reach the capture
-    /// callback, where chunks_exact(0) panics — an unwind across the cpal
+    /// callback, where chunks_exact(0) panics: an unwind across the cpal
     /// FFI boundary. The device must be refused with an actionable error
     /// before the stream is built.
     #[test]

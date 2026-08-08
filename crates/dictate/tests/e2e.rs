@@ -138,7 +138,7 @@ macro_rules! require {
 
 /// Assert every STT-fidelity anchor appears in the raw transcript. If one
 /// is missing, the recognizer garbled the speech and the transformation
-/// assertions downstream would be vacuous — fail loudly instead.
+/// assertions downstream would be vacuous: fail loudly instead.
 macro_rules! anchor_raw {
     ($raw_lower:expr, $($needle:expr),+ $(,)?) => {
         $(

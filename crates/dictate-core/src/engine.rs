@@ -118,7 +118,7 @@ impl Engine {
         }
     }
 
-    /// Decode only — skip commands, dictionary, formatting, and refine.
+    /// Decode only: skip commands, dictionary, formatting, and refine.
     pub fn transcribe_f32_raw(&self, pcm_16k: &[f32]) -> Result<String> {
         self.decode_raw(pcm_16k)
     }

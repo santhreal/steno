@@ -1,6 +1,6 @@
 //! Speech-to-text via sherpa-onnx (Parakeet TDT). One `Transcriber` per
 //! model; the daemon keeps it resident for its whole lifetime. Provider is
-//! `"cuda"` (default) or `"cpu"` — chosen by config, never silently swapped.
+//! `"cuda"` (default) or `"cpu"` -- chosen by config, never silently swapped.
 //!
 //! The model is a DIRECTORY with encoder/decoder/joiner ONNX files plus
 //! tokens.txt (e.g. sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8).
@@ -24,7 +24,7 @@ impl Transcriber {
     /// execution `provider` (`"cuda"` or `"cpu"`).
     ///
     /// Fails closed: if CUDA cannot init, this errors with a corrective
-    /// hint to set `provider = "cpu"` — it never silently falls back.
+    /// hint to set `provider = "cpu"`: it never silently falls back.
     pub fn load(model_dir: &Path, n_threads: u32, provider: &str) -> Result<Self> {
         ensure!(
             (1..=(i32::MAX as u32)).contains(&n_threads),
@@ -152,7 +152,7 @@ fn path_str(p: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     //! WHY: model-dir validation is the only user-facing failure logic
-    //! left in this module — a whisper ggml file or a half-extracted
+    //! left in this module: a whisper ggml file or a half-extracted
     //! archive must fail with a corrective message, not an ONNX error.
     use super::*;
     use std::fs;

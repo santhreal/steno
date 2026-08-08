@@ -7,21 +7,13 @@
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::traits::Typer;
+use crate::traits::{OutputMode, Typer};
 use dictate_core::InjectTyper;
 use std::process::Command;
 
-/// Transcript delivery target mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    /// Print transcripts to standard output.
-    Stdout,
-    /// Inject synthetic keystrokes into the active focused window.
-    Type,
-}
 
 /// Progressive emitter: receives FINAL (post-pipeline) text chunks, joins
-/// them with correct spacing, and writes each one out immediately — stdout
+/// them with correct spacing, and writes each one out immediately: stdout
 /// flushes per chunk, typing happens per chunk. The clipboard is never
 /// involved, so it can never be clobbered.
 pub struct Emitter {

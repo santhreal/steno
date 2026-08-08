@@ -1,4 +1,4 @@
-//! light-dictate — minimal offline speech-to-text dictation CLI
+//! light-dictate: minimal offline speech-to-text dictation CLI
 //! (sherpa-onnx Parakeet TDT, GPU-resident).
 //!
 //! Binary name: `dictate`.
@@ -35,7 +35,7 @@ pub struct Cli {
 
     /// Type the result into the focused window via platform keystroke emitter instead
     /// of printing. SAFETY: requires `type_output = true` in the config
-    /// file — typing is never enabled from the command line alone.
+    /// file: typing is never enabled from the command line alone.
     /// Arm it persistently with `dictate config set type_output true`.
     #[arg(long)]
     r#type: bool,
@@ -145,7 +145,7 @@ enum ConfigCommand {
     },
     /// Set one settable config key (creates the file with the key if missing).
     ///
-    /// Arm typing with `dictate config set type_output true` — the only
+    /// Arm typing with `dictate config set type_output true`: the only
     /// persistent path; `--type` alone never enables keystroke injection.
     Set {
         /// Dotted key (`provider`, `ui.theme`, `type_output`, …).
@@ -386,7 +386,7 @@ pub(crate) fn emit_transcript(
 }
 
 /// Decide where the transcript goes. Typing is fail-closed: the ONLY way
-/// to enable it is `type_output = true` in the config file — a deliberate,
+/// to enable it is `type_output = true` in the config file: a deliberate,
 /// persistent act by the user. A bare `--type` flag is never sufficient,
 /// so no script, test, or agent can make dictate inject keystrokes into a
 /// live session without the user having armed their own config first.
@@ -425,7 +425,7 @@ fn init_log(verbosity: u8) {
 mod tests {
     //! Regression tests for output-mode selection. WHY: typing injects
     //! real keystrokes into the focused window, so it must be fail-closed
-    //! — armable only through the config file, never through a CLI flag.
+    //! -- armable only through the config file, never through a CLI flag.
     //! A test, script, or agent running `dictate --type` must error out
     //! before xdotool is spawned.
     use super::*;

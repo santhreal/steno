@@ -7,7 +7,7 @@
 //! ## Overlay
 //! Layered topmost HWND status chip (`UpdateLayeredWindow` + tiny-skia).
 //! Implements [`OverlayBackend`] stages. Visuals are a simplified always-on-top
-//! rounded chip (stage label + basic icon animation) — not a pixel-perfect
+//! rounded chip (stage label + basic icon animation), not a pixel-perfect
 //! port of the Linux X11 pill. Soft drop shadow uses the same separable
 //! `box_blur_alpha` approach as Linux (rounded-rect mask, 3-pass box blur).
 //! Recording timer honors `[ui.stages].show_timer`; stage-change scale pulse
@@ -31,7 +31,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tiny_skia::{Color, Paint, Path as SkPath, PathBuilder, Pixmap as SkPixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
-use crate::traits::{HotkeySource, Typer};
+use crate::traits::{HotkeyEvent, HotkeySource, OutputMode, Typer};
 
 use windows_sys::Win32::Foundation::{
     GetLastError, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM,
@@ -60,19 +60,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_POPUP,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotkeyEvent {
-    Press,
-    Release,
-    Cancel,
-    Shutdown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    Stdout,
-    Type,
-}
 
 /// A cancel keypress within this window after the activating press is
 /// treated as auto-repeat / bounce, not a deliberate cancel (mirrors Linux).
@@ -114,7 +101,7 @@ impl Hotkey {
     pub fn grab_caps_lock() -> Result<Self> {
         if HOOK_OWNED.swap(true, Ordering::SeqCst) {
             bail!(
-                "Windows Caps Lock hotkey is already grabbed in this process  -  \
+                "Windows Caps Lock hotkey is already grabbed in this process: \
                  drop the existing Hotkey before grabbing again"
             );
         }
@@ -245,7 +232,7 @@ fn hotkey_thread_main(tx: SyncSender<HotkeyEvent>, ready_tx: mpsc::Sender<Result
         let err = unsafe { GetLastError() };
         let _ = HOOK_STATE.lock().map(|mut g| g.take());
         let _ = ready_tx.send(Err(anyhow::anyhow!(
-            "SetWindowsHookExW(WH_KEYBOARD_LL) failed (Win32 error {err})  -  \
+            "SetWindowsHookExW(WH_KEYBOARD_LL) failed (Win32 error {err}): \
              another accessibility hook may be blocking Caps Lock capture"
         )));
         return;
@@ -488,7 +475,7 @@ fn type_text(text: &str) -> Result<()> {
     };
     ensure!(
         sent as usize == inputs.len(),
-        "SendInput typed {sent}/{} events (Win32 error {})  -  focus a text field and retry",
+        "SendInput typed {sent}/{} events (Win32 error {}): focus a text field and retry",
         inputs.len(),
         unsafe { GetLastError() },
     );

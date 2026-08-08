@@ -10,7 +10,7 @@
 //! collapse keeps the first spelling; phrase maps follow the first
 //! matched token's capitalization when the replacement is not a forced
 //! literal). Tokens with internal capitals or short all-lowercase brands
-//! emitted by format are left alone by case-transform rules — there are
+//! emitted by format are left alone by case-transform rules: there are
 //! none that rewrite token case beyond first-letter carry for phrase hits.
 //!
 //! ## Honest limits
@@ -257,7 +257,7 @@ const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
 ];
 
 /// Leading utterance fillers stripped once. `um`/`uh` stay with the
-/// dictionary — refine does not delete them mid-stream or compete with
+/// dictionary: refine does not delete them mid-stream or compete with
 /// `[overrides] "um" = ""`.
 const LEADING_FILLERS: &[&str] = &[
     "well", "so", "okay", "ok", "alright", "anyway", "basically", "like",

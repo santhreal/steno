@@ -1,13 +1,13 @@
 //! Global Caps Lock grab via X11 (`XGrabKey` on the root window).
 //!
 //! Hold = record, release = stop. While recording, ANY other key cancels
-//! the utterance (listened passively via XInput2 raw key events — the
+//! the utterance (listened passively via XInput2 raw key events: the
 //! key still reaches the focused app, nothing is swallowed). Modifier
 //! keys never cancel.
 //!
 //! Caps Lock is fully swallowed while the daemon runs: the keycode is
 //! remapped to NoSymbol for the daemon's lifetime (restored on exit),
-//! so the Lock modifier can never latch and caps state never toggles —
+//! so the Lock modifier can never latch and caps state never toggles:
 //! a passive grab alone would NOT stop XKB from locking caps on press.
 //!
 //! Failures are loud: if another client already owns the grab (e.g. a
@@ -19,12 +19,13 @@
 //! with the daemon gone. Recovery:
 //! 1. `restore_caps_lock_mapping()` (also called from `dictate stop`)
 //! 2. Next `grab_caps_lock()` resolves the keycode via keysym, then a
-//!    persisted keycode cache, then PC-keyboard fallback 66 — looking
+//!    persisted keycode cache, then PC-keyboard fallback 66: looking
 //!    up Caps_Lock by keysym alone fails once the mapping is empty.
 //!
 //! Manual fix: `xmodmap -e 'keycode 66 = Caps_Lock'`
 
 use anyhow::{Context, Result, anyhow, bail};
+use crate::traits::HotkeyEvent;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,31 +40,18 @@ use x11rb::rust_connection::RustConnection;
 
 /// X11 keysym for Caps Lock (`XK_Caps_Lock`).
 const XK_CAPS_LOCK: Keysym = 0xffe5;
-/// `NoSymbol` — remapping the Caps Lock keycode to this disables the
+/// `NoSymbol` -- remapping the Caps Lock keycode to this disables the
 /// caps toggle entirely while keeping the raw key events.
 const NO_SYMBOL: Keysym = 0;
 /// Typical PC keyboard Caps Lock keycode (evdev / xfree86).
 const FALLBACK_CAPS_KEYCODE: Keycode = 66;
 
-/// Push-to-talk hotkey event emitted during recording lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotkeyEvent {
-    /// Hotkey pressed: start recording.
-    Press,
-    /// Hotkey released: stop recording and begin transcription.
-    Release,
-    /// A non-modifier key other than the hotkey was pressed while
-    /// recording: the user wants the utterance dropped.
-    Cancel,
-    /// SIGTERM arrived: exit the event loop so Drop impls run.
-    Shutdown,
-}
 
 /// Global X11 Caps Lock push-to-talk hotkey grabber.
 pub struct Hotkey {
     conn: RustConnection,
     root: Window,
-    /// Caps Lock keycode — the push-to-talk trigger.
+    /// Caps Lock keycode -- the push-to-talk trigger.
     trigger: Keycode,
     /// Keysyms the trigger keycode had before we remapped it to
     /// NoSymbol; restored on Drop. Synthesized as plain Caps_Lock when
@@ -103,7 +91,7 @@ const CANCEL_GRACE: Duration = Duration::from_millis(150);
 /// already mapped. Returns whether a remap was applied.
 pub fn restore_caps_lock_mapping() -> Result<bool> {
     let (conn, _screen_num) = RustConnection::connect(None)
-        .context("cannot connect to X11 — is DISPLAY set?")?;
+        .context("cannot connect to X11: is DISPLAY set?")?;
     let Some((trigger, keysyms, per_slot)) = resolve_caps_trigger(&conn)? else {
         return Ok(false);
     };
@@ -124,12 +112,12 @@ impl Hotkey {
     /// keycode to NoSymbol so the caps toggle is dead while we run.
     pub fn grab_caps_lock() -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None)
-            .context("cannot connect to X11 — is DISPLAY set?")?;
+            .context("cannot connect to X11: is DISPLAY set?")?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         let (trigger, mapped, per_slot) = resolve_caps_trigger(&conn)?.ok_or_else(|| {
             anyhow!(
-                "keyboard has no Caps Lock keycode — cannot bind it. \
+                "keyboard has no Caps Lock keycode: cannot bind it. \
                  If Caps Lock was blackholed by a killed daemon, run: \
                  xmodmap -e 'keycode 66 = Caps_Lock'"
             )
@@ -183,7 +171,7 @@ impl Hotkey {
             if let Err(e) = cookie.check() {
                 bail!(
                     "XGrabKey(CapsLock) failed ({e}). Another client may already own that \
-                     shortcut — remove any GNOME/KDE binding on Caps Lock and retry."
+                     shortcut: remove any GNOME/KDE binding on Caps Lock and retry."
                 );
             }
             guard.masks.push(mask);
@@ -194,10 +182,10 @@ impl Hotkey {
         // delivered to the focused app (nothing is grabbed or swallowed).
         let version = xinput::xi_query_version(guard.conn.as_ref().unwrap(), 2, 0)?
             .reply()
-            .context("XIQueryVersion failed — XInput2 is required for cancel-any-key")?;
+            .context("XIQueryVersion failed: XInput2 is required for cancel-any-key")?;
         if version.major_version < 2 {
             bail!(
-                "X server has XInput {}.{}, need 2.0+ for cancel-any-key — upgrade the X server",
+                "X server has XInput {}.{}, need 2.0+ for cancel-any-key: upgrade the X server",
                 version.major_version,
                 version.minor_version
             );

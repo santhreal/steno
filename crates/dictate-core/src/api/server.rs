@@ -261,7 +261,7 @@ where
 }
 
 /// ApiHandler that implements utterance.* against an in-memory buffer and a
-/// pluggable transcoder. Typing is never performed here — stop returns text only.
+/// pluggable transcoder. Typing is never performed here: stop returns text only.
 pub struct UtteranceApiHandler<T: PcmTranscoder> {
     buf: Mutex<UtteranceBuffer>,
     transcoder: T,
@@ -727,6 +727,8 @@ pub fn encode_event(event: &Event) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: API server socket creation, token authentication, client session handling, and request
+    //! dispatching must operate securely and reliably over IPC sockets.
     use super::*;
     use crate::api::client::ApiClient;
     use crate::api::protocol::{Op, Request};

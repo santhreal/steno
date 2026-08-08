@@ -31,7 +31,7 @@ fn is_closing(c: char) -> bool {
 }
 
 /// Formatter state carried across streamed chunks. Quote and bracket
-/// state must survive segment boundaries — otherwise a closing quote that
+/// state must survive segment boundaries: otherwise a closing quote that
 /// lands in the NEXT chunk is misread as an opening one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FmtState {
@@ -179,6 +179,8 @@ pub fn format_with(input: &str, state: FmtState) -> (String, FmtState) {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Streaming text formatting (`FmtState`) must correctly manage sentence capitalization,
+    //! pronoun handling, quote tracking, and spacing across audio segment boundaries.
     use super::{FmtState, format_with};
 
     /// One-shot convenience for tests: format a whole string at once.

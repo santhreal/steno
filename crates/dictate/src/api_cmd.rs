@@ -58,7 +58,7 @@ fn connect(
     Ok((client, path, token))
 }
 
-/// `dictate ping` — RTT to the daemon API; exit nonzero if down.
+/// `dictate ping`: RTT to the daemon API; exit nonzero if down.
 pub fn ping(config_path: Option<&Path>, socket: Option<PathBuf>) -> Result<()> {
     let (mut client, path, token) = connect(config_path, socket)?;
     let start = Instant::now();
@@ -98,7 +98,7 @@ pub fn ping(config_path: Option<&Path>, socket: Option<PathBuf>) -> Result<()> {
     }
 }
 
-/// `dictate api status` — print daemon status JSON from the API socket.
+/// `dictate api status`: print daemon status JSON from the API socket.
 pub fn api_status(config_path: Option<&Path>, socket: Option<PathBuf>) -> Result<()> {
     let (mut client, path, token) = connect(config_path, socket)?;
     let resp = client
@@ -137,7 +137,7 @@ pub fn api_status(config_path: Option<&Path>, socket: Option<PathBuf>) -> Result
 mod tests {
     //! WHY: CLI API helpers must work against a temp mock socket without a
     //! live daemon, and must fail closed with a `dictate start` hint when the
-    //! socket is absent — so `cargo test` never depends on the host daemon.
+    //! socket is absent, so `cargo test` never depends on the host daemon.
 
     use super::*;
     use dictate_core::api::{StubHandler, serve_unix_until};

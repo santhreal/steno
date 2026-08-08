@@ -175,7 +175,7 @@ impl SessionBuilder {
 
     /// Copy typing / flash settings from a loaded [`crate::Config`].
     ///
-    /// Does **not** select an overlay theme — hosts call
+    /// Does **not** select an overlay theme: hosts call
     /// `dictate_platform::create(&cfg.ui)` (or inject their own
     /// [`OverlayBackend`]) separately. Theme palettes / stage labels are
     /// available via [`crate::resolve_ui`].
@@ -272,7 +272,7 @@ mod tests {
         assert!(err.is_err());
     }
 
-    /// WHY: fail-closed typing — a typer must not run when type_output is false,
+    /// WHY: fail-closed typing -- a typer must not run when type_output is false,
     /// and armed typing without a typer must error (never silently skip).
     #[test]
     fn typing_gates_match_session_maybe_type() {

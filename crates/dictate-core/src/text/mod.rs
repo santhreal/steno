@@ -1,8 +1,8 @@
 //! Post-transcription text pipeline, applied in this exact order:
-//! 1. voice commands  — "period", "new line", "scratch that", ...
-//! 2. dictionary      — multi-word phrase overrides, empty replacement deletes
-//! 3. formatting      — sentence capitalization, punctuation spacing
-//! 4. refine — offline ASR cleanup (duplicate words, spaced
+//! 1. voice commands  : "period", "new line", "scratch that", ...
+//! 2. dictionary      : multi-word phrase overrides, empty replacement deletes
+//! 3. formatting      : sentence capitalization, punctuation spacing
+//! 4. refine          : offline ASR cleanup (duplicate words, spaced
 //!    contractions, space-before-punct); default on
 //!
 //! Dictionary replacements are inserted verbatim: the formatter spaces and
@@ -84,9 +84,9 @@ impl TextPipeline {
     }
 
     /// Streaming: process one decoded segment, carrying formatter state
-    /// (capitalization, quote state) across segments — pass the returned
+    /// (capitalization, quote state) across segments: pass the returned
     /// state to the next call. `scratch that` can only delete within the
-    /// current segment — earlier segments are already emitted.
+    /// current segment: earlier segments are already emitted.
     ///
     /// Refine runs last on the formatted (or dictionary-only) string.
     pub fn process_stream(&self, raw: &str, state: format::FmtState) -> (String, format::FmtState) {

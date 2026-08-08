@@ -208,6 +208,8 @@ impl Dictionary {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: User dictionary phrase overrides, TOML configuration loading, and multi-word term
+    //! replacements must preserve text formatting while accurately substituting target phrases.
     use super::*;
     use std::io::Write;
 
@@ -428,7 +430,7 @@ mod tests {
 
     /// Regression ("Vayon" bug): the recognizer hears the brand
     /// "veyyon" as "Vayon". An entry for the misspelling must match case-insensitively
-    /// and insert the brand's exact lowercase form — even at a sentence
+    /// and insert the brand's exact lowercase form, even at a sentence
     /// start, where the formatter used to re-capitalize the replacement
     /// to "Veyyon".
     #[test]
@@ -458,7 +460,7 @@ mod tests {
     }
 
     /// The misspelling must also match with transcript punctuation glued
-    /// to it ("Vayon," / "Vayon.") — the tokenizer splits edge
+    /// to it ("Vayon," / "Vayon."): the tokenizer splits edge
     /// punctuation off before matching.
     #[test]
     fn misspelling_override_matches_next_to_punctuation() {
@@ -488,7 +490,7 @@ mod tests {
     }
 
     /// With formatting disabled the pipeline must still strip the
-    /// verbatim markers — they are an internal contract, never output.
+    /// verbatim markers; they are an internal contract, never output.
     #[test]
     fn verbatim_markers_never_reach_output_when_formatting_disabled() {
         let dict = Dictionary::from_entries([("vayon", "veyyon")]);

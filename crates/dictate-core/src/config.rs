@@ -6,7 +6,7 @@
 //! is empty (never rewritten to disk):
 //! - default / XDG config load → `~/.config/dictate/dictionary.toml`
 //! - explicit `--config` → only a sibling `dictionary.toml` beside that file
-//!   (never the operator XDG path — keeps alternate configs isolated)
+//!   (never the operator XDG path; keeps alternate configs isolated)
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -77,7 +77,7 @@ pub struct UiConfig {
     /// Palette presets: `"pill"` (default), `"mono"`, `"dusk"`, `"dawn"`,
     /// `"contrast"`. Platform `create` maps `"null"` / `"none"` / `"off"` to a
     /// no-op overlay; resolve still returns the pill palette for those.
-    /// Unknown themes log a warning and fall back to pill — UI is fail-open.
+    /// Unknown themes log a warning and fall back to pill; UI is fail-open.
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Optional hex color overrides layered on the theme preset.
@@ -116,12 +116,12 @@ pub struct Config {
     pub n_threads: u32,
     /// sherpa-onnx execution provider: `"cuda"` (default) or `"cpu"`.
     /// CPU is for CI/headless hosts without NVIDIA. Unknown values fail
-    /// closed at load — there is no silent fallback between providers.
+    /// closed at load: there is no silent fallback between providers.
     pub provider: String,
     /// Hard cap on one recording.
     pub max_record_secs: u64,
     /// ARMS typing: when true, results are typed into the focused window
-    /// via platform keystroke emitter. This is the ONLY way typing can be enabled — a
+    /// via platform keystroke emitter. This is the ONLY way typing can be enabled: a
     /// deliberate, persistent act. The `--type` CLI flag alone errors
     /// out, so no script or test can inject keystrokes into a live
     /// session without the user having armed this file first.
@@ -210,7 +210,7 @@ impl Default for Config {
 impl Config {
     /// Load `path`, or the default config path when `None`. A missing
     /// DEFAULT file is not an error (defaults apply); a missing EXPLICIT
-    /// path is an error — a silent typo would be worse. A malformed file
+    /// path is an error; a silent typo would be worse. A malformed file
     /// is an error with the offending line context.
     ///
     /// When `[dict.overrides]` is empty, a legacy `dictionary.toml` is
@@ -226,7 +226,7 @@ impl Config {
         let mut cfg = if !path.exists() {
             if explicit {
                 bail!(
-                    "config file '{}' does not exist — fix the path or remove the flag",
+                    "config file '{}' does not exist: fix the path or remove the flag",
                     path.display()
                 );
             }
@@ -234,13 +234,13 @@ impl Config {
         } else {
             if path.is_dir() {
                 bail!(
-                    "config path '{}' is a directory — pass a TOML file",
+                    "config path '{}' is a directory: pass a TOML file",
                     path.display()
                 );
             }
             let raw = fs::read_to_string(&path).with_context(|| {
                 format!(
-                    "cannot read config {} — check its permissions",
+                    "cannot read config {}: check its permissions",
                     path.display()
                 )
             })?;
@@ -274,13 +274,13 @@ impl Config {
         }
         if legacy.is_dir() {
             bail!(
-                "legacy dictionary path '{}' is a directory — replace it with a TOML file, or move overrides under [dict.overrides] in config.toml",
+                    "legacy dictionary path '{}' is a directory: replace it with a TOML file, or move overrides under [dict.overrides] in config.toml",
                 legacy.display()
             );
         }
         self.dict.overrides = Dictionary::load(Some(&legacy))?.to_map();
         log::warn!(
-            "{} is deprecated; dictionary overrides now live under [dict.overrides] in config.toml — copy them there and remove the old file",
+            "{} is deprecated; dictionary overrides now live under [dict.overrides] in config.toml: copy them there and remove the old file",
             legacy.display()
         );
         Ok(())
@@ -291,31 +291,31 @@ impl Config {
     fn validate(&self, path: &Path) -> Result<()> {
         ensure!(
             (1..=(i32::MAX as u32)).contains(&self.n_threads),
-            "invalid n_threads = {} in {} — set it between 1 and {}",
+            "invalid n_threads = {} in {}: set it between 1 and {}",
             self.n_threads,
             path.display(),
             i32::MAX
         );
         ensure!(
             matches!(self.provider.as_str(), "cuda" | "cpu"),
-            "invalid provider = {:?} in {} — set it to \"cuda\" or \"cpu\"",
+            "invalid provider = {:?} in {}: set it to \"cuda\" or \"cpu\"",
             self.provider,
             path.display()
         );
         ensure!(
             self.max_record_secs >= 1,
-            "invalid max_record_secs = 0 in {} — set it to at least 1 second",
+            "invalid max_record_secs = 0 in {}: set it to at least 1 second",
             path.display()
         );
         ensure!(
             self.ui.done_flash_ms <= 10_000,
-            "invalid done_flash_ms = {} in {} — set it to at most 10000 (10 seconds)",
+            "invalid done_flash_ms = {} in {}: set it to at most 10000 (10 seconds)",
             self.ui.done_flash_ms,
             path.display()
         );
         ensure!(
             self.ui.stages.pulse_ms <= 5_000,
-            "invalid ui.stages.pulse_ms = {} in {} — set it to at most 5000",
+            "invalid ui.stages.pulse_ms = {} in {}: set it to at most 5000",
             self.ui.stages.pulse_ms,
             path.display()
         );
@@ -339,7 +339,7 @@ impl Config {
 /// Unknown keys are rejected. Helpers edit surgically via `toml_edit` and
 /// preserve unrelated keys/comments where the document allows. They never
 /// rewrite `[dict.overrides]` blindly and do not alter typing fail-closed
-/// semantics — `type_output` is just another typed key.
+/// semantics -- `type_output` is just another typed key.
 pub fn list_settable_keys() -> &'static [&'static str] {
     &[
         "model_path",
@@ -374,7 +374,7 @@ pub fn list_settable_keys() -> &'static [&'static str] {
 fn ensure_settable(key: &str) -> Result<()> {
     ensure!(
         list_settable_keys().contains(&key),
-        "unsupported config key {key:?} — supported keys: {}",
+        "unsupported config key {key:?}: supported keys: {}",
         list_settable_keys().join(", ")
     );
     Ok(())
@@ -464,7 +464,7 @@ pub fn config_get(path: &Path, key: &str) -> Result<Option<String>> {
     }
     let raw = fs::read_to_string(path).with_context(|| {
         format!(
-            "cannot read config {} — check its permissions",
+            "cannot read config {}: check its permissions",
             path.display()
         )
     })?;
@@ -485,7 +485,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     let mut doc = if path.exists() {
         let raw = fs::read_to_string(path).with_context(|| {
             format!(
-                "cannot read config {} — check its permissions",
+                "cannot read config {}: check its permissions",
                 path.display()
             )
         })?;
@@ -504,7 +504,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     }
     fs::write(path, doc.to_string()).with_context(|| {
         format!(
-            "cannot write config {} — check its permissions",
+            "cannot write config {}: check its permissions",
             path.display()
         )
     })?;
@@ -554,7 +554,7 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
         let dir = expand_tilde(p)?;
         ensure!(
             dir.is_dir(),
-            "model path '{}' is not a sherpa-onnx model directory — {MODEL_DOWNLOAD_HINT}\n\
+            "model path '{}' is not a sherpa-onnx model directory: {MODEL_DOWNLOAD_HINT}\n\
              or pass --model /path/to/model-dir",
             dir.display()
         );
@@ -566,7 +566,7 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
         models = fs::read_dir(&dir)
             .with_context(|| {
                 format!(
-                    "cannot list model directory '{}' — check its permissions",
+                    "cannot list model directory '{}': check its permissions",
                     dir.display()
                 )
             })?
@@ -580,9 +580,9 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
             .into_iter()
             .next()
             .expect("single model directory guaranteed by len == 1 check")),
-        0 => bail!("no sherpa-onnx model found in '{}' — {MODEL_DOWNLOAD_HINT}", dir.display()),
+        0 => bail!("no sherpa-onnx model found in '{}': {MODEL_DOWNLOAD_HINT}", dir.display()),
         _ => bail!(
-            "multiple models in '{}': {} — set model_path in the config to pick one",
+            "multiple models in '{}': {} -- set model_path in the config to pick one",
             dir.display(),
             models
                 .iter()
@@ -594,7 +594,7 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
 }
 
 /// A directory counts as a model when it holds tokens.txt and an encoder
-/// ONNX — the full per-file check happens at load (stt::model_files).
+/// ONNX -- the full per-file check happens at load (stt::model_files).
 fn looks_like_model(dir: &Path) -> bool {
     dir.join("tokens.txt").is_file()
         && ["encoder.int8.onnx", "encoder.onnx", "encoder.fp16.onnx"]
@@ -620,7 +620,7 @@ fn home_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf> {
     match home {
         Some(h) if !h.as_os_str().is_empty() => Ok(PathBuf::from(h)),
         _ => bail!(
-            "the HOME environment variable is not set — set HOME, or pass explicit paths (--config, --model)"
+            "the HOME environment variable is not set: set HOME, or pass explicit paths (--config, --model)"
         ),
     }
 }
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn unknown_provider_is_rejected() {
-        // WHY: a typo like "gpu" must fail closed with a fix hint — never
+        // WHY: a typo like "gpu" must fail closed with a fix hint: never
         // silently map onto cuda or cpu.
         let path = temp_file("provider-bad.toml", b"provider = \"gpu\"\n");
         let err = error_of(load_without_legacy(Some(&path)));
@@ -797,7 +797,7 @@ backend = "rules"
 
     #[test]
     fn api_config_defaults_enabled() {
-        // WHY: daemon usefulness — [api] defaults to enabled so `dictate start`
+        // WHY: daemon usefulness -- [api] defaults to enabled so `dictate start`
         // exposes the socket without extra config. require_same_uid defaults true
         // (fail-closed peer uid gate).
         let cfg = Config::default();

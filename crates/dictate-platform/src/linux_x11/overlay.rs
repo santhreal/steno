@@ -3,7 +3,7 @@
 //!
 //! Pure display: override-redirect, takes no focus. Cosmetic and
 //! fail-open: no DISPLAY / no ARGB visual / any X error simply disables
-//! the overlay — dictation itself is unaffected.
+//! the overlay; dictation itself is unaffected.
 //!
 //! # Embedders
 //!
@@ -174,7 +174,7 @@ fn pill_width(stage: Stage, geo: &Geo) -> f32 {
 }
 
 /// Display scale factor from the X resource database (Xft.dpi / 96).
-/// Defaults to 1.0 — rendering twice as big on a 1x display was the
+/// Defaults to 1.0: rendering twice as big on a 1x display was the
 /// "massive" bug; never guess 2x.
 fn detect_scale<C: x11rb::connection::Connection>(conn: &C, root: u32) -> f32 {
     use x11rb::protocol::xproto::*;

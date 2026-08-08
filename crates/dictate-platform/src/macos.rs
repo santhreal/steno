@@ -8,7 +8,7 @@
 //!
 //! **Visual delta vs Linux X11 pill:** same soft `box_blur_alpha` shadow, icon
 //! disc + waveform/spinner/check/x, and recording timer (`show_timer`) as the
-//! Windows chip — not a pixel-perfect Linux port (no Xft DPI scale; AppKit
+//! Windows chip, not a pixel-perfect Linux port (no Xft DPI scale; AppKit
 //! panel chrome instead of an X override-redirect window; coarser motion).
 //! Colors/labels come from [`dictate_core::resolve_ui`]. Bottom-center
 //! placement; fail-open like Linux.
@@ -50,7 +50,7 @@ use tiny_skia::{
     PremultipliedColorU8, Transform,
 };
 
-use crate::traits::{HotkeySource, Typer};
+use crate::traits::{HotkeyEvent, HotkeySource, OutputMode, Typer};
 
 /// Corrective Accessibility hint shared by hotkey + typer failure paths.
 const ACCESSIBILITY_HINT: &str = "Grant Accessibility to this terminal (or the dictate binary) in \
@@ -62,19 +62,6 @@ const CANCEL_GRACE: Duration = Duration::from_millis(150);
 /// Small gap between unicode key events so focused apps do not drop glyphs.
 const TYPE_GAP: Duration = Duration::from_millis(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotkeyEvent {
-    Press,
-    Release,
-    Cancel,
-    Shutdown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    Stdout,
-    Type,
-}
 
 /// Caps Lock hold via `CGEventTap` (KeyDown = press, KeyUp = release).
 pub struct Hotkey {
@@ -319,7 +306,7 @@ fn is_modifier_keycode(keycode: u16) -> bool {
 /// Progressive emitter: stdout chunks or CGEvent unicode keystrokes.
 ///
 /// Typing uses `CGEventKeyboardSetUnicodeString` (via [`CGEvent::set_string`])
-/// — **no clipboard**. Control characters other than `'\n'` are stripped.
+/// with **no clipboard**. Control characters other than `'\n'` are stripped.
 pub struct Emitter {
     mode: OutputMode,
     last: Option<char>,
@@ -520,7 +507,7 @@ fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
 /// AppKit status chip (`NSPanel` + tiny-skia `NSImageView`).
 ///
 /// Pure display: nonactivating floating panel, ignores mouse, takes no focus.
-/// Cosmetic and fail-open — AppKit/font/init failures disable the overlay
+/// Cosmetic and fail-open: AppKit/font/init failures disable the overlay
 /// without affecting dictation.
 pub struct Overlay {
     tx: Option<Sender<Stage>>,

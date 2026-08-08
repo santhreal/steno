@@ -16,7 +16,7 @@ pub trait OverlayBackend: Send {
 }
 
 /// Headless / test / embedder stand-in: every method is a no-op.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NullOverlay;
 
 impl OverlayBackend for NullOverlay {
@@ -59,7 +59,7 @@ impl OverlayBackend for Box<dyn OverlayBackend> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    /// Window unmapped — idle between utterances.
+    /// Window unmapped (idle between utterances).
     Hidden,
     /// Live capture (shown as "Transcribing" with waveform + timer).
     Recording,
@@ -71,6 +71,8 @@ pub enum Stage {
 
 #[cfg(test)]
 mod tests {
+    //! WHY: Overlay implementations (`FnOverlay`, `NullOverlay`) must correctly report active status
+    //! and state transitions across recording, transcribing, done, and error stages.
     use super::*;
     use std::sync::{Arc, Mutex};
 
