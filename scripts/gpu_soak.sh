@@ -3,8 +3,8 @@
 # Does NOT touch the display or type anywhere.
 set -euo pipefail
 N="${1:-20}"
-WAV="${2:-$HOME/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/test_wavs/en.wav}"
-BIN="${DICTATE_BIN:-$(command -v dictate)}"
+WAV="${2:-$HOME/.local/share/steno/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/test_wavs/en.wav}"
+BIN="${DICTATE_BIN:-$(command -v steno)}"
 export SHERPA_ONNX_LIB_DIR="${SHERPA_ONNX_LIB_DIR:-/usr/local/lib/sherpa-onnx}"
 
 if [[ ! -f "$WAV" ]]; then
@@ -12,7 +12,7 @@ if [[ ! -f "$WAV" ]]; then
   exit 1
 fi
 if [[ ! -x "$BIN" ]]; then
-  echo "missing dictate binary: $BIN" >&2
+  echo "missing steno binary: $BIN" >&2
   exit 1
 fi
 

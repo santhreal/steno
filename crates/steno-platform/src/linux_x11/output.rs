@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::traits::{OutputMode, Typer};
-use dictate_core::InjectTyper;
+use steno_core::InjectTyper;
 use std::process::Command;
 
 

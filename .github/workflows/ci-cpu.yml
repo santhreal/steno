@@ -34,7 +34,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cache/dictate/sherpa-onnx-cpu
+            ~/.cache/steno/sherpa-onnx-cpu
             target
           key: cpu-ci-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |

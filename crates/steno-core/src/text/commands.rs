@@ -19,7 +19,7 @@ pub enum Action {
 }
 
 /// One voice command: the spoken phrase(s), the action, and user-facing
-/// documentation shown by `dictate --list-commands`.
+/// documentation shown by `steno --list-commands`.
 #[derive(Debug, Clone, Copy)]
 pub struct VoiceCommand {
     /// Alternative spoken forms, each a single phrase (may be multi-word).

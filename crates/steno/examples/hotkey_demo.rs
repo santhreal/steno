@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use dictate_platform::{Hotkey, HotkeyEvent};
+use steno_platform::{Hotkey, HotkeyEvent};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

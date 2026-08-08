@@ -4,7 +4,7 @@
 //! # Quick start
 //!
 //! ```ignore
-//! use dictate_core::{Config, Engine};
+//! use steno_core::{Config, Engine};
 //! let cfg = Config::load(None)?;
 //! let engine = Engine::load(&cfg)?;
 //! let text = engine.transcribe_f32(&pcm_16k)?;

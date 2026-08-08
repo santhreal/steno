@@ -2,15 +2,15 @@
 //! (`wtype` typing) when only `WAYLAND_DISPLAY` is set.
 //!
 //! Public surface matches the historical `linux_x11` re-exports so
-//! `dictate` / embedders keep importing `Hotkey`, `Emitter`, `OutputMode`,
-//! `Overlay`, `create`, and `HotkeyEvent` from `dictate_platform`.
+//! `steno` / embedders keep importing `Hotkey`, `Emitter`, `OutputMode`,
+//! `Overlay`, `create`, and `HotkeyEvent` from `steno_platform`.
 
 pub mod selection;
 
 use anyhow::{Result, bail};
-use dictate_core::config::UiConfig;
-use dictate_core::overlay::{NullOverlay, OverlayBackend};
-use dictate_core::InjectTyper;
+use steno_core::config::UiConfig;
+use steno_core::overlay::{NullOverlay, OverlayBackend};
+use steno_core::InjectTyper;
 
 use crate::linux_wayland;
 use crate::linux_x11;

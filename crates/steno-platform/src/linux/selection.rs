@@ -108,7 +108,7 @@ pub fn pure_wayland_hotkey_error() -> String {
     "Caps Lock hotkey is unavailable on a pure Wayland session (WAYLAND_DISPLAY is set, DISPLAY is not). \
      Corrective actions: (1) enable XWayland / ensure DISPLAY is set so the existing X11 grab can run \
      (echo $DISPLAY; on GNOME Wayland XWayland is usually :0 or :1), or (2) use stdout mode \
-     (`type_output = false` / `dictate --stdout`) until a native Wayland hotkey lands. \
+     (`type_output = false` / `steno --stdout`) until a native Wayland hotkey lands. \
      See docs/PLATFORM_TRAITS.md (Linux Wayland)."
         .to_string()
 }

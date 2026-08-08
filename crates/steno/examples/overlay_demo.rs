@@ -6,8 +6,8 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use dictate_core::config::UiConfig;
-use dictate_platform::{Overlay, Stage};
+use steno_core::config::UiConfig;
+use steno_platform::{Overlay, Stage};
 
 fn main() {
     let ov = Overlay::start(&UiConfig::default());

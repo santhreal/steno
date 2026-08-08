@@ -1,4 +1,4 @@
-# light-dictate - expansion architecture
+# steno - expansion architecture
 
 Target: a **minimal, offline, embeddable** speech engine + CLI/daemon that
 works cross-platform, stores **all** user config in one file, exposes a
@@ -11,7 +11,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 
 | Piece | Status |
 | --- | --- |
-| Workspace split (`dictate-core` / `dictate-platform` / `dictate`) | **Verified**: builds as a Cargo workspace |
+| Workspace split (`steno-core` / `steno-platform` / `steno`) | **Verified**: builds as a Cargo workspace |
 | `Engine` + `Session` public API | **Verified**: unit-tested; `from_parts` / `with_pipeline` / `process_text` for embedders; GPU load not in unit tests |
 | Single config + `[dict.overrides]` | **Verified**: unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
 | Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path passes `cfg.provider` (**Implemented/Verified**). |
@@ -22,7 +22,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
 | OverlayBackend + theme palettes (`pill|mono|dusk|dawn|contrast`) + `resolve_ui` | **Verified** unit tests in core/platform; live X11 pill **Unverified** here after cutover |
 | Cross-platform | Linux X11 real + Wayland MVP typing (`wtype`); Windows / macOS **hotkey + typing + status chip implemented** (HWND / NSPanel); chips consume `ResolvedUi`. Not live-UI verified on this Linux host |
-| Embeddable lib | **Yes**: depend on `dictate-core` (+ optional `dictate-platform`) |
+| Embeddable lib | **Yes**: depend on `steno-core` (+ optional `steno-platform`) |
 | Daemon IPC | **Yes**: Unix domain socket, NDJSON |
 | Daemon soak / crash recovery | Thin: needs Phase 5 hardening |
 | `provider = "cuda" \| "cpu"` | Config + `Engine`/`Transcriber` honor it (default `"cuda"`). CPU CI: `.github/workflows/ci-cpu.yml` / `scripts/ci-cpu.sh` |
@@ -35,7 +35,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 
 Agents and local development must not:
 
-- run `dictate start` / `restart` against the logged-in desktop
+- run `steno start` / `restart` against the logged-in desktop
 - grab Caps Lock, inject keystrokes, or drive the live X11/GNOME session
 - run GPU/nvidia-smi soaks or decode through the resident daemon on this machine
 
@@ -50,31 +50,31 @@ unless the main agent asks.
 
 0. **Post-STT refine**: `commands → dictionary → format → refine`. Default `RuleRefine` (offline ASR cleanup). Embedders can swap `RefineBackend` for heavier GEC; no network.
 
-1. **Single config file**: `~/.config/dictate/config.toml` owns everything,
+1. **Single config file**: `~/.config/steno/config.toml` owns everything,
    including dictionary overrides under `[dict.overrides]`. Legacy
    `dictionary.toml` is imported once on default/XDG load (loud log; an
    explicit `--config` only reads a sibling file beside that path). Once
    `[dict.overrides]` is populated, the legacy file is ignored. No second
-   config file. `dictate` never rewrites the operator's config for them.
+   config file. `steno` never rewrites the operator's config for them.
 2. **Workspace crates**
-   - `dictate-core`: STT, DSP, audio, text pipeline, config, `Engine` /
+   - `steno-core`: STT, DSP, audio, text pipeline, config, `Engine` /
      `Session`, overlay trait/`Stage`, IPC protocol + Unix client/server.
-   - `dictate-platform`: `HotkeySource`, `Typer`, OS backends (Linux X11
+   - `steno-platform`: `HotkeySource`, `Typer`, OS backends (Linux X11
      primary + Wayland MVP typing; Win/macOS real). Re-exports
      `OverlayBackend` / `Stage` / `NullOverlay` from core.
-   - `dictate`: CLI + daemon process binary.
+   - `steno`: CLI + daemon process binary.
 3. **Daemon API**: local Unix domain socket (Linux/macOS) /
    named pipe (Windows later). Newline-delimited JSON. No HTTP, no
-   cloud. Socket path: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (fallback
-   `$XDG_CACHE_HOME/dictate/dictate.sock` else `~/.cache/dictate/dictate.sock`). Optional `[api].token` shared secret. `[api].require_same_uid` (default true) gates peers via `SO_PEERCRED`.
+   cloud. Socket path: `$XDG_RUNTIME_DIR/steno/steno.sock` (fallback
+   `$XDG_CACHE_HOME/steno/steno.sock` else `~/.cache/steno/steno.sock`). Optional `[api].token` shared secret. `[api].require_same_uid` (default true) gates peers via `SO_PEERCRED`.
 4. **Typing safety stays fail-closed**: `type_output = true` in the
    config file is the only arming path, including for API clients. API
    cannot enable typing by itself. `utterance.*` must not enable typing.
-5. **Overlay**: `OverlayBackend` trait in `dictate-core`. Theme
+5. **Overlay**: `OverlayBackend` trait in `steno-core`. Theme
    resolution (`resolve_ui` / `stage_label` / `ThemePalette` / `ResolvedUi`)
    also lives in core; platforms call it once at overlay start and paint
    from `ResolvedUi`. Default Linux path = X11 pill via
-   `dictate_platform::create`. Hosts may ignore `ui.theme` and inject their
+   `steno_platform::create`. Hosts may ignore `ui.theme` and inject their
    own backend while still reading the palette if desired. Config can
    disable (`overlay = false`) or select `theme = "pill" | "mono" | "dusk" |
    "dawn" | "contrast"` / `"null"` (aliases `"none"` / `"off"`). Custom draw
@@ -109,10 +109,10 @@ raw STT text
 ## Crate layout
 
 ```text
-light-dictate/                      # workspace root
+steno/                      # workspace root
   Cargo.toml
   crates/
-    dictate-core/
+    steno-core/
       src/
         lib.rs
         config.rs
@@ -126,7 +126,7 @@ light-dictate/                      # workspace root
           protocol.rs       # request/response/event types (serde)
           client.rs         # ApiClient::connect / call
           server.rs         # serve_unix[_until], ApiHandler
-    dictate-platform/
+    steno-platform/
       src/
         lib.rs
         traits.rs           # HotkeySource, Typer
@@ -136,11 +136,11 @@ light-dictate/                      # workspace root
         windows.rs          # Caps Lock + SendInput + HWND soft-blur chip (ResolvedUi)
         macos.rs            # Caps Lock + CGEvent + NSPanel tiny-skia chip (ResolvedUi)
         null.rs             # NullHotkey / NullTyper
-    dictate/
+    steno/
       src/
         main.rs
-        api_cmd.rs          # dictate ping | dictate api status
-        config_cmd.rs       # dictate config|model|theme
+        api_cmd.rs          # steno ping | steno api status
+        config_cmd.rs       # steno config|model|theme
         daemon.rs           # hotkey loop + API thread when [api].enabled
   docs/
 ```
@@ -149,19 +149,19 @@ light-dictate/                      # workspace root
 
 ## CLI subcommand summary
 
-- `dictate start` / `stop` / `status` / `restart`: daemon lifecycle management (`start` and `restart` accept `--foreground`)
-- `dictate config`: `show`, `get <key>`, `set <key> <val>` (inspect or set individual configuration keys validated by `list_settable_keys()`, including `max_record_secs`, `api.enabled`, `api.path`, `api.token`, `model_path`, `provider`, `type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.*`, and `ui.colors.*`)
-- `dictate model`: `list`, `use <name_or_path> [--provider cuda|cpu]` (list or select sherpa-onnx model directory)
-- `dictate theme`: `list`, `set <name>` (list built-in overlay themes or set `ui.theme`)
-- `dictate ping`: check daemon API socket connectivity and round-trip latency
-- `dictate api status`: query daemon API for process, model, stage, and arming status
+- `steno start` / `stop` / `status` / `restart`: daemon lifecycle management (`start` and `restart` accept `--foreground`)
+- `steno config`: `show`, `get <key>`, `set <key> <val>` (inspect or set individual configuration keys validated by `list_settable_keys()`, including `max_record_secs`, `api.enabled`, `api.path`, `api.token`, `model_path`, `provider`, `type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.*`, and `ui.colors.*`)
+- `steno model`: `list`, `use <name_or_path> [--provider cuda|cpu]` (list or select sherpa-onnx model directory)
+- `steno theme`: `list`, `set <name>` (list built-in overlay themes or set `ui.theme`)
+- `steno ping`: check daemon API socket connectivity and round-trip latency
+- `steno api status`: query daemon API for process, model, stage, and arming status
 
 ---
 
 ## Single-config shape
 
 ```toml
-model_path = "~/.local/share/dictate/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+model_path = "~/.local/share/steno/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 type_output = false          # FAIL-CLOSED: must be true to type
 n_threads = 8
 max_record_secs = 120
@@ -207,7 +207,7 @@ enabled = true               # daemon listens on the socket
 "mukund" = "Mukund"
 "um" = ""
 ```
-`list_settable_keys()` in `dictate-core` provides exact surgical key validation for `config_get` / `config_set` and `dictate config set`. The full set of supported keys includes top-level options (`model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`), daemon API options (`api.enabled`, `api.path`, `api.token`), overlay settings (`ui.theme`, `ui.overlay`, `ui.done_flash_ms`), stage labels (`ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`, `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`), and color overrides (`ui.colors.*`). Wildcard patterns are rejected.
+`list_settable_keys()` in `steno-core` provides exact surgical key validation for `config_get` / `config_set` and `steno config set`. The full set of supported keys includes top-level options (`model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`), daemon API options (`api.enabled`, `api.path`, `api.token`), overlay settings (`ui.theme`, `ui.overlay`, `ui.done_flash_ms`), stage labels (`ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`, `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`), and color overrides (`ui.colors.*`). Wildcard patterns are rejected.
 
 ---
 
@@ -239,14 +239,14 @@ Server → client:
 `utterance.done` is emitted when an `utterance.stop` completes (same text as the
 response `result`). API utterance/transcribe paths never type.
 
-Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`. Daemon pid/ready/log live under `$XDG_CACHE_HOME/dictate/` (else `~/.cache/dictate/`).
+Socket: `$XDG_RUNTIME_DIR/steno/steno.sock`, else `$XDG_CACHE_HOME/steno/steno.sock`, else `~/.cache/steno/steno.sock`. Daemon pid/ready/log live under `$XDG_CACHE_HOME/steno/` (else `~/.cache/steno/`).
 
 ---
 
-## Embedder surface (`dictate-core`)
+## Embedder surface (`steno-core`)
 
 ```rust
-use dictate_core::{Config, Engine, NullOverlay, Session, resolve_ui, stage_label, Stage};
+use steno_core::{Config, Engine, NullOverlay, Session, resolve_ui, stage_label, Stage};
 
 let cfg = Config::load(None)?;
 let engine = Engine::load(&cfg)?;          // model resident
@@ -275,7 +275,7 @@ Typing requires **both** `type_output` armed (via `from_config` / `type_output(t
 
 ## Overlay theming
 
-`OverlayBackend` (in `dictate-core`, re-exported by `dictate-platform`):
+`OverlayBackend` (in `steno-core`, re-exported by `steno-platform`):
 
 - `fn set(&self, stage: Stage)`
 - `fn flash(&self, ms: u64)`
@@ -285,14 +285,14 @@ Typing requires **both** `type_output` armed (via `from_config` / `type_output(t
 Default labels: `"Transcribing"` / `"Processing"` / `"Done"` / `"Error"`
 (overridable via `[ui.stages]`, e.g. Listening / Thinking).
 
-**Resolution lives in `dictate-core`.** `resolve_ui(&UiConfig) -> ResolvedUi`
+**Resolution lives in `steno-core`.** `resolve_ui(&UiConfig) -> ResolvedUi`
 picks a preset palette (`pill|mono|dusk|dawn|contrast`), applies optional
 `[ui.colors]` hex overrides into `ThemePalette`, and copies stage knobs.
 `stage_label` / `list_themes` / surgical `config_get` / `config_set` are
 exported from the same crate. Unknown themes warn and fall back to pill;
 `null|none|off` still resolve to pill colors for shared helpers.
 
-**Platforms consume `ResolvedUi`.** `dictate_platform::create(&UiConfig)`
+**Platforms consume `ResolvedUi`.** `steno_platform::create(&UiConfig)`
 maps `overlay = false` and `theme` `null|none|off` to `NullOverlay`;
 otherwise Linux (X11 pill), Windows (layered HWND chip), and macOS
 (`NSPanel` chip) call `resolve_ui` once at start and paint from the

@@ -1,27 +1,27 @@
-# Embedding dictate-core
+# Embedding steno-core
 
 Minimal offline STT for host applications. No cloud. No UI required.
 
-`dictate-core` is the embeddable library. `dictate-platform` is optional OS
-glue (Caps Lock, typing, status chip). The `dictate` binary is one consumer of
-both; hosts should depend on `dictate-core` (+ platform only if they want
+`steno-core` is the embeddable library. `steno-platform` is optional OS
+glue (Caps Lock, typing, status chip). The `steno` binary is one consumer of
+both; hosts should depend on `steno-core` (+ platform only if they want
 native hotkey/overlay/typing).
 
 ## Add the dependency
 
 ```toml
 [dependencies]
-dictate-core = { path = "…/crates/dictate-core" }
+steno-core = { path = "…/crates/steno-core" }
 # optional OS backends (hotkey / typing / status chip):
-dictate-platform = { path = "…/crates/dictate-platform" }
+steno-platform = { path = "…/crates/steno-platform" }
 ```
 
 ## One-shot transcription
 
 ```rust
-use dictate_core::{Config, Engine};
+use steno_core::{Config, Engine};
 
-let cfg = Config::load(None)?;                 // ~/.config/dictate/config.toml
+let cfg = Config::load(None)?;                 // ~/.config/steno/config.toml
 let engine = Engine::load(&cfg)?;              // model resident (provider from cfg)
 let pcm: Vec<f32> = /* 16 kHz mono */;
 let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format → refine
@@ -68,7 +68,7 @@ Hosts that inject a custom [`RefineBackend`], pre-built dictionary, or test
 double assemble the engine explicitly:
 
 ```rust
-use dictate_core::{
+use steno_core::{
     Config, Dictionary, Engine, NullRefine, RefineBackend, TextConfig, TextPipeline,
     Transcriber,
 };
@@ -79,7 +79,7 @@ impl RefineBackend for MyRefine {
 }
 
 let cfg = Config::load(None)?;
-let model = dictate_core::resolve_model(None, &cfg)?;
+let model = steno_core::resolve_model(None, &cfg)?;
 let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)?;
 let dict = Dictionary::from_map(cfg.dict.overrides.clone());
 let pipeline = TextPipeline::with_refine(cfg.text, dict, Box::new(MyRefine));
@@ -98,7 +98,7 @@ Accessors: `engine.transcriber()`, `engine.pipeline()`.
 Order is fixed: **commands → dictionary → format → refine**.
 
 ```rust
-use dictate_core::{Dictionary, FmtState, TextConfig, TextPipeline};
+use steno_core::{Dictionary, FmtState, TextConfig, TextPipeline};
 
 let overrides = std::collections::HashMap::from([("handy".into(), "Dictate".into())]);
 let pipeline = TextPipeline::new(TextConfig::default(), Dictionary::from_map(overrides));
@@ -128,7 +128,7 @@ offline tables only, not acoustic-garble repair). `enabled = false` →
 `NullRefine`.
 
 `RefineBackend` must stay pure and offline: there is no network path in
-`dictate-core`. Heavier offline GEC belongs behind the same trait.
+`steno-core`. Heavier offline GEC belongs behind the same trait.
 
 ## Session (engine + overlay + optional typer)
 `Session` wraps a loaded `Engine` and a `Box<dyn OverlayBackend>`. One-shot
@@ -141,7 +141,7 @@ Default stage labels are `"Transcribing"` / `"Processing"` / `"Done"` /
 `"Error"`; remap via `[ui.stages]` (for example Listening / Thinking).
 
 ```rust
-use dictate_core::{Config, Engine, NullOverlay, OverlayBackend, Session, Stage};
+use steno_core::{Config, Engine, NullOverlay, OverlayBackend, Session, Stage};
 
 struct MyLoader;
 impl OverlayBackend for MyLoader {
@@ -169,7 +169,7 @@ let session = Session::with_defaults(engine);
 Closure-backed overlay (`FnOverlay`) for testing and lightweight embedding without a custom struct:
 
 ```rust
-use dictate_core::overlay::FnOverlay;
+use steno_core::overlay::FnOverlay;
 
 let session = Session::builder(engine)
     .overlay(FnOverlay(|stage| println!("Stage changed: {stage:?}")))
@@ -177,7 +177,7 @@ let session = Session::builder(engine)
 ```
 
 `from_config` does **not** pick a theme overlay: call
-`dictate_platform::create(&cfg.ui)` when you want the built-in chip, or inject
+`steno_platform::create(&cfg.ui)` when you want the built-in chip, or inject
 your own backend. Theme palettes / labels stay available via `resolve_ui`.
 
 Stage order without loading a model (tests / custom decode):
@@ -188,11 +188,11 @@ Session::drive_overlay_stages(&NullOverlay, 0, || Ok::<_, anyhow::Error>(()));
 
 ## UI resolution (`resolve_ui`)
 
-Theme palettes and stage copy live in `dictate-core`. Platforms and host
+Theme palettes and stage copy live in `steno-core`. Platforms and host
 apps share the same helpers:
 
 ```rust
-use dictate_core::{resolve_ui, stage_label, list_themes, Stage};
+use steno_core::{resolve_ui, stage_label, list_themes, Stage};
 
 let ui = resolve_ui(&cfg.ui);          // ResolvedUi { theme, colors, stages, … }
 let label = stage_label(&cfg.ui, Stage::Recording);
@@ -216,12 +216,12 @@ Typing is **fail-closed**. Keystrokes leave `Session` only when **both** are tru
 1. `type_output = true` in the user's config (via `SessionBuilder::from_config` / `type_output(true)`), and
 2. a typer was injected with `SessionBuilder::typer(...)`.
 
-`dictate-core` exposes `InjectTyper` (same shape as platform `Typer`) so the
+`steno-core` exposes `InjectTyper` (same shape as platform `Typer`) so the
 session crate does not depend on OS backends. On Linux X11:
 
 ```rust
-use dictate_core::{InjectTyper, Session};
-use dictate_platform::{Emitter, NullTyper, OutputMode, Typer};
+use steno_core::{InjectTyper, Session};
+use steno_platform::{Emitter, NullTyper, OutputMode, Typer};
 
 // Never types (tests / headless):
 let session = Session::builder(engine)
@@ -247,15 +247,15 @@ animated X11 pill; Win/mac = simpler chips). All chips call `resolve_ui`.
 
 ## Capture / DSP (optional)
 
-`dictate_core::audio` records 16 kHz mono (`record`, `record_while`,
-`list_input_devices`). `dictate_core::dsp` covers resample / DC-block /
+`steno_core::audio` records 16 kHz mono (`record`, `record_while`,
+`list_input_devices`). `steno_core::dsp` covers resample / DC-block /
 gain / trim used by the CLI. Most embedders feed their own PCM into
 `Engine::transcribe_f32`.
 
 ## Config helpers
 
 ```rust
-use dictate_core::{
+use steno_core::{
     Config, config_get, config_set, default_config_path, default_model_dir,
     expand_tilde, list_settable_keys, resolve_model,
 };
@@ -263,7 +263,7 @@ use dictate_core::{
 let path = default_config_path()?;
 let cfg = Config::load(Some(&path))?;
 let model = resolve_model(None, &cfg)?;
-let _ = expand_tilde("~/.local/share/dictate/models".as_ref())?;
+let _ = expand_tilde("~/.local/share/steno/models".as_ref())?;
 config_set(&path, "ui.theme", "dusk")?;
 let theme = config_get(&path, "ui.theme")?;
 ```
@@ -307,7 +307,7 @@ pulse_ms = 180
 `ApiClient` is a thin Unix-socket NDJSON client: `connect(path)` + `call(&Request)`.
 
 ```rust
-use dictate_core::api::{ApiClient, Op, Request, default_socket_path};
+use steno_core::api::{ApiClient, Op, Request, default_socket_path};
 
 let mut c = ApiClient::connect(default_socket_path()?)?;
 
@@ -330,20 +330,20 @@ assert!(resp.ok);
 // resp.result is JSON, typically {"text":"..."}; API never types
 ```
 
-Socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock` (else `$XDG_CACHE_HOME/dictate/dictate.sock`, else `~/.cache/dictate/dictate.sock`).
+Socket: `$XDG_RUNTIME_DIR/steno/steno.sock` (else `$XDG_CACHE_HOME/steno/steno.sock`, else `~/.cache/steno/steno.sock`).
 
 Streaming: `utterance.start` → `utterance.audio` (pcm_f32_b64) → `utterance.stop`.
 Stop returns `{"text":…}`; server may also emit `{"event":"utterance.done","text":…}`.
-CLI: `dictate ping`, `dictate api status`.
+CLI: `steno ping`, `steno api status`.
 
 Ops: `ping`, `status`, `transcribe`, `utterance.*`, `shutdown`. Typing is never
 armed through the API. `[api].require_same_uid` (default true) rejects
 other-uid peers.
 
 
-## In-process socket server API (`dictate_core::api::server`)
+## In-process socket server API (`steno_core::api::server`)
 
-Embedders running the socket server or embedding custom socket handlers use the API server infrastructure in `dictate_core::api::server` (`dictate_core::api`):
+Embedders running the socket server or embedding custom socket handlers use the API server infrastructure in `steno_core::api::server` (`steno_core::api`):
 
 - **`ApiHandler`**: Trait (`pub trait ApiHandler`) providing synchronous callbacks matching each protocol operation (`authorize`, `ping`, `status`, `transcribe`, `utterance_start`, `utterance_audio`, `utterance_stop`, `utterance_cancel`, `shutdown`). Includes default stub implementations (`StubHandler`).
 - **`UtteranceApiHandler<T: PcmTranscoder>`**: Standard `ApiHandler` implementation for streaming utterance ops (`utterance.start` / `audio` / `stop` / `cancel`). It buffers audio into an `UtteranceBuffer` and delegates transcription on `utterance.stop` to a pluggable transcoder.

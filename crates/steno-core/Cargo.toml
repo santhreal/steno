@@ -1,5 +1,5 @@
 [package]
-name = "dictate-core"
+name = "steno-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

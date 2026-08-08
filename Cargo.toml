@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/dictate-core",
-    "crates/dictate-platform",
-    "crates/dictate",
+    "crates/steno-core",
+    "crates/steno-platform",
+    "crates/steno",
 ]
 
 [workspace.package]

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::traits::OutputMode;
 use crate::traits::Typer;
-use dictate_core::InjectTyper;
+use steno_core::InjectTyper;
 use std::process::Command;
 
 /// Progressive emitter for Wayland sessions (same surface as X11 `Emitter`).

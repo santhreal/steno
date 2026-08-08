@@ -401,59 +401,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "dictate"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "dictate-core",
- "dictate-platform",
- "env_logger",
- "libc",
- "log",
- "serde_json",
- "x11rb",
-]
-
-[[package]]
-name = "dictate-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "cpal",
- "hound",
- "libc",
- "log",
- "rubato",
- "serde",
- "serde_json",
- "sherpa-onnx",
- "toml",
- "toml_edit 0.22.27",
-]
-
-[[package]]
-name = "dictate-platform"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "core-foundation",
- "core-graphics",
- "dictate-core",
- "fontdue",
- "log",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "serde",
- "tiny-skia",
- "windows-sys 0.61.2",
- "x11rb",
-]
-
-[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1534,6 +1481,59 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "steno"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "env_logger",
+ "libc",
+ "log",
+ "serde_json",
+ "steno-core",
+ "steno-platform",
+ "x11rb",
+]
+
+[[package]]
+name = "steno-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "cpal",
+ "hound",
+ "libc",
+ "log",
+ "rubato",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "toml",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "steno-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core-foundation",
+ "core-graphics",
+ "fontdue",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde",
+ "steno-core",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+ "x11rb",
+]
 
 [[package]]
 name = "strict-num"

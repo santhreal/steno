@@ -9,11 +9,11 @@
 - [x] Wire API server into daemon (api.enabled)
 - [x] `api.require_same_uid` + SO_PEERCRED gate (default true)
 - [x] Migrate call sites to Box<dyn OverlayBackend>
-- [x] Merge user dictionary.toml into config.toml on disk (operator step; in-memory import + docs; `dictate` never rewrites the file)
-- [x] `dictate ping` / `dictate api status` CLI helpers
+- [x] Merge user dictionary.toml into config.toml on disk (operator step; in-memory import + docs; `steno` never rewrites the file)
+- [x] `steno ping` / `steno api status` CLI helpers
 
 ## Phase 3 - workspace + embed API
-- [x] Split dictate-core / dictate-platform / dictate
+- [x] Split steno-core / steno-platform / steno
 - [x] Engine + Session public API
 - [x] Platform traits; Linux X11 behind them
 - [x] Null backends for headless
@@ -32,8 +32,8 @@
 - [x] axiomexec remote Xvfb verify: **PASS** on `axiomexec@192.168.0.135` (Tailscale SSH still interactive-auth blocked)
 - [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`)
 - [x] README + EMBEDDING.md synced for single config / refine / API / embed hooks
-- [x] Theme palettes (`pill|mono|dusk|dawn|contrast`) + `[ui.colors]` / `[ui.stages]` + `resolve_ui` in dictate-core; platforms consume `ResolvedUi`
-- [x] CLI `dictate config show|get|set`, `dictate model list|use [--provider]`, `dictate theme list|set`
+- [x] Theme palettes (`pill|mono|dusk|dawn|contrast`) + `[ui.colors]` / `[ui.stages]` + `resolve_ui` in steno-core; platforms consume `ResolvedUi`
+- [x] CLI `steno config show|get|set`, `steno model list|use [--provider]`, `steno theme list|set`
 - [x] Configurable stage labels (`[ui.stages]`; defaults Transcribing/Processing/Done/Error)
 - [x] Library polish: `Engine::{from_parts,with_pipeline,process_text,load_model}`, path helper re-exports, EMBEDDING rewrite
 
@@ -53,7 +53,7 @@ overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable
 ## Phase 7 - platform depth & extensions (future)
 - [ ] Wayland native status overlay (`zwlr-layer-shell-v1` status pill)
 - [ ] Wayland native global hotkey (XDG Global Shortcuts portal)
-- [ ] Windows native named pipe IPC backend for daemon API (`\\.\pipe\dictate`)
+- [ ] Windows native named pipe IPC backend for daemon API (`\\.\pipe\steno`)
 - [ ] High-DPI awareness & scale factor support for Windows HWND & macOS NSPanel overlays
 - [ ] macOS Metal execution provider support in `stt.rs` (`provider = "metal"`)
 - [ ] External / LLM `RefineBackend` plugin integration

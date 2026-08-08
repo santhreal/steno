@@ -1,16 +1,16 @@
 [package]
-name = "dictate-platform"
+name = "steno-platform"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "OS backends for light-dictate: hotkey, overlay, typing (Linux X11 + Wayland MVP)"
+description = "OS backends for steno: hotkey, overlay, typing (Linux X11 + Wayland MVP)"
 
 [dependencies]
 anyhow = "1"
-dictate-core = { path = "../dictate-core" }
+steno-core = { path = "../steno-core" }
 fontdue = "0.9"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

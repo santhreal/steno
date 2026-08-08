@@ -1,11 +1,11 @@
 # Platform traits
 
 Owned shapes as of the workspace split. `OverlayBackend` / `Stage` /
-`NullOverlay` live in `dictate-core` and are re-exported from
-`dictate-platform`.
+`NullOverlay` live in `steno-core` and are re-exported from
+`steno-platform`.
 
 ```rust
-// dictate_platform::traits
+// steno_platform::traits
 pub trait HotkeySource: Send {
     fn next_event(&mut self) -> anyhow::Result<HotkeyEvent>;
     fn drain_pending(&mut self);
@@ -15,12 +15,12 @@ pub trait Typer: Send {
     fn type_text(&mut self, text: &str) -> anyhow::Result<()>;
 }
 
-// dictate_core::session::InjectTyper (re-exported by dictate-platform)
+// steno_core::session::InjectTyper (re-exported by steno-platform)
 pub trait InjectTyper: Send {
     fn type_text(&mut self, text: &str) -> anyhow::Result<()>;
 }
 
-// dictate_core::overlay (re-exported by dictate-platform)
+// steno_core::overlay (re-exported by steno-platform)
 pub trait OverlayBackend: Send {
     fn set(&self, stage: Stage);
     fn flash(&self, ms: u64);
@@ -32,10 +32,10 @@ pub enum Stage { Hidden, Recording, Transcribing, Done, Error }
 ```
 ## Top-Level Factory Helpers
 
-`dictate-platform` exports top-level factory helpers that construct OS-native backends without requiring host applications to import OS-specific modules (`linux`, `windows`, `macos`):
+`steno-platform` exports top-level factory helpers that construct OS-native backends without requiring host applications to import OS-specific modules (`linux`, `windows`, `macos`):
 
 ```rust
-use dictate_platform::{
+use steno_platform::{
     create_hotkey, create_typer, create_platform_backends, create_overlay,
     InjectTyper, OutputMode, PlatformBackends,
 };
@@ -57,16 +57,16 @@ let backends = create_platform_backends(OutputMode::Type, &cfg.ui)?;
 
 ### Core-Platform Decoupling (`InjectTyper`)
 
-`InjectTyper` is defined in `dictate-core` and re-exported top-level by `dictate-platform`. Platform `Emitter` and `NullTyper` implement `InjectTyper`, enabling `Session` builders to receive platform typing sinks while keeping `dictate-core` free of OS-specific dependencies.
+`InjectTyper` is defined in `steno-core` and re-exported top-level by `steno-platform`. Platform `Emitter` and `NullTyper` implement `InjectTyper`, enabling `Session` builders to receive platform typing sinks while keeping `steno-core` free of OS-specific dependencies.
 
 ## Feature Flags & Build Configuration
 
-`dictate-platform` requires **no Cargo feature flags**. Target platform backends are selected automatically at compile time using standard Rust OS target conditionals (`cfg(target_os = "linux")`, `cfg(target_os = "windows")`, `cfg(target_os = "macos")`).
+`steno-platform` requires **no Cargo feature flags**. Target platform backends are selected automatically at compile time using standard Rust OS target conditionals (`cfg(target_os = "linux")`, `cfg(target_os = "windows")`, `cfg(target_os = "macos")`).
 
 Linux: `linux` facade selects X11 vs Wayland. X11 path
 `linux_x11::{hotkey, overlay, output}`: real Caps Lock grab, pill overlay
 (`create(&UiConfig)`), xdotool typing via `Emitter` in `OutputMode::Type`.
-`Emitter` implements both `Typer` and `dictate_core::InjectTyper`. Pure Wayland
+`Emitter` implements both `Typer` and `steno_core::InjectTyper`. Pure Wayland
 uses `linux_wayland::Emitter` (`wtype` / `ydotool`); see below.
 
 ### Overlay themes (all platforms)
@@ -93,8 +93,8 @@ state, so older builds could not self-heal on the next start.
 
 Recovery order now:
 
-1. `dictate stop` / `dictate start` call `restore_caps_lock_mapping()` (skipped while a live daemon is detected, never while a live daemon intentionally holds NoSymbol):
-   resolves the keycode via live keysym, then `~/.cache/dictate/caps_keycode`,
+1. `steno stop` / `steno start` call `restore_caps_lock_mapping()` (skipped while a live daemon is detected, never while a live daemon intentionally holds NoSymbol):
+   resolves the keycode via live keysym, then `~/.cache/steno/caps_keycode`,
    then PC fallback **66**, and writes plain `Caps_Lock` when the slot is
    all-`NoSymbol`.
 2. Next `grab_caps_lock()` uses the same resolver before remapping again.
@@ -106,12 +106,12 @@ Manual recovery on a typical PC keyboard (X11 keycode **66**):
 ```bash
 xmodmap -e 'keycode 66 = Caps_Lock'
 # or:
-dictate stop
+steno stop
 ```
 
 Restore helpers (`recover_orig_keysyms`, `nosymbol_mapping`,
 `caps_lock_restore_keysyms`, `resolve_caps_trigger`) are unit-tested without
-a live display. `dictate stop` waits longer before escalating to SIGKILL so
+a live display. `steno stop` waits longer before escalating to SIGKILL so
 a clean `Drop` is more likely mid-transcription.
 
 
@@ -158,8 +158,8 @@ Real minimal backends via `windows-sys`:
   no Xft DPI scale factor beyond primary work-area placement; motion/timing
   remain coarser than the Linux mock. Fail-open on HWND/font/GDI errors.
   Not live-session verified on this Linux host (no local UI soak). Full
-  `cargo check -p dictate-platform --target x86_64-pc-windows-gnu` is
-  blocked by `dictate-core` Unix-socket API (`std::os::unix`); `windows.rs`
+  `cargo check -p steno-platform --target x86_64-pc-windows-gnu` is
+  blocked by `steno-core` Unix-socket API (`std::os::unix`); `windows.rs`
   itself typechecks green for that target in isolation.
 
 Same public surface as Linux. Not live-session verified on this Linux host.

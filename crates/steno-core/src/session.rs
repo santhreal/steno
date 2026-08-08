@@ -10,8 +10,8 @@ use crate::overlay::{NullOverlay, OverlayBackend, Stage};
 
 /// Keystroke sink for [`Session`].
 ///
-/// Same shape as `dictate_platform::Typer`. Defined here so `Session` stays
-/// in `dictate-core` without depending on the platform crate. Platform
+/// Same shape as `steno_platform::Typer`. Defined here so `Session` stays
+/// in `steno-core` without depending on the platform crate. Platform
 /// backends implement both traits; hosts may also adapt any sink.
 pub trait InjectTyper: Send {
     fn type_text(&mut self, text: &str) -> Result<()>;
@@ -176,7 +176,7 @@ impl SessionBuilder {
     /// Copy typing / flash settings from a loaded [`crate::Config`].
     ///
     /// Does **not** select an overlay theme: hosts call
-    /// `dictate_platform::create(&cfg.ui)` (or inject their own
+    /// `steno_platform::create(&cfg.ui)` (or inject their own
     /// [`OverlayBackend`]) separately. Theme palettes / stage labels are
     /// available via [`crate::resolve_ui`].
     pub fn from_config(mut self, cfg: &crate::Config) -> Self {

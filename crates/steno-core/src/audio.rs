@@ -24,7 +24,7 @@ pub struct RecordConfig {
     pub max_gain: f32,
 }
 
-/// Names of all input devices, for `dictate --list-devices`.
+/// Names of all input devices, for `steno --list-devices`.
 pub fn list_input_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();
     let devices = host.input_devices().context(
@@ -67,7 +67,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         .max_by(|a, b| a.cmp_default_heuristics(b))
         .ok_or_else(|| {
             anyhow!(
-                "device '{dev_name}' supports no input stream formats: pick another device (`dictate --list-devices`)"
+                "device '{dev_name}' supports no input stream formats: pick another device (`steno --list-devices`)"
             )
         })?;
     let chosen = range
@@ -96,7 +96,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
         }
         cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
         other => bail!(
-            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`steno --list-devices`)"
         ),
     }?;
     stream.play().with_context(|| {
@@ -110,7 +110,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
 
     if captured.is_empty() || !speech_started {
         bail!(
-            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
+            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`steno --list-devices`)"
         );
     }
 
@@ -123,7 +123,7 @@ pub fn record(cfg: &RecordConfig) -> Result<Vec<f32>> {
     trim_leading_silence(&mut samples, cfg.vad.speech_threshold);
     if samples.is_empty() {
         bail!(
-            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`dictate --list-devices`)"
+            "no speech detected on device '{dev_name}': check the microphone is not muted and the right device is selected (`steno --list-devices`)"
         );
     }
     Ok(samples)
@@ -151,7 +151,7 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
         .max_by(|a, b| a.cmp_default_heuristics(b))
         .ok_or_else(|| {
             anyhow!(
-                "device '{dev_name}' supports no input stream formats: pick another device (`dictate --list-devices`)"
+                "device '{dev_name}' supports no input stream formats: pick another device (`steno --list-devices`)"
             )
         })?;
     let chosen = range
@@ -182,7 +182,7 @@ pub fn record_while(cfg: &RecordConfig, stop: &AtomicBool, discard: &AtomicBool)
         }
         cpal::SampleFormat::U32 => build_stream::<u32>(&device, &stream_config, tx, &dev_name),
         other => bail!(
-            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' only offers unsupported sample format {other:?}: pick another device (`steno --list-devices`)"
         ),
     }?;
     stream.play().with_context(|| {
@@ -229,7 +229,7 @@ fn select_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device
                 );
             }
             bail!(
-                "no default input device: select one with `dictate --device` (available: {})",
+                "no default input device: select one with `steno --device` (available: {})",
                 names.join(", ")
             );
         }
@@ -263,7 +263,7 @@ enum Msg {
 fn mono_channels(config: &cpal::StreamConfig, dev_name: &str) -> Result<usize> {
     if config.channels == 0 {
         bail!(
-            "device '{dev_name}' reports an input stream with 0 channels: pick another device (`dictate --list-devices`)"
+            "device '{dev_name}' reports an input stream with 0 channels: pick another device (`steno --list-devices`)"
         );
     }
     Ok(config.channels as usize)
@@ -364,7 +364,7 @@ fn capture_loop(
                 }
                 VadEvent::StartTimeout => {
                     bail!(
-                        "no speech detected within {}s on device '{dev_name}' — check the microphone is not muted and the right device is selected (`dictate --list-devices`)",
+                        "no speech detected within {}s on device '{dev_name}' — check the microphone is not muted and the right device is selected (`steno --list-devices`)",
                         cfg.vad.start_timeout_secs
                     );
                 }
