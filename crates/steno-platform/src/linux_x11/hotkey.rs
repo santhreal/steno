@@ -90,8 +90,7 @@ const CANCEL_GRACE: Duration = Duration::from_millis(150);
 /// Safe to call when the daemon is not running. No-ops when Caps Lock is
 /// already mapped. Returns whether a remap was applied.
 pub fn restore_caps_lock_mapping() -> Result<bool> {
-    let (conn, _screen_num) = RustConnection::connect(None)
-        .context("cannot connect to X11: is DISPLAY set?")?;
+    let (conn, _screen_num) = connect_x11_for_restore()?;
     let Some((trigger, keysyms, per_slot)) = resolve_caps_trigger(&conn)? else {
         return Ok(false);
     };
@@ -105,6 +104,36 @@ pub fn restore_caps_lock_mapping() -> Result<bool> {
         .context("cannot restore Caps Lock keysyms")?;
     conn.flush()?;
     Ok(true)
+}
+
+fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
+    if let Ok(res) = RustConnection::connect(None) {
+        return Ok(res);
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/tmp/.X11-unix") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            if let Some(num) = s.strip_prefix('X') {
+                candidates.push(format!(":{num}"));
+            }
+        }
+    }
+    for d in [":0", ":1", ":2"] {
+        if !candidates.iter().any(|c| c == d) {
+            candidates.push(d.to_string());
+        }
+    }
+
+    for disp in candidates {
+        if let Ok(res) = RustConnection::connect(Some(&disp)) {
+            return Ok(res);
+        }
+    }
+
+    RustConnection::connect(None).context("cannot connect to X11: is DISPLAY set?")
 }
 
 impl Hotkey {
@@ -787,5 +816,17 @@ mod tests {
         assert!(matches!(queue.pop_front(), Some(Event::KeyPress(e)) if e.detail == 2));
         assert!(matches!(queue.pop_front(), Some(Event::KeyPress(e)) if e.detail == 3));
         assert!(queue.pop_front().is_none());
+    }
+    #[test]
+    fn connect_x11_for_restore_handles_missing_display_without_panic() {
+        // WHY: connect_x11_for_restore must attempt display probing and return Err or Ok, never panic.
+        let prev = std::env::var_os("DISPLAY");
+        unsafe { std::env::remove_var("DISPLAY") };
+        let res = connect_x11_for_restore();
+        if let Some(val) = prev {
+            unsafe { std::env::set_var("DISPLAY", val) };
+        }
+        // Result is either Ok(conn) if probing found a display, or Err(e).
+        let _ = res;
     }
 }

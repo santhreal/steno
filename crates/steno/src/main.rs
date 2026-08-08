@@ -44,7 +44,7 @@ pub struct Cli {
     #[arg(long)]
     stdout: bool,
 
-    /// Skip the text pipeline (commands, dictionary, formatting).
+    /// Skip the refinement pipeline (commands, dictionary overrides, formatting, rules).
     #[arg(long, global = true)]
     pub raw: bool,
 
@@ -87,7 +87,12 @@ enum Command {
         #[arg(long)]
         foreground: bool,
     },
-    /// Probe the daemon NDJSON API socket (pong + latency).
+    /// Repair Caps Lock key mapping if it was left dead by an unclean daemon exit.
+    Repair {
+        /// Force repair even if the daemon pidfile indicates it is running.
+        #[arg(long)]
+        force: bool,
+    },
     Ping {
         /// Override API socket path (default: config / XDG runtime).
         #[arg(long)]
@@ -136,7 +141,7 @@ enum ApiCommand {
 
 #[derive(Subcommand, Debug)]
 enum ConfigCommand {
-    /// Print the config path, settable keys, and override count.
+    /// Print the config path, settable keys, and refine dictionary entries count.
     Show,
     /// Get one settable config key from the TOML file.
     Get {
@@ -188,6 +193,19 @@ fn main() -> Result<()> {
         Some(Command::Stop) => return daemon::stop(),
         Some(Command::Status) => return daemon::status(),
         Some(Command::Restart { foreground }) => return daemon::restart(&cli, foreground),
+        Some(Command::Repair { force }) => {
+            match daemon::repair_caps_lock(force) {
+                Ok(true) => {
+                    println!("Caps Lock mapping successfully restored.");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    println!("Caps Lock mapping is normal (no repair needed).");
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Some(Command::Ping { socket }) => {
             return api_cmd::ping(cli.config.as_deref(), socket);
         }
@@ -261,7 +279,7 @@ fn main() -> Result<()> {
     // Warn about flags that have no effect in the chosen mode; silently
     // ignoring them would look like they worked.
     if cli.raw && !cfg.dict.overrides.is_empty() {
-        log::warn!("--raw skips the text pipeline; [dict.overrides] are ignored");
+        log::warn!("--raw skips the refinement pipeline; [refine] dictionary entries are ignored");
     }
     if cli.input.is_some() && cli.device.is_some() {
         log::warn!("--device is ignored when transcribing a file");

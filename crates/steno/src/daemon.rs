@@ -150,23 +150,36 @@ pub fn status() -> Result<()> {
 
 
 /// Best-effort: if a prior SIGKILL left Caps Lock as NoSymbol, put it back.
-fn repair_caps_lock_if_needed() {
-    // Live daemon intentionally maps Caps → NoSymbol. Never "heal" under it.
-    match is_running() {
-        Ok(Some(_)) => return,
-        Ok(None) => {}
-        Err(e) => {
-            log::warn!("skipping Caps Lock repair; cannot check daemon pid: {e:#}");
-            return;
+pub fn repair_caps_lock(force: bool) -> Result<bool> {
+    if !force {
+        match is_running() {
+            Ok(Some(pid)) => {
+                log::info!("daemon PID {pid} is running; skipping automatic Caps Lock repair");
+                return Ok(false);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!("cannot check daemon pid: {e:#}");
+            }
         }
     }
     match restore_caps_lock_mapping() {
-        Ok(true) => eprintln!(
-            "steno: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
-        ),
-        Ok(false) => {}
-        Err(e) => log::warn!("could not check/restore Caps Lock mapping: {e:#}"),
+        Ok(true) => {
+            eprintln!(
+                "steno: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
+            );
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(e) => {
+            log::warn!("could not check/restore Caps Lock mapping: {e:#}");
+            Err(e)
+        }
     }
+}
+
+fn repair_caps_lock_if_needed() {
+    let _ = repair_caps_lock(false);
 }
 
 pub fn stop() -> Result<()> {
@@ -636,6 +649,11 @@ impl ApiHandler for DaemonHandler {
             "type_output_armed": self.type_output_armed,
             "stage": stage,
             "api": true,
+            "refine": {
+                "enabled": self.refine.enabled,
+                "backend": self.refine.backend,
+                "dictionary_entries": self.dict.len(),
+            },
         })))
     }
 
@@ -725,6 +743,14 @@ impl ApiHandler for DaemonHandler {
 
 /// Foreground worker: load model once, grab hotkey, loop utterances.
 pub fn run_daemon(cli: &Cli) -> Result<()> {
+    // Install panic hook so if the daemon panics while Caps Lock is mapped to NoSymbol,
+    // we attempt best-effort restoration before dying.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_caps_lock_mapping();
+        default_panic(info);
+    }));
+
     // Ignore SIGHUP in case we were started without setsid.
     unsafe {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
@@ -732,7 +758,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
         libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
     }
-
     // The worker owns its pidfile: the parent must not publish the pid
     // before grab + model load succeed, and a second worker must not
     // clobber a live one's entry.
@@ -762,7 +787,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
     if !dict.is_empty() {
         eprintln!(
-            "steno: dictionary ({} overrides) loaded from {}; edits apply after `steno restart`",
+            "steno: refinement engine ({} dictionary overrides) loaded from {}; edits apply after `steno restart`",
             cfg.dict.overrides.len(),
             config::default_config_path()
                 .map(|p| p.display().to_string())
@@ -1140,5 +1165,42 @@ mod restart_tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod status_refine_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn daemon_handler_status_includes_refine_configuration_state() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("vayon".into(), "veyyon".into());
+        let dict = text::Dictionary::from_map(map);
+        let refine = RefineConfig {
+            enabled: true,
+            backend: "rules".into(),
+            dictionary: std::collections::HashMap::new(),
+        };
+
+        let handler = DaemonHandler {
+            transcriber: Arc::new(Transcriber::dummy()),
+            text_cfg: TextConfig::default(),
+            refine,
+            dict,
+            dsp: DspConfig::default(),
+            model: PathBuf::from("/tmp/model"),
+            type_output_armed: true,
+            token: None,
+            raw: false,
+            stage: Arc::new(Mutex::new("idle".into())),
+            utterance: Mutex::new(UtteranceBuffer::default()),
+        };
+
+        let status_res = handler.status().expect("status call").expect("some json");
+        assert_eq!(status_res["refine"]["enabled"], true);
+        assert_eq!(status_res["refine"]["backend"], "rules");
+        assert_eq!(status_res["refine"]["dictionary_entries"], 1);
     }
 }
