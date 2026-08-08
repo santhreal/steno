@@ -18,6 +18,12 @@ pub trait OverlayBackend: Send {
 /// Headless / test / embedder stand-in: every method is a no-op.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NullOverlay;
+impl NullOverlay {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 
 impl OverlayBackend for NullOverlay {
     fn set(&self, _stage: Stage) {}
@@ -95,6 +101,60 @@ mod tests {
             assert_eq!(*s, [Stage::Recording, Stage::Transcribing, Stage::Done]);
         } else {
             panic!("mutex poisoned");
+        }
+    }
+
+    #[test]
+    fn null_overlay_new_constructor_and_backend_trait_methods() {
+        // WHY: NullOverlay::new must produce a valid NullOverlay with active() == false
+        // and safe no-op set/flash calls.
+        let overlay = NullOverlay::new();
+        assert_eq!(overlay, NullOverlay::default());
+        assert!(!overlay.active());
+        overlay.set(Stage::Recording);
+        overlay.set(Stage::Done);
+        overlay.flash(100);
+    }
+
+    #[test]
+    fn fn_overlay_all_stages_and_boxed_dispatch() {
+        // WHY: FnOverlay must forward all Stage variants (Hidden, Recording, Transcribing, Done, Error),
+        // translate flash to Stage::Done, report active() == true, and work through Box<dyn OverlayBackend>.
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let rec_clone = recorded.clone();
+        let raw = FnOverlay(move |stage| {
+            if let Ok(mut r) = rec_clone.lock() {
+                r.push(stage);
+            }
+        });
+
+        assert!(raw.active());
+        let boxed: Box<dyn OverlayBackend> = Box::new(raw);
+        assert!(boxed.active());
+
+        for stage in [
+            Stage::Hidden,
+            Stage::Recording,
+            Stage::Transcribing,
+            Stage::Done,
+            Stage::Error,
+        ] {
+            boxed.set(stage);
+        }
+        boxed.flash(250);
+
+        if let Ok(r) = recorded.lock() {
+            assert_eq!(
+                *r,
+                [
+                    Stage::Hidden,
+                    Stage::Recording,
+                    Stage::Transcribing,
+                    Stage::Done,
+                    Stage::Error,
+                    Stage::Done, // from flash(250)
+                ]
+            );
         }
     }
 }

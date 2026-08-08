@@ -149,9 +149,15 @@ mod tests {
 
     #[test]
     fn test_create_typer() {
-        let mut typer = create_typer(OutputMode::Stdout);
-        // Stdout mode InjectTyper::type_text fails fail-closed.
-        assert!(typer.type_text("test").is_err());
+        // WHY: create_typer must instantiate a functional Box<dyn InjectTyper> for each OutputMode variant.
+        for mode in [OutputMode::Stdout, OutputMode::Type] {
+            let mut typer = create_typer(mode);
+            let res = typer.type_text("test string");
+            if mode == OutputMode::Stdout {
+                // Stdout mode fails fail-closed in library unit tests
+                assert!(res.is_err());
+            }
+        }
     }
 
     #[test]
@@ -163,6 +169,40 @@ mod tests {
         let overlay = create_overlay(&cfg);
         overlay.set(Stage::Recording);
         overlay.flash(10);
+    }
+
+    #[test]
+    fn test_create_hotkey() {
+        // WHY: create_hotkey must attempt to create a Caps Lock hotkey source cleanly.
+        // It returns Ok(hk) on supported desktop hosts or Err(e) in headless CI without crashing.
+        match create_hotkey() {
+            Ok(mut hk) => {
+                hk.drain_pending();
+            }
+            Err(e) => {
+                assert!(!e.to_string().is_empty(), "error output must be non-empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_create_platform_backends() {
+        // WHY: create_platform_backends must aggregate hotkey, typer, and overlay into a PlatformBackends.
+        let cfg = UiConfig {
+            overlay: false,
+            ..UiConfig::default()
+        };
+        for mode in [OutputMode::Stdout, OutputMode::Type] {
+            match create_platform_backends(mode, &cfg) {
+                Ok(backends) => {
+                    backends.overlay.set(Stage::Recording);
+                    assert!(format!("{backends:?}").contains("PlatformBackends"));
+                }
+                Err(e) => {
+                    assert!(!e.to_string().is_empty());
+                }
+            }
+        }
     }
 
     #[test]
@@ -179,12 +219,6 @@ mod tests {
         assert!(backends.typer.type_text("hello").is_ok());
         backends.overlay.flash(10);
     }
-
-    #[test]
-    fn test_create_hotkey_call() {
-        let _res = create_hotkey();
-    }
-
     /// WHY: Verify `PlatformBackends` `Debug` implementation formats cleanly without unwrapping or panicking.
     #[test]
     fn test_platform_backends_debug() {

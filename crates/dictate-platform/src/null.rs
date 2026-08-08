@@ -70,10 +70,25 @@ mod tests {
         assert!(InjectTyper::type_text(&mut typer, "test").is_ok());
     }
 
-    /// WHY: Verify `NullHotkey` and `NullTyper` derive `PartialEq, Eq` for equivalence checks in test environments.
+    /// WHY: Verify `NullHotkey`, `NullTyper`, and `NullOverlay` derive `PartialEq, Eq` and `Default`
+    /// for equivalence checks in test environments.
     #[test]
     fn test_null_types_partial_eq() {
         assert_eq!(NullHotkey::new(), NullHotkey::default());
         assert_eq!(NullTyper::new(), NullTyper::default());
+        assert_eq!(NullOverlay::new(), NullOverlay::default());
+    }
+
+    #[test]
+    fn test_null_overlay_new() {
+        // WHY: NullOverlay::new must return a valid NullOverlay instance that implements
+        // OverlayBackend with active() == false and no-op set/flash calls.
+        use dictate_core::overlay::{OverlayBackend, Stage};
+        let overlay = NullOverlay::new();
+        assert!(!overlay.active(), "NullOverlay::new active() must return false");
+        overlay.set(Stage::Recording);
+        overlay.set(Stage::Transcribing);
+        overlay.set(Stage::Done);
+        overlay.flash(100);
     }
 }

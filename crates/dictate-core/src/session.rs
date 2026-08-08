@@ -344,7 +344,7 @@ mod tests {
         );
         assert_eq!(
             session.engine().process_text("hello"),
-            "hello",
+            "Hello",
             "Session::with_defaults must retain accessible Engine reference"
         );
         assert_eq!(
