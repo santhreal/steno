@@ -4,8 +4,9 @@
 #![allow(dead_code)]
 
 use crate::api::protocol::{Request, Response, decode_line, encode_line};
+use crate::api::server::MAX_API_LINE_BYTES;
 use anyhow::{Context, Result, bail};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -57,11 +58,18 @@ impl ApiClient {
             buf.clear();
             let n = self
                 .reader
+                .by_ref()
+                .take((MAX_API_LINE_BYTES + 1) as u64)
                 .read_until(b'\n', &mut buf)
                 .context("failed reading API response from socket")?;
             if n == 0 {
                 bail!(
                     "API socket closed before a response arrived — the daemon may have exited; check logs and restart with `dictate start`"
+                );
+            }
+            if buf.len() > MAX_API_LINE_BYTES {
+                bail!(
+                    "API response line exceeded maximum allowed length of {MAX_API_LINE_BYTES} bytes — rejecting oversized socket response"
                 );
             }
             if buf.iter().all(|b| matches!(b, b'\n' | b'\r' | b' ' | b'\t')) {
@@ -84,5 +92,61 @@ impl ApiClient {
                 text.trim()
             );
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::protocol::Op;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    fn temp_sock(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "dictate-client-test-{tag}-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn client_line_length_bounds_exceeded_bails() {
+        let path = temp_sock("len");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind listener");
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept stream");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read request");
+
+            // Respond with line exceeding MAX_API_LINE_BYTES (16MB + 10 bytes)
+            let oversized = vec![b'a'; MAX_API_LINE_BYTES + 10];
+            let _ = stream.write_all(&oversized);
+            let _ = stream.write_all(b"\n");
+            let _ = stream.flush();
+        });
+
+        let mut client = ApiClient::connect(&path).expect("connect client");
+        let err = client
+            .call(&Request {
+                id: 1,
+                token: None,
+                op: Op::Ping,
+            })
+            .expect_err("oversized response must fail");
+
+        assert!(
+            err.to_string()
+                .contains("exceeded maximum allowed length"),
+            "unexpected error message: {err}"
+        );
+
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&path);
     }
 }

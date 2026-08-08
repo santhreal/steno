@@ -322,4 +322,39 @@ mod tests {
             "{err}"
         );
     }
+
+    #[test]
+    fn session_with_defaults_initializes_expected_defaults() {
+        // WHY: Session::with_defaults must construct a Session with disarmed typing,
+        // NullOverlay, zero done_flash_ms, and retain the provided Engine reference.
+        let pipeline = crate::text::TextPipeline::new(
+            crate::text::TextConfig::default(),
+            crate::text::Dictionary::default(),
+        );
+        let engine = Engine::from_parts(crate::stt::Transcriber::dummy(), pipeline);
+        let mut session = Session::with_defaults(engine);
+
+        assert!(
+            !session.type_output_armed(),
+            "Session::with_defaults must disarm typing output"
+        );
+        assert!(
+            !session.overlay().active(),
+            "Session::with_defaults must default to NullOverlay (active() == false)"
+        );
+        assert_eq!(
+            session.engine().process_text("hello"),
+            "hello",
+            "Session::with_defaults must retain accessible Engine reference"
+        );
+        assert_eq!(
+            session.transcribe_f32(&[]).unwrap(),
+            "",
+            "Session::with_defaults transcribe_f32 on empty input slice must return Ok(\"\")"
+        );
+        assert!(
+            session.type_if_armed("test").is_ok(),
+            "Session::with_defaults must fail-close typing without error when disarmed"
+        );
+    }
 }

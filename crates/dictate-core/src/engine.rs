@@ -145,6 +145,7 @@ mod tests {
     //! on the non-raw path. We cannot load a GPU model in unit tests, so we
     //! exercise pipeline wiring the same way Engine does after decode.
 
+    use super::Engine;
     use crate::text::{Dictionary, NullRefine, TextConfig, TextPipeline};
     use std::collections::HashMap;
 
@@ -186,13 +187,28 @@ mod tests {
     }
 
     #[test]
-    fn transcribe_f32_empty_pcm_returns_empty_string() {
-        // Zero-length PCM guard must return Ok("") without calling decode.
-        // We test this via transcribe_pcm_i16 / transcribe_f32_at_rate empty paths
-        // which call transcribe_f32 under the hood.
+    fn transcribe_pcm_i16_empty_returns_ok_empty() {
+        // WHY: Engine::transcribe_pcm_i16 must return Ok("") immediately when given
+        // an empty &[i16] slice without calling STT decode.
+        let pipeline = TextPipeline::new(TextConfig::default(), Dictionary::default());
+        let engine = Engine::from_parts(crate::stt::Transcriber::dummy(), pipeline);
         let pcm_i16: &[i16] = &[];
+        let res = engine.transcribe_pcm_i16(pcm_i16).expect("empty pcm_i16 succeeds");
+        assert_eq!(res, "", "empty i16 pcm must yield empty transcript");
+    }
+
+    #[test]
+    fn transcribe_f32_at_rate_empty_returns_ok_empty() {
+        // WHY: Engine::transcribe_f32_at_rate must return Ok("") immediately for empty input,
+        // both at standard STT rate (16 kHz) and non-16 kHz rates (e.g. 8 kHz, 44.1 kHz, 48 kHz).
+        let pipeline = TextPipeline::new(TextConfig::default(), Dictionary::default());
+        let engine = Engine::from_parts(crate::stt::Transcriber::dummy(), pipeline);
         let pcm_f32: &[f32] = &[];
-        assert!(pcm_i16.is_empty());
-        assert!(pcm_f32.is_empty());
+        for &rate in &[16000u32, 8000, 44100, 48000] {
+            let res = engine
+                .transcribe_f32_at_rate(pcm_f32, rate)
+                .expect("empty f32 at rate succeeds");
+            assert_eq!(res, "", "empty f32 pcm at rate {rate} must yield empty transcript");
+        }
     }
 }

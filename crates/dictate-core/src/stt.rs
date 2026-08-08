@@ -93,6 +93,16 @@ impl Transcriber {
         Ok(())
     }
 }
+#[cfg(test)]
+impl Transcriber {
+    pub(crate) fn dummy() -> Self {
+        let recognizer: sherpa_onnx::OfflineRecognizer = unsafe { std::mem::zeroed() };
+        Self {
+            recognizer: Mutex::new(recognizer),
+        }
+    }
+}
+
 
 #[derive(Debug)]
 struct ModelFiles {
