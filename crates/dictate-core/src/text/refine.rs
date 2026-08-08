@@ -18,7 +18,7 @@
 //! [`RuleRefine`] only fixes high-precision, local ASR/grammar glitches:
 //! spaced / split contractions, common ASR phrase maps (homophones with
 //! tight context, doubled prepositions, frequent mishears), a small
-//! subject–verb map, a/an before clear vowel/consonant starts (plus a few
+//! subject-verb map, a/an before clear vowel/consonant starts (plus a few
 //! silent-h / yoo-u / x- edges), duplicate words/short clauses, one
 //! leading filler, and optional trailing discourse fillers. It **cannot**
 //! repair severe STT garble such as acoustic hallucinations
@@ -227,7 +227,7 @@ const COMMON_ASR_FIXES: &[(&[&str], &str)] = &[
     (&["ex", "specially"], "especially"),
 ];
 
-/// Tiny high-precision subject–verb phrase maps. Not a grammar engine:
+/// Tiny high-precision subject-verb phrase maps. Not a grammar engine:
 /// only fixed spoken pairs that ASR produces with high confidence.
 const SUBJECT_VERB_FIXES: &[(&[&str], &str)] = &[
     (&["he", "don't"], "he doesn't"),

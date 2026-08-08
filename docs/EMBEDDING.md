@@ -4,7 +4,7 @@ Minimal offline STT for host applications. No cloud. No UI required.
 
 `dictate-core` is the embeddable library. `dictate-platform` is optional OS
 glue (Caps Lock, typing, status chip). The `dictate` binary is one consumer of
-both — hosts should depend on `dictate-core` (+ platform only if they want
+both; hosts should depend on `dictate-core` (+ platform only if they want
 native hotkey/overlay/typing).
 
 ## Add the dependency
@@ -123,11 +123,11 @@ pub trait RefineBackend: Send + Sync {
 `Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
 Default `[refine] enabled = true`, `backend = "rules"` → `RuleRefine`
 (duplicate/short-clause collapse, spaced/split contractions, high-precision
-ASR phrase + subject–verb maps, a/an edges, light fillers, space-before-punct;
-offline tables only — not acoustic-garble repair). `enabled = false` →
+ASR phrase + subject-verb maps, a/an edges, light fillers, space-before-punct;
+offline tables only, not acoustic-garble repair). `enabled = false` →
 `NullRefine`.
 
-`RefineBackend` must stay pure and offline — there is no network path in
+`RefineBackend` must stay pure and offline: there is no network path in
 `dictate-core`. Heavier offline GEC belongs behind the same trait.
 
 ## Session (engine + overlay + optional typer)
@@ -176,7 +176,7 @@ let session = Session::builder(engine)
     .build();
 ```
 
-`from_config` does **not** pick a theme overlay — call
+`from_config` does **not** pick a theme overlay: call
 `dictate_platform::create(&cfg.ui)` when you want the built-in chip, or inject
 your own backend. Theme palettes / labels stay available via `resolve_ui`.
 
@@ -229,7 +229,7 @@ let session = Session::builder(engine)
     .type_output(false)   // keep disarmed
     .build();
 
-// Real typing — still requires type_output = true in config:
+// Real typing: still requires type_output = true in config:
 let emitter = Emitter::new(OutputMode::Type);
 let session = Session::builder(engine)
     .from_config(&cfg)    // must have armed type_output
@@ -355,7 +355,7 @@ Embedders running the socket server or embedding custom socket handlers use the 
 ## Library map
 
 | Module | Role |
-|--------|------|
+| --- | --- |
 | `config` | Single TOML + path helpers + surgical get/set |
 | `ui_theme` | `resolve_ui` / palettes / stage labels |
 | `engine` | High-level STT + pipeline for embedders |

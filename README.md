@@ -6,7 +6,7 @@ hosts. One-shot or a background daemon.
 
 `dictate` records from your microphone, transcribes locally with
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Parakeet TDT), cleans
-the text up, and prints it — or types it into whatever window is focused.
+the text up, and prints it - or types it into whatever window is focused.
 
 Use it one-shot (`dictate`) or as a system-wide daemon (`dictate start`) that
 keeps the model loaded and listens for **Caps Lock** (hold to talk).
@@ -35,7 +35,7 @@ cargo install --path crates/dictate
 Workspace crates: `dictate-core` (embeddable engine), `dictate-platform`
 (OS backends), `dictate` (CLI/daemon binary).
 
-There is no cargo `--features cuda` flag — pick the execution provider in
+There is no cargo `--features cuda` flag: pick the execution provider in
 config (`provider = "cuda"` default, or `"cpu"`). CUDA builds still need the
 system CUDA/cuDNN install the sherpa libs were built against. Unknown
 provider values fail closed (no silent fallback).
@@ -60,7 +60,7 @@ tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
 ```
 
 | Model dir | Size | Note |
-|---|---|---|
+| --- | --- | --- |
 | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | ~600 MB | Default; multilingual; GPU-fast |
 
 When `--model` is not set, `dictate` picks the single model directory under
@@ -99,7 +99,7 @@ Daemon pid/ready/log files live under `$XDG_CACHE_HOME/dictate/` when that
 env is set, otherwise `~/.cache/dictate/`. Make sure no other app (GNOME
 custom shortcut, etc.) already owns Caps Lock.
 If Caps Lock ever feels "dead" after a hard kill (`kill -9` / crashed
-daemon), run `dictate stop` (or `dictate start`) — it restores the X11
+daemon), run `dictate stop` (or `dictate start`): it restores the X11
 mapping. Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
 
 **Record and print (one-shot).** Run `dictate`, speak, pause. Recording
@@ -121,15 +121,15 @@ no input, and hides itself after Done. Pick a palette with `ui.theme`,
 override colors / labels under `[ui.colors]` / `[ui.stages]`, or disable
 with `overlay = false` / `theme = "null"`. See [Themes](#themes).
 
-A bare `dictate --type` without the config entry fails with an error —
+A bare `dictate --type` without the config entry fails with an error:
 typing is deliberately not enableable from a one-shot flag. Arm it once
 with `dictate config set type_output true` (or edit the TOML). Control
 characters other than newline are stripped before typing, so a transcript
 can never smuggle Tab or Escape keystrokes into the target.
 
-**Transcribe a file.** `dictate clip.wav` reads a WAV instead of recording —
-any PCM or 32-bit float WAV, resampled to 16 kHz mono internally —
-also useful for testing your setup without a microphone.
+**Transcribe a file.** `dictate clip.wav` reads a WAV instead of recording (any
+PCM or 32-bit float WAV, resampled to 16 kHz mono internally), also useful for
+testing your setup without a microphone.
 
 Useful flags: `--list-devices` and `--device <name>` pick a microphone,
 `--raw` skips all text processing,
@@ -146,7 +146,7 @@ Spoken commands are replaced inline. `dictate --list-commands` prints this
 table:
 
 | Say | Get |
-|---|---|
+| --- | --- |
 | period / full stop | `.` |
 | comma | `,` |
 | question mark | `?` |
@@ -170,7 +170,7 @@ is collapsed during formatting, so you get "bank, " and not "bank,, ".
 
 ## Dictionary
 
-The dictionary rewrites phrases after commands run — names, jargon, product
+The dictionary rewrites phrases after commands run: names, jargon, product
 terms the recognizer gets wrong. Put overrides in the same config file under
 `[dict.overrides]`:
 
@@ -189,7 +189,7 @@ If you still have a legacy `~/.config/dictate/dictionary.toml`, it is
 imported into memory once when loading the **default** config and
 `[dict.overrides]` is empty (with a deprecation warning). An explicit
 `--config /path/to.toml` only considers a sibling `dictionary.toml` beside
-that file — never the operator XDG path. Copy entries under
+that file, never the operator XDG path. Copy entries under
 `[dict.overrides]` and remove
 the old file; `dictate` never rewrites your config for you. Restart the
 daemon after edits (`dictate restart`).
@@ -257,11 +257,11 @@ enabled = true         # daemon listens on a local Unix socket
 Post-format **refine** (`[refine]`) collapses duplicate words / short
 repeated clauses, fixes spaced or split contractions, high-precision ASR
 phrase maps (homophones with tight context, doubled prepositions, common
-mishears), a small subject–verb map, a/an edges, and light leading/trailing
+mishears), a small subject-verb map, a/an edges, and light leading/trailing
 fillers, then strips space-before punctuation. Config knobs are only
 `enabled` and `backend = "rules"`; set `enabled = false` to skip it.
 RuleRefine stays offline (fixed tables, no token re-casing, no network/LLM)
-and still cannot repair acoustic garble like `chromax` — embedders can swap
+and still cannot repair acoustic garble like `chromax`; embedders can swap
 a custom `RefineBackend` in-process for heavier GEC.
 
 ## Themes
@@ -269,7 +269,7 @@ a custom `RefineBackend` in-process for heavier GEC.
 Built-in overlay palettes (also listed by `dictate theme list`):
 
 | Theme | Role |
-|---|---|
+| --- | --- |
 | `pill` | Default light monochrome chip |
 | `mono` | High-contrast monochrome |
 | `dusk` | Dark cool palette |
@@ -322,7 +322,7 @@ $ dictate config set max_record_secs 180
 $ dictate config set api.enabled true
 $ dictate config set api.token mysecret
 $ dictate config set type_output true   # only persistent typing arm path
-```
+
 $ dictate model list
 $ dictate model use sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
 $ dictate model use ~/models/my-parakeet --provider cpu
@@ -335,13 +335,13 @@ $ dictate theme set null                # disable overlay via ui.theme
 `dictate config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`; API: `api.enabled`, `api.path`, `api.token`; UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
 Typing stays fail-closed: `--type` alone never arms keystroke injection.
 
-Theme and model writes update the file only — restart the daemon for them
+Theme and model writes update the file only: restart the daemon for them
 to take effect in a running hold-to-talk session.
 
 ## Daemon API
 
 When the daemon is running with `[api].enabled` (the default), it listens on a
-Unix socket — `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`,
+Unix socket: `$XDG_RUNTIME_DIR/dictate/dictate.sock`, else `$XDG_CACHE_HOME/dictate/dictate.sock`,
 else `~/.cache/dictate/dictate.sock`. Override with
 `[api].path`. Optional `[api].token` requires every request to carry the same
 `token` field.
@@ -385,13 +385,13 @@ mic ── capture (cpal/ALSA)
 
 One-shot mode ends on an energy-VAD endpoint (silence after speech). Daemon
 mode ends when you release Caps Lock. Either way each utterance gets a
-fresh decode state — nothing leaks between them.
+fresh decode state: nothing leaks between them.
 
 ## Notes and limits
 
 - Typing sends keystrokes to the **focused** window. That is the feature;
   it is also why you should not dictate while a password field is focused.
-  It is armed only via `type_output = true` in your config — never from a
+  It is armed only via `type_output = true` in your config, never from a
   CLI flag (see above).
 - **No live-session testing on the operator workstation.** Agents and local
   runs must not start/restart the daemon against the logged-in desktop, grab
@@ -400,6 +400,6 @@ fresh decode state — nothing leaks between them.
   disposable VM (e.g. Firecracker) only. Unit tests stay off the live session.
 - If no speech starts within `start_timeout_secs`, `dictate` exits non-zero
   with an error, so scripts can tell silence apart from an empty result.
-- Typing: X11/XWayland uses `xdotool`; pure Wayland (`WAYLAND_DISPLAY` without `DISPLAY`) uses `wtype` (optional `ydotool` fallback). Install with `sudo apt install wtype`. Caps Lock hotkey still needs `DISPLAY` (XWayland); otherwise the daemon errors with corrective actions. Overlay on pure Wayland is a no-op until layer-shell lands — use stdout mode or XWayland for the pill.
+- Typing: X11/XWayland uses `xdotool`; pure Wayland (`WAYLAND_DISPLAY` without `DISPLAY`) uses `wtype` (optional `ydotool` fallback). Install with `sudo apt install wtype`. Caps Lock hotkey still needs `DISPLAY` (XWayland); otherwise the daemon errors with corrective actions. Overlay on pure Wayland is a no-op until layer-shell lands; use stdout mode or XWayland for the pill.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
   is no language flag.
