@@ -11,6 +11,7 @@ use crate::api::protocol::{
     Event, Op, Request, Response, decode_line, encode_line, peek_request_id,
 };
 use anyhow::{Context, Result, bail};
+use crate::engine::Engine;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::fs;
@@ -241,6 +242,22 @@ impl UtteranceBuffer {
 /// transcoder without loading a GPU model.
 pub trait PcmTranscoder: Send + Sync {
     fn transcribe_pcm(&self, samples: &[f32]) -> Result<String, ApiError>;
+}
+
+impl PcmTranscoder for Engine {
+    fn transcribe_pcm(&self, samples: &[f32]) -> Result<String, ApiError> {
+        self.transcribe_f32(samples)
+            .map_err(|e| ApiError::new(e.to_string(), None))
+    }
+}
+
+impl<F> PcmTranscoder for F
+where
+    F: Fn(&[f32]) -> Result<String, ApiError> + Send + Sync,
+{
+    fn transcribe_pcm(&self, samples: &[f32]) -> Result<String, ApiError> {
+        (self)(samples)
+    }
 }
 
 /// ApiHandler that implements utterance.* against an in-memory buffer and a

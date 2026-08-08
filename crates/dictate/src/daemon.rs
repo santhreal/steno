@@ -355,6 +355,7 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
 }
 
 pub fn restart(cli: &Cli, foreground: bool) -> Result<()> {
+    preflight(cli)?;
     stop()?;
     start(cli, foreground)
 }
@@ -414,8 +415,7 @@ fn preflight(cli: &Cli) -> Result<()> {
     let cfg = Config::load(cli.config.as_deref())?;
     if !cfg.type_output {
         bail!(
-            "daemon requires typing armed: set `type_output = true` in {} then re-run `dictate start`",
-            config::default_config_path()?.display()
+            "daemon requires typing armed: run `dictate config set type_output true` then `dictate start`"
         );
     }
     let _ = config::resolve_model(cli.model.as_ref(), &cfg)?;
@@ -748,8 +748,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     // be armed in config, same rule as `--type`.
     if !cfg.type_output {
         bail!(
-            "daemon requires typing armed: set `type_output = true` in {} then re-run `dictate start`",
-            config::default_config_path()?.display()
+            "daemon requires typing armed: run `dictate config set type_output true` then `dictate start`"
         );
     }
     let mode = OutputMode::Type;
@@ -1100,3 +1099,46 @@ mod pid_guard_tests {
     }
 }
 
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn restart_runs_preflight_before_stop() {
+        let dir = std::env::temp_dir().join(format!(
+            "dictate-restart-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        fs::write(&cfg_path, "type_output = false\n").unwrap();
+
+        let cli = Cli {
+            config: Some(cfg_path.clone()),
+            model: None,
+            device: None,
+            raw: false,
+            verbose: 0,
+            r#type: false,
+            stdout: false,
+            input: None,
+            list_devices: false,
+            list_commands: false,
+            command: None,
+        };
+
+        let res = restart(&cli, false);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dictate config set type_output true"),
+            "restart error must offer exact actionable CLI command, got: {err_msg}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

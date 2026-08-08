@@ -30,6 +30,34 @@ pub trait OverlayBackend: Send {
 pub enum HotkeyEvent { Press, Release, Cancel, Shutdown }
 pub enum Stage { Hidden, Recording, Transcribing, Done, Error }
 ```
+## Top-Level Factory Helpers
+
+`dictate-platform` exports top-level factory helpers that construct OS-native backends without requiring host applications to import OS-specific modules (`linux`, `windows`, `macos`):
+
+```rust
+use dictate_platform::{
+    create_hotkey, create_typer, create_platform_backends, create_overlay,
+    InjectTyper, OutputMode, PlatformBackends,
+};
+```
+
+- **`create_hotkey() -> anyhow::Result<Box<dyn HotkeySource>>`**: Constructs the platform hotkey source bound to Caps Lock hold-to-talk.
+- **`create_typer(mode: OutputMode) -> Box<dyn InjectTyper>`**: Constructs a platform keystroke injector (`Emitter`) wrapped as a `Box<dyn InjectTyper>` for the given [`OutputMode`] (`Type` or `Stdout`).
+- **`create_platform_backends(mode: OutputMode, ui_cfg: &UiConfig) -> anyhow::Result<PlatformBackends>`**: Assembles all three platform backends (hotkey, typer, status overlay) in a single call:
+
+```rust
+pub struct PlatformBackends {
+    pub hotkey: Box<dyn HotkeySource>,
+    pub typer: Box<dyn InjectTyper>,
+    pub overlay: Box<dyn OverlayBackend>,
+}
+
+let backends = create_platform_backends(OutputMode::Type, &cfg.ui)?;
+```
+
+### Core–Platform Decoupling (`InjectTyper`)
+
+`InjectTyper` is defined in `dictate-core` and re-exported top-level by `dictate-platform`. Platform `Emitter` and `NullTyper` implement `InjectTyper`, enabling `Session` builders to receive platform typing sinks while keeping `dictate-core` free of OS-specific dependencies.
 
 ## Feature Flags & Build Configuration
 

@@ -318,8 +318,11 @@ Surgical helpers over the same TOML file (`--config` overrides the path):
 $ dictate config show
 $ dictate config get ui.theme
 $ dictate config set ui.theme dusk
+$ dictate config set max_record_secs 180
+$ dictate config set api.enabled true
+$ dictate config set api.token mysecret
 $ dictate config set type_output true   # only persistent typing arm path
-
+```
 $ dictate model list
 $ dictate model use sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
 $ dictate model use ~/models/my-parakeet --provider cpu
@@ -329,7 +332,7 @@ $ dictate theme set dusk
 $ dictate theme set null                # disable overlay via ui.theme
 ```
 
-`dictate config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (such as `model_path`, `provider`, `type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
+`dictate config set` creates the file when missing and validates against exact key names returned by `list_settable_keys()` (top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`; API: `api.enabled`, `api.path`, `api.token`; UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.recording`, `ui.colors.bg`, etc.), not wildcard patterns (e.g. `ui.*` or `ui.stages.*`).
 Typing stays fail-closed: `--type` alone never arms keystroke injection.
 
 Theme and model writes update the file only — restart the daemon for them

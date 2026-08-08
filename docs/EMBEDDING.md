@@ -25,6 +25,24 @@ let cfg = Config::load(None)?;                 // ~/.config/dictate/config.toml
 let engine = Engine::load(&cfg)?;              // model resident (provider from cfg)
 let pcm: Vec<f32> = /* 16 kHz mono */;
 let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format → refine
+
+// Or load default config and model in a single step:
+let engine = Engine::load_default()?;
+```
+
+Convenience decoders for WAV files, integer PCM, and arbitrary sample rates:
+
+```rust
+use std::path::Path;
+
+// Decode WAV file directly from disk (resamples to 16 kHz mono if required):
+let text = engine.transcribe_wav_file(Path::new("recording.wav"))?;
+
+// Decode 16 kHz mono 16-bit signed integer PCM:
+let text = engine.transcribe_pcm_i16(&pcm_i16)?;
+
+// Decode mono f32 PCM at arbitrary sample rate (resamples to 16 kHz if necessary):
+let text = engine.transcribe_f32_at_rate(&pcm_44k, 44100)?;
 ```
 
 Raw decode (skip text pipeline, including refine):
@@ -36,7 +54,6 @@ let text = engine.transcribe_f32_raw(&pcm)?;
 Explicit model directory (same precedence as CLI `--model`):
 
 ```rust
-use std::path::Path;
 let engine = Engine::load_model(&cfg, Some(Path::new("/path/to/model-dir")))?;
 ```
 
@@ -45,7 +62,6 @@ Reprocess stored transcripts with the loaded dictionary / refine (no STT):
 ```rust
 let cleaned = engine.process_text("hello vayon world");
 ```
-
 ### Engine composition (custom pipeline)
 
 Hosts that inject a custom [`RefineBackend`], pre-built dictionary, or test
@@ -142,6 +158,22 @@ let mut session = Session::builder(engine)
     .build();                          // default overlay = NullOverlay
 
 let text = session.transcribe_f32(&pcm)?;
+```
+
+Convenience default construction (NullOverlay, disarmed typing, 0 ms flash):
+
+```rust
+let session = Session::with_defaults(engine);
+```
+
+Closure-backed overlay (`FnOverlay`) for testing and lightweight embedding without a custom struct:
+
+```rust
+use dictate_core::overlay::FnOverlay;
+
+let session = Session::builder(engine)
+    .overlay(FnOverlay(|stage| println!("Stage changed: {stage:?}")))
+    .build();
 ```
 
 `from_config` does **not** pick a theme overlay — call

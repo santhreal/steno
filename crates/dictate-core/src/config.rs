@@ -327,7 +327,8 @@ impl Config {
 
 /// Dotted keys accepted by [`config_get`] / [`config_set`].
 ///
-/// Top-level: `model_path`, `provider`, `type_output`, `n_threads`.
+/// Top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`.
+/// API: `api.enabled`, `api.path`, `api.token`.
 /// UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`.
 /// Stages: `ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`,
 /// `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`.
@@ -345,6 +346,10 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "provider",
         "type_output",
         "n_threads",
+        "max_record_secs",
+        "api.enabled",
+        "api.path",
+        "api.token",
         "ui.theme",
         "ui.overlay",
         "ui.done_flash_ms",
@@ -432,13 +437,13 @@ fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Ite
 
 fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     let v = match key {
-        "type_output" | "ui.overlay" | "ui.stages.show_timer" => {
+        "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled" => {
             let b: bool = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be a boolean (true/false), got {raw:?}")
             })?;
             toml_edit::value(b)
         }
-        "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" => {
+        "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" | "max_record_secs" => {
             let n: i64 = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be an integer, got {raw:?}")
             })?;
@@ -534,18 +539,22 @@ pub fn default_model_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("dictate/models"))
 }
 
+/// Hint showing how to download a sherpa-onnx model.
+pub const MODEL_DOWNLOAD_HINT: &str = "download a model, e.g.:\n  \
+    cd ~/.local/share/dictate/models && \\\n  \
+    curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \\\n  \
+    tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+
 /// Model resolution order: CLI flag, config file, the single sherpa-onnx
 /// model directory under the default model directory. A model is a
 /// DIRECTORY holding encoder/decoder/joiner ONNX files + tokens.txt.
 /// Fails with the exact download command.
 pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
-    const DOWNLOAD_HINT: &str = "download a model, e.g.:\n  \
-        cd ~/.local/share/dictate/models && \\\n        curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \\\n        tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
     if let Some(p) = cli.or(cfg.model_path.as_ref()) {
         let dir = expand_tilde(p)?;
         ensure!(
             dir.is_dir(),
-            "model path '{}' is not a sherpa-onnx model directory — {DOWNLOAD_HINT}\n\
+            "model path '{}' is not a sherpa-onnx model directory — {MODEL_DOWNLOAD_HINT}\n\
              or pass --model /path/to/model-dir",
             dir.display()
         );
@@ -571,7 +580,7 @@ pub fn resolve_model(cli: Option<&PathBuf>, cfg: &Config) -> Result<PathBuf> {
             .into_iter()
             .next()
             .expect("single model directory guaranteed by len == 1 check")),
-        0 => bail!("no sherpa-onnx model found in '{}' — {DOWNLOAD_HINT}", dir.display()),
+        0 => bail!("no sherpa-onnx model found in '{}' — {MODEL_DOWNLOAD_HINT}", dir.display()),
         _ => bail!(
             "multiple models in '{}': {} — set model_path in the config to pick one",
             dir.display(),
@@ -1364,5 +1373,34 @@ theme = "pill"
         fs::remove_file(&path).ok();
         assert_eq!(cfg.ui.theme, "dusk");
         assert_eq!(cfg.ui.colors.fg.as_deref(), Some("#AABBCCFF"));
+    }
+    #[test]
+    fn list_settable_keys_includes_api_and_max_record_secs() {
+        let keys = list_settable_keys();
+        assert!(keys.contains(&"api.enabled"));
+        assert!(keys.contains(&"api.path"));
+        assert!(keys.contains(&"api.token"));
+        assert!(keys.contains(&"max_record_secs"));
+    }
+
+    #[test]
+    fn config_set_get_new_settable_keys() {
+        let path = temp_file("new-settable.toml", b"");
+        config_set(&path, "api.enabled", "false").unwrap();
+        config_set(&path, "api.path", "/tmp/dictate-test.sock").unwrap();
+        config_set(&path, "api.token", "secret-token").unwrap();
+        config_set(&path, "max_record_secs", "120").unwrap();
+
+        assert_eq!(config_get(&path, "api.enabled").unwrap().as_deref(), Some("false"));
+        assert_eq!(config_get(&path, "api.path").unwrap().as_deref(), Some("/tmp/dictate-test.sock"));
+        assert_eq!(config_get(&path, "api.token").unwrap().as_deref(), Some("secret-token"));
+        assert_eq!(config_get(&path, "max_record_secs").unwrap().as_deref(), Some("120"));
+
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(!cfg.api.enabled);
+        assert_eq!(cfg.api.path, Some(PathBuf::from("/tmp/dictate-test.sock")));
+        assert_eq!(cfg.api.token.as_deref(), Some("secret-token"));
+        assert_eq!(cfg.max_record_secs, 120);
     }
 }

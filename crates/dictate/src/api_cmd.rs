@@ -36,7 +36,7 @@ fn ensure_api_enabled(config_path: Option<&Path>, socket_override: &Option<PathB
     let cfg = Config::load(config_path)?;
     if !cfg.api.enabled {
         bail!(
-            "[api].enabled is false in config — set enabled = true and run `dictate start`"
+            "[api].enabled is false in config — run `dictate config set api.enabled true` and `dictate start`"
         );
     }
     Ok(())
@@ -51,7 +51,7 @@ fn connect(
     let token = load_token(config_path)?;
     let client = ApiClient::connect(&path).with_context(|| {
         format!(
-            "daemon API unreachable at {} — start it with `dictate start` (and ensure [api] is enabled)",
+            "daemon API unreachable at {} — start it with `dictate start` (and run `dictate config set api.enabled true` if disabled)",
             path.display()
         )
     })?;
@@ -242,5 +242,28 @@ mod tests {
             err.contains("dictate start"),
             "error must carry corrective action: {err}"
         );
+    }
+
+    #[test]
+    fn ensure_api_enabled_rejection_carries_exact_cli_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "dictate-api-disabled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        fs::write(&cfg_path, "[api]\nenabled = false\n").unwrap();
+
+        let err = ping(Some(&cfg_path), None).unwrap_err().to_string();
+        assert!(
+            err.contains("dictate config set api.enabled true"),
+            "error must carry exact actionable CLI command, got: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

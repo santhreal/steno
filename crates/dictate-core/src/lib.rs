@@ -24,19 +24,27 @@ pub mod stt;
 pub mod text;
 pub mod ui_theme;
 
+pub use api::{
+    ApiError, ApiHandler, ApiResult, MAX_UTTERANCE_SAMPLES, PcmTranscoder, ServeOptions,
+    UtteranceApiHandler, UtteranceBuffer, serve_unix,
+};
+pub use audio::{RecordConfig, list_input_devices, record, record_while};
 pub use config::{
-    ApiConfig, Config, DictConfig, UiColors, UiConfig, UiStages, config_get, config_set,
-    default_config_path, default_dictionary_path, default_model_dir, expand_tilde,
+    ApiConfig, Config, DictConfig, MODEL_DOWNLOAD_HINT, UiColors, UiConfig, UiStages, config_get,
+    config_set, default_config_path, default_dictionary_path, default_model_dir, expand_tilde,
     list_settable_keys, resolve_model,
 };
-pub use ui_theme::{
-    ResolvedUi, Rgba, ThemePalette, list_themes, parse_rgba, resolve_ui, stage_label,
+pub use dsp::{
+    DcBlock, DspConfig, Endpoint, STT_RATE, VadConfig, VadEvent, normalize, read_wav, resample,
 };
 pub use engine::Engine;
-pub use overlay::{NullOverlay, OverlayBackend, Stage};
+pub use overlay::{FnOverlay, NullOverlay, OverlayBackend, Stage};
 pub use session::{InjectTyper, Session, SessionBuilder};
 pub use stt::Transcriber;
 pub use text::{
     COMMANDS, Dictionary, FmtState, NullRefine, RefineBackend, RefineConfig, RuleRefine,
     TextConfig, TextPipeline,
+};
+pub use ui_theme::{
+    ResolvedUi, Rgba, ThemePalette, list_themes, parse_rgba, resolve_ui, stage_label,
 };

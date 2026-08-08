@@ -140,7 +140,7 @@ light-dictate/                      # workspace root
 ## CLI subcommand summary
 
 - `dictate start` / `stop` / `status` / `restart` — daemon lifecycle management (`start` and `restart` accept `--foreground`)
-- `dictate config` — `show`, `get <key>`, `set <key> <val>` (inspect or set individual configuration keys)
+- `dictate config` — `show`, `get <key>`, `set <key> <val>` (inspect or set individual configuration keys validated by `list_settable_keys()`, including `max_record_secs`, `api.enabled`, `api.path`, `api.token`, `model_path`, `provider`, `type_output`, `n_threads`, `ui.theme`, `ui.overlay`, `ui.done_flash_ms`, `ui.stages.*`, and `ui.colors.*`)
 - `dictate model` — `list`, `use <name_or_path> [--provider cuda|cpu]` (list or select sherpa-onnx model directory)
 - `dictate theme` — `list`, `set <name>` (list built-in overlay themes or set `ui.theme`)
 - `dictate ping` — check daemon API socket connectivity and round-trip latency
@@ -195,6 +195,7 @@ enabled = true               # daemon listens on the socket
 "mukund" = "Mukund"
 "um" = ""
 ```
+`list_settable_keys()` in `dictate-core` provides exact surgical key validation for `config_get` / `config_set` and `dictate config set`. The full set of supported keys includes top-level options (`model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`), daemon API options (`api.enabled`, `api.path`, `api.token`), overlay settings (`ui.theme`, `ui.overlay`, `ui.done_flash_ms`), stage labels (`ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`, `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`), and color overrides (`ui.colors.*`). Wildcard patterns are rejected.
 
 ## IPC protocol (NDJSON)
 

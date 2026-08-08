@@ -7,10 +7,10 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use dictate_core::config::{
-    self, Config, config_get, config_set, default_config_path, default_model_dir, list_settable_keys,
-    resolve_model,
+    self, Config, MODEL_DOWNLOAD_HINT, config_get, config_set, default_config_path,
+    default_model_dir, list_settable_keys, resolve_model,
 };
-use dictate_core::list_themes;
+use dictate_core::{Rgba, UiConfig, list_themes, resolve_ui};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +80,32 @@ pub fn config_set_cmd(config_path: Option<&Path>, key: &str, value: &str) -> Res
             list_settable_keys().join(", ")
         );
     }
+    match key {
+        "provider" => {
+            ensure!(
+                matches!(value, "cuda" | "cpu"),
+                "invalid provider {value:?} — use \"cuda\" or \"cpu\""
+            );
+        }
+        "ui.theme" => {
+            let val = value.trim();
+            ensure!(
+                list_themes().contains(&val) || matches!(val, "null" | "none" | "off"),
+                "unknown theme {value:?} — choose one of: {}, or null|none|off",
+                list_themes().join(", ")
+            );
+        }
+        "n_threads" => {
+            let n: i64 = value.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be an integer, got {value:?}")
+            })?;
+            ensure!(n > 0, "n_threads must be greater than 0, got {n}");
+        }
+        k if k.starts_with("ui.colors.") => {
+            dictate_core::parse_rgba(value)?;
+        }
+        _ => {}
+    }
     let created = !path.exists();
     config_set(&path, key, value)?;
     if created {
@@ -115,6 +141,7 @@ pub fn model_list(config_path: Option<&Path>) -> Result<()> {
 
     if !models_dir.is_dir() {
         println!("(no models directory yet)");
+        println!("{MODEL_DOWNLOAD_HINT}");
         return Ok(());
     }
 
@@ -127,6 +154,7 @@ pub fn model_list(config_path: Option<&Path>) -> Result<()> {
 
     if entries.is_empty() {
         println!("(empty)");
+        println!("{MODEL_DOWNLOAD_HINT}");
         return Ok(());
     }
 
@@ -174,8 +202,32 @@ pub fn model_use(
 }
 
 /// `dictate theme list`
-pub fn theme_list() -> Result<()> {
-    println!("themes: {}", list_themes().join(" "));
+pub fn theme_list(config_path: Option<&Path>) -> Result<()> {
+    let cfg = Config::load(config_path)?;
+    let current_theme = cfg.ui.theme.trim();
+
+    println!("current: {current_theme} (*)");
+    println!("themes:");
+    for name in list_themes() {
+        let mark = if *name == current_theme { "*" } else { " " };
+        let palette = resolve_ui(&UiConfig {
+            theme: name.to_string(),
+            ..Default::default()
+        })
+        .colors;
+        println!(
+            "{mark} {name:<8} bg={} fg={} border={} icon_bg={} icon_fg={} meta={} shadow={} accent={} error={}",
+            format_rgba(palette.bg),
+            format_rgba(palette.fg),
+            format_rgba(palette.border),
+            format_rgba(palette.icon_bg),
+            format_rgba(palette.icon_fg),
+            format_rgba(palette.meta),
+            format_rgba(palette.shadow),
+            format_rgba(palette.accent),
+            format_rgba(palette.error),
+        );
+    }
     println!("null aliases (no-op overlay): null | none | off");
     Ok(())
 }
@@ -217,6 +269,20 @@ fn effective_value(cfg: &Config, key: &str) -> String {
         "provider" => cfg.provider.clone(),
         "type_output" => cfg.type_output.to_string(),
         "n_threads" => cfg.n_threads.to_string(),
+        "max_record_secs" => cfg.max_record_secs.to_string(),
+        "api.enabled" => cfg.api.enabled.to_string(),
+        "api.path" => cfg
+            .api
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unset)".into()),
+        "api.token" => cfg
+            .api
+            .token
+            .as_deref()
+            .unwrap_or("(unset)")
+            .to_string(),
         "ui.theme" => cfg.ui.theme.clone(),
         "ui.overlay" => cfg.ui.overlay.to_string(),
         "ui.done_flash_ms" => cfg.ui.done_flash_ms.to_string(),
@@ -239,6 +305,13 @@ fn effective_value(cfg: &Config, key: &str) -> String {
     }
 }
 
+fn format_rgba([r, g, b, a]: Rgba) -> String {
+    if a == 0xff {
+        format!("#{:02X}{:02X}{:02X}", r, g, b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
+    }
+}
 fn opt_color(v: &Option<String>) -> String {
     v.clone().unwrap_or_else(|| "(theme default)".into())
 }
@@ -370,5 +443,109 @@ mod tests {
         let got = resolve_model_arg(&name).unwrap();
         assert_eq!(got, dir);
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn config_set_cmd_validates_provider() {
+        let path = temp_cfg("valid-provider");
+        let _ = fs::remove_file(&path);
+        let err = config_set_cmd(Some(&path), "provider", "invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid provider"), "{err}");
+        assert!(!path.exists());
+
+        config_set_cmd(Some(&path), "provider", "cuda").unwrap();
+        assert_eq!(config_get(&path, "provider").unwrap().as_deref(), Some("cuda"));
+        config_set_cmd(Some(&path), "provider", "cpu").unwrap();
+        assert_eq!(config_get(&path, "provider").unwrap().as_deref(), Some("cpu"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_set_cmd_validates_ui_theme() {
+        let path = temp_cfg("valid-theme");
+        let _ = fs::remove_file(&path);
+        let err = config_set_cmd(Some(&path), "ui.theme", "invalid_theme")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown theme"), "{err}");
+        assert!(!path.exists());
+
+        config_set_cmd(Some(&path), "ui.theme", "dusk").unwrap();
+        assert_eq!(config_get(&path, "ui.theme").unwrap().as_deref(), Some("dusk"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_set_cmd_validates_n_threads() {
+        let path = temp_cfg("valid-threads");
+        let _ = fs::remove_file(&path);
+
+        let err0 = config_set_cmd(Some(&path), "n_threads", "0")
+            .unwrap_err()
+            .to_string();
+        assert!(err0.contains("greater than 0"), "{err0}");
+
+        let err_neg = config_set_cmd(Some(&path), "n_threads", "-5")
+            .unwrap_err()
+            .to_string();
+        assert!(err_neg.contains("greater than 0"), "{err_neg}");
+
+        let err_str = config_set_cmd(Some(&path), "n_threads", "abc")
+            .unwrap_err()
+            .to_string();
+        assert!(err_str.contains("integer"), "{err_str}");
+
+        assert!(!path.exists());
+
+        config_set_cmd(Some(&path), "n_threads", "4").unwrap();
+        assert_eq!(config_get(&path, "n_threads").unwrap().as_deref(), Some("4"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_set_cmd_validates_ui_colors() {
+        let path = temp_cfg("valid-colors");
+        let _ = fs::remove_file(&path);
+
+        let err1 = config_set_cmd(Some(&path), "ui.colors.bg", "invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(err1.contains("color"), "{err1}");
+
+        let err2 = config_set_cmd(Some(&path), "ui.colors.fg", "#123")
+            .unwrap_err()
+            .to_string();
+        assert!(err2.contains("#RRGGBB or #RRGGBBAA"), "{err2}");
+
+        assert!(!path.exists());
+
+        config_set_cmd(Some(&path), "ui.colors.fg", "#112233").unwrap();
+        assert_eq!(
+            config_get(&path, "ui.colors.fg").unwrap().as_deref(),
+            Some("#112233")
+        );
+        config_set_cmd(Some(&path), "ui.colors.fg", "#11223344").unwrap();
+        assert_eq!(
+            config_get(&path, "ui.colors.fg").unwrap().as_deref(),
+            Some("#11223344")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn theme_list_runs_successfully() {
+        let path = temp_cfg("theme-list");
+        config_set_cmd(Some(&path), "ui.theme", "dusk").unwrap();
+        theme_list(Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn model_list_runs_successfully() {
+        let path = temp_cfg("model-list");
+        fs::write(&path, "").unwrap();
+        model_list(Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
     }
 }

@@ -28,7 +28,22 @@ impl OverlayBackend for NullOverlay {
         false
     }
 }
+/// Closure-backed overlay for testing and embedding.
+pub struct FnOverlay<F: Fn(Stage) + Send + Sync>(pub F);
 
+impl<F: Fn(Stage) + Send + Sync> OverlayBackend for FnOverlay<F> {
+    fn set(&self, stage: Stage) {
+        (self.0)(stage);
+    }
+
+    fn flash(&self, _ms: u64) {
+        (self.0)(Stage::Done);
+    }
+
+    fn active(&self) -> bool {
+        true
+    }
+}
 impl OverlayBackend for Box<dyn OverlayBackend> {
     fn set(&self, stage: Stage) {
         (**self).set(stage)
@@ -41,6 +56,7 @@ impl OverlayBackend for Box<dyn OverlayBackend> {
     }
 }
 
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     /// Window unmapped — idle between utterances.
@@ -51,4 +67,32 @@ pub enum Stage {
     Transcribing,
     Done,
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn fn_overlay_records_stages_and_flash() {
+        let stages = Arc::new(Mutex::new(Vec::new()));
+        let stages_clone = stages.clone();
+        let overlay = FnOverlay(move |stage| {
+            if let Ok(mut s) = stages_clone.lock() {
+                s.push(stage);
+            }
+        });
+
+        assert!(overlay.active());
+        overlay.set(Stage::Recording);
+        overlay.set(Stage::Transcribing);
+        overlay.flash(180);
+
+        if let Ok(s) = stages.lock() {
+            assert_eq!(*s, [Stage::Recording, Stage::Transcribing, Stage::Done]);
+        } else {
+            panic!("mutex poisoned");
+        }
+    }
 }

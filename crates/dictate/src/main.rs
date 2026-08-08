@@ -126,6 +126,12 @@ enum ApiCommand {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Probe the daemon NDJSON API socket (pong + latency).
+    Ping {
+        /// Override API socket path (default: config / XDG runtime).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -185,10 +191,15 @@ fn main() -> Result<()> {
         Some(Command::Ping { socket }) => {
             return api_cmd::ping(cli.config.as_deref(), socket);
         }
-        Some(Command::Api {
-            command: ApiCommand::Status { socket },
-        }) => {
-            return api_cmd::api_status(cli.config.as_deref(), socket);
+        Some(Command::Api { command }) => {
+            return match command {
+                ApiCommand::Status { socket } => {
+                    api_cmd::api_status(cli.config.as_deref(), socket)
+                }
+                ApiCommand::Ping { socket } => {
+                    api_cmd::ping(cli.config.as_deref(), socket)
+                }
+            };
         }
         Some(Command::Config { command }) => {
             return match command {
@@ -216,7 +227,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Theme { command }) => {
             return match command {
-                ThemeCommand::List => config_cmd::theme_list(),
+                ThemeCommand::List => config_cmd::theme_list(cli.config.as_deref()),
                 ThemeCommand::Set { name } => {
                     config_cmd::theme_set(cli.config.as_deref(), &name)
                 }
@@ -480,15 +491,34 @@ mod tests {
         let ping_sock =
             Cli::try_parse_from(["dictate", "ping", "--socket", "/tmp/x.sock"]).expect("ping sock");
         assert!(matches!(
-            ping_sock.command,
+            &ping_sock.command,
             Some(Command::Ping {
-                socket: Some(ref p)
+                socket: Some(p)
+            }) if p == std::path::Path::new("/tmp/x.sock")
+        ));
+
+        let api_ping = Cli::try_parse_from(["dictate", "api", "ping"]).expect("api ping");
+        assert!(matches!(
+            &api_ping.command,
+            Some(Command::Api {
+                command: ApiCommand::Ping { socket: None }
+            })
+        ));
+
+        let api_ping_sock =
+            Cli::try_parse_from(["dictate", "api", "ping", "--socket", "/tmp/x.sock"]).expect("api ping sock");
+        assert!(matches!(
+            &api_ping_sock.command,
+            Some(Command::Api {
+                command: ApiCommand::Ping {
+                    socket: Some(p)
+                }
             }) if p == std::path::Path::new("/tmp/x.sock")
         ));
 
         let status = Cli::try_parse_from(["dictate", "api", "status"]).expect("api status");
         assert!(matches!(
-            status.command,
+            &status.command,
             Some(Command::Api {
                 command: ApiCommand::Status { socket: None }
             })

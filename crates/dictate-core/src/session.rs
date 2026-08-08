@@ -52,6 +52,11 @@ impl Session {
             typer: None,
         }
     }
+    /// Create a session with default settings (NullOverlay, typing disarmed, 0 flash).
+    pub fn with_defaults(engine: Engine) -> Self {
+        Self::builder(engine).build()
+    }
+
 
     /// Whether typing is armed from config (`type_output = true`).
     pub fn type_output_armed(&self) -> bool {

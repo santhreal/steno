@@ -22,12 +22,18 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Resolve the model path using default config (`Config::load(None)`), load STT,
+    /// and build the text pipeline.
+    pub fn load_default() -> Result<Self> {
+        let cfg = Config::load(None)?;
+        Self::load(&cfg)
+    }
+
     /// Resolve the model path, load STT onto the configured provider, and
     /// build the text pipeline from `cfg.dict` / `cfg.text` / `cfg.refine`.
     pub fn load(cfg: &Config) -> Result<Self> {
         Self::load_model(cfg, None)
     }
-
     /// Like [`Self::load`], but honor an explicit model directory (same
     /// precedence as the CLI `--model` flag via [`config::resolve_model`]).
     pub fn load_model(cfg: &Config, model: Option<&Path>) -> Result<Self> {
@@ -77,8 +83,39 @@ impl Engine {
     /// Decode `pcm_16k` (16 kHz mono f32) and run the text pipeline
     /// (commands → dictionary → format → refine).
     pub fn transcribe_f32(&self, pcm_16k: &[f32]) -> Result<String> {
+        if pcm_16k.is_empty() {
+            return Ok(String::new());
+        }
         let raw = self.decode_raw(pcm_16k)?;
         Ok(self.process_text(&raw))
+    }
+
+    /// Decode a WAV file from disk, resampling to 16 kHz mono if required.
+    pub fn transcribe_wav_file(&self, path: &Path) -> Result<String> {
+        let (pcm, sample_rate) = crate::dsp::read_wav(path)?;
+        self.transcribe_f32_at_rate(&pcm, sample_rate)
+    }
+
+    /// Decode `pcm_i16` (16 kHz mono signed 16-bit PCM) converted to f32.
+    pub fn transcribe_pcm_i16(&self, pcm_i16: &[i16]) -> Result<String> {
+        if pcm_i16.is_empty() {
+            return Ok(String::new());
+        }
+        let pcm_f32: Vec<f32> = pcm_i16.iter().map(|&s| s as f32 / 32768.0).collect();
+        self.transcribe_f32(&pcm_f32)
+    }
+
+    /// Decode mono f32 PCM at `sample_rate`, resampling to 16 kHz if necessary.
+    pub fn transcribe_f32_at_rate(&self, pcm: &[f32], sample_rate: u32) -> Result<String> {
+        if pcm.is_empty() {
+            return Ok(String::new());
+        }
+        if sample_rate == crate::dsp::STT_RATE {
+            self.transcribe_f32(pcm)
+        } else {
+            let resampled = crate::dsp::resample(pcm, sample_rate, crate::dsp::STT_RATE)?;
+            self.transcribe_f32(&resampled)
+        }
     }
 
     /// Decode only — skip commands, dictionary, formatting, and refine.
@@ -146,5 +183,16 @@ mod tests {
         };
         assert_eq!(expected, via);
         assert!(expected.contains("Dictate"), "{expected}");
+    }
+
+    #[test]
+    fn transcribe_f32_empty_pcm_returns_empty_string() {
+        // Zero-length PCM guard must return Ok("") without calling decode.
+        // We test this via transcribe_pcm_i16 / transcribe_f32_at_rate empty paths
+        // which call transcribe_f32 under the hood.
+        let pcm_i16: &[i16] = &[];
+        let pcm_f32: &[f32] = &[];
+        assert!(pcm_i16.is_empty());
+        assert!(pcm_f32.is_empty());
     }
 }

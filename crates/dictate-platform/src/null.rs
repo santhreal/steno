@@ -12,6 +12,12 @@ pub use dictate_core::overlay::NullOverlay;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullHotkey;
 
+impl NullHotkey {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 impl HotkeySource for NullHotkey {
     fn next_event(&mut self) -> Result<HotkeyEvent> {
         // Block briefly so a tight poll loop does not spin the CPU.
@@ -26,6 +32,12 @@ impl HotkeySource for NullHotkey {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullTyper;
 
+impl NullTyper {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 impl Typer for NullTyper {
     fn type_text(&mut self, _text: &str) -> Result<()> {
         Ok(())
@@ -38,3 +50,21 @@ impl InjectTyper for NullTyper {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_null_hotkey_new() {
+        let mut hk = NullHotkey::new();
+        let ev = hk.next_event().unwrap();
+        assert_eq!(ev, HotkeyEvent::Shutdown);
+    }
+
+    #[test]
+    fn test_null_typer_new() {
+        let mut typer = NullTyper::new();
+        assert!(crate::traits::Typer::type_text(&mut typer, "test").is_ok());
+        assert!(InjectTyper::type_text(&mut typer, "test").is_ok());
+    }
+}
