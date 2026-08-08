@@ -41,8 +41,8 @@ impl Engine {
         let model = config::resolve_model(owned.as_ref(), cfg)?;
         let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)
             .with_context(|| format!("failed to load STT model from {}", model.display()))?;
-        let dict = Dictionary::from_map(cfg.dict.overrides.clone());
-        let pipeline = TextPipeline::with_refine(cfg.text, dict, cfg.refine.make_backend());
+        let refine_backend = cfg.refine.make_backend();
+        let pipeline = TextPipeline::with_refine(cfg.text, Dictionary::default(), refine_backend);
         Ok(Self::from_parts(transcriber, pipeline))
     }
 
@@ -146,7 +146,7 @@ mod tests {
     //! exercise pipeline wiring the same way Engine does after decode.
 
     use super::Engine;
-    use crate::text::{Dictionary, NullRefine, TextConfig, TextPipeline};
+    use crate::text::{Dictionary, TextConfig, TextPipeline};
     use std::collections::HashMap;
 
     #[test]
@@ -171,10 +171,9 @@ mod tests {
         // match process_stream with a fresh FmtState.
         let mut map = HashMap::new();
         map.insert("handy".into(), "Dictate".into());
-        let pipeline = TextPipeline::with_refine(
+        let pipeline = TextPipeline::new(
             TextConfig::default(),
             Dictionary::from_map(map),
-            Box::new(NullRefine),
         );
         // Build a stand-in by reusing pipeline methods only (no GPU).
         let (expected, _) = pipeline.process_stream("say handy please", Default::default());
@@ -184,6 +183,15 @@ mod tests {
         };
         assert_eq!(expected, via);
         assert!(expected.contains("Dictate"), "{expected}");
+    }
+    #[test]
+    fn engine_with_refine_dictionary_refinement() {
+        let mut cfg = crate::Config::default();
+        cfg.refine.dictionary.insert("vayon".into(), "veyyon".into());
+        let backend = cfg.refine.make_backend();
+        let pipeline = TextPipeline::with_refine(TextConfig::default(), Dictionary::default(), backend);
+        let engine = Engine::from_parts(crate::stt::Transcriber::dummy(), pipeline);
+        assert_eq!(engine.process_text("hello vayon world"), "Hello veyyon world");
     }
 
     #[test]
