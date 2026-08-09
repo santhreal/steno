@@ -375,6 +375,16 @@ impl Config {
             path.display()
         );
 
+        // Validate refine.backend is a known value when refine is enabled.
+        if self.refine.enabled {
+            ensure!(
+                matches!(self.refine.backend.as_str(), "rules" | "llm"),
+                "invalid refine.backend = {:?} in {}: set it to \"rules\" or \"llm\"",
+                self.refine.backend,
+                path.display()
+            );
+        }
+
         // LLM refine: validate when backend = "llm" so load-time errors
         // surface before the daemon tries to make_backend.
         if self.refine.enabled && self.refine.backend == "llm" {

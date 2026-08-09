@@ -64,6 +64,7 @@ echo "running CPU unit/clippy gate (no daemon, no GPU, no overlay X)"
 
 cargo test -p steno-core --lib
 cargo test -p steno-platform --lib
+cargo test -p steno
 cargo clippy -p steno-core -p steno-platform -p steno --all-targets -- -D warnings
 
 echo "ci-cpu: OK"
