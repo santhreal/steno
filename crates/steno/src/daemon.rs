@@ -34,18 +34,43 @@ use steno_platform::restore_caps_lock_mapping;
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
-    // XDG Base Directory: `$XDG_CACHE_HOME/steno`, else `~/.cache/steno`.
-    let dir = match std::env::var_os("XDG_CACHE_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d).join("steno"),
-        _ => {
-            let home = std::env::var_os("HOME").context(
-                "HOME is unset and XDG_CACHE_HOME is unset — export one of them, or use --foreground",
-            )?;
-            PathBuf::from(home).join(".cache/steno")
-        }
-    };
-    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    Ok(dir)
+    // XDG Base Directory on Unix: `$XDG_CACHE_HOME/steno`, else `~/.cache/steno`.
+    // Windows: `%LOCALAPPDATA%\steno`.
+    // macOS: `~/Library/Caches/steno`.
+    #[cfg(unix)]
+    {
+        let dir = match std::env::var_os("XDG_CACHE_HOME") {
+            Some(d) if !d.is_empty() => PathBuf::from(d).join("steno"),
+            _ => {
+                let home = std::env::var_os("HOME").context(
+                    "HOME is unset and XDG_CACHE_HOME is unset — export one of them, or use --foreground",
+                )?;
+                PathBuf::from(home).join(".cache/steno")
+            }
+        };
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        Ok(dir)
+    }
+    #[cfg(windows)]
+    {
+        let dir = match std::env::var_os("LOCALAPPDATA") {
+            Some(d) if !d.is_empty() => PathBuf::from(d).join("steno"),
+            _ => {
+                let home = std::env::var_os("USERPROFILE").context(
+                    "USERPROFILE is unset and LOCALAPPDATA is unset — set one of them",
+                )?;
+                PathBuf::from(home).join("AppData/Local/steno")
+            }
+        };
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        Ok(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let dir = std::env::temp_dir().join("steno");
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        Ok(dir)
+    }
 }
 
 fn pid_path() -> Result<PathBuf> {
