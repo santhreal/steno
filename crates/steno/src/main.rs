@@ -187,6 +187,11 @@ enum ThemeCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_log(cli.verbose);
+    // Auto-repair: heal Caps Lock if a prior daemon was killed without
+    // running Drop (SIGKILL, crash, OOM). Skips when the daemon is still
+    // running. Runs on every invocation so even `steno status` /
+    // `steno config show` un-blackhole the key — not just stop/start.
+    let _ = daemon::repair_caps_lock(false);
 
     match cli.command {
         Some(Command::Start { foreground }) => return daemon::start(&cli, foreground),

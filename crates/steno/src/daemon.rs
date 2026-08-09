@@ -835,6 +835,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     }
 
     let mut hotkey = Hotkey::grab_caps_lock()?;
+    // Watchdog: if SIGTERM arrives while the main thread is blocked in a
+    // long sherpa transcription, this thread restores Caps Lock before
+    // `steno stop` escalates to SIGKILL (which skips Drop).
+    let _watchdog = hotkey.spawn_shutdown_watchdog(&SHUTDOWN);
     // Ready: model loaded AND hotkey grabbed. Tell the parent.
     if let Ok(ready) = ready_path() {
         let _ = fs::write(&ready, format!("{}", std::process::id()));

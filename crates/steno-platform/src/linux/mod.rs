@@ -70,6 +70,13 @@ impl Hotkey {
     pub fn trigger_keycode(&self) -> x11rb::protocol::xproto::Keycode {
         self.inner.trigger_keycode()
     }
+
+    pub fn spawn_shutdown_watchdog(
+        &self,
+        shutdown: &'static std::sync::atomic::AtomicBool,
+    ) -> std::thread::JoinHandle<()> {
+        self.inner.spawn_shutdown_watchdog(shutdown)
+    }
 }
 
 impl HotkeySource for Hotkey {

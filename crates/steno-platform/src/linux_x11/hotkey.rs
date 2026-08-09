@@ -29,6 +29,7 @@ use crate::traits::HotkeyEvent;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
@@ -276,6 +277,50 @@ impl Hotkey {
         self.pending.clear();
         let _ = self.conn.flush();
         while let Ok(Some(_)) = self.conn.poll_for_event() {}
+    }
+
+    /// Spawn a background thread that restores Caps Lock when `shutdown`
+    /// is set — a safety net for SIGTERM arriving while the main thread
+    /// is blocked in a long sherpa transcription.
+    ///
+    /// The signal handler sets `shutdown`; this thread detects it within
+    /// 200 ms and restores the keysyms via its own X11 connection. Without
+    /// it, `steno stop` escalates to SIGKILL after 10 s, `Drop` never runs,
+    /// and Caps Lock stays mapped to NoSymbol (blackholed).
+    ///
+    /// Fire-and-forget: in the normal exit path `Drop` restores first
+    /// (redundant, harmless — same keysyms written twice). On SIGKILL the
+    /// thread is killed too, but by then it has long finished; the final
+    /// fallback is `repair_caps_lock_if_needed()` in `steno stop`/`start`.
+    pub fn spawn_shutdown_watchdog(
+        &self,
+        shutdown: &'static AtomicBool,
+    ) -> thread::JoinHandle<()> {
+        let trigger = self.trigger;
+        let orig_keysyms = self.orig_keysyms.clone();
+        let keysyms_per_keycode = self.keysyms_per_keycode;
+
+        thread::Builder::new()
+            .name("steno-caps-watchdog".into())
+            .spawn(move || {
+                while !shutdown.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                // Restore via our own connection — the main thread may
+                // be stuck in sherpa and unable to flush its connection.
+                if let Ok((conn, _)) = connect_x11_for_restore() {
+                    let restore = caps_lock_restore_keysyms(&orig_keysyms);
+                    let payload = pad_keysyms(restore, keysyms_per_keycode);
+                    let _ = conn.change_keyboard_mapping(
+                        1,
+                        trigger,
+                        payload.len() as u8,
+                        &payload,
+                    );
+                    let _ = conn.flush();
+                }
+            })
+            .expect("cannot spawn caps watchdog thread")
     }
 
     /// The resolved trigger keycode (used by the off-host test harness).
