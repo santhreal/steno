@@ -42,6 +42,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 
 use super::{LlmRefineConfig, RefineBackend};
 
@@ -62,13 +63,18 @@ Output the corrected text only.";
 /// LLM refine backend using a local GGUF model via llama-cpp-2.
 ///
 /// The model is loaded once and kept resident. Each `refine()` call
-/// constructs a prompt, runs a single generation pass, and returns the
-/// corrected text.
+/// creates a fresh context (KV cache), runs a single generation pass,
+/// and returns the corrected text. Context creation for small models
+/// (<1B params) is fast enough that per-call creation is simpler than
+/// solving the self-referential lifetime between `LlamaModel` and
+/// `LlamaContext<'a>`.
 pub struct LlmRefine {
     backend: LlamaBackend,
     model: LlamaModel,
     config: LlmRefineConfig,
     system_prompt: String,
+    /// Tokens that signal "stop generating" (beyond EOS).
+    stop_tokens: Vec<LlamaToken>,
 }
 
 impl LlmRefine {
@@ -90,6 +96,11 @@ impl LlmRefine {
             bail!("LLM model path {} is a directory, not a file", model_path.display());
         }
 
+        // Validate config fields.
+        let n_threads = config.n_threads.clamp(1, 32) as i32;
+        let max_tokens = config.max_tokens.clamp(1, 4096);
+        let temperature = config.temperature.clamp(0.0, 2.0);
+
         let backend = LlamaBackend::init()
             .context("failed to initialize llama.cpp backend")?;
 
@@ -103,29 +114,46 @@ impl LlmRefine {
             .with_n_gpu_layers(n_gpu);
         let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
             .with_context(|| format!("failed to load GGUF model from {}", model_path.display()))?;
-
         let system_prompt = if config.prompt.is_empty() {
             build_system_prompt(dictionary)
         } else {
             config.prompt.clone()
         };
 
+        // Collect stop tokens: EOS + common chat markers.
+        let mut stop_tokens = vec![model.token_eos()];
+        // Try to tokenize common stop sequences and add their first tokens.
+        for stop_str in ["\n---", "\n\n---", "<|im_end|>", "</s>", "<|end|>"] {
+            if let Ok(toks) = model.str_to_token(stop_str, AddBos::Never) {
+                if let Some(&first) = toks.first() {
+                    stop_tokens.push(first);
+                }
+            }
+        }
+
+        let config = LlmRefineConfig {
+            n_threads: n_threads as u32,
+            max_tokens,
+            temperature,
+            ..config.clone()
+        };
+
         Ok(Self {
             backend,
             model,
-            config: config.clone(),
+            config,
             system_prompt,
+            stop_tokens,
         })
     }
 
-    /// Run a single generation pass: encode the prompt, decode tokens,
-    /// extract the corrected text.
+    /// Run a single generation pass: create a context, encode the
+    /// prompt, decode tokens, extract the corrected text.
     fn generate(&self, prompt: &str) -> Result<String> {
         let ctx_params = LlamaContextParams::default()
             .with_n_threads(self.config.n_threads as i32)
             .with_n_threads_batch(self.config.n_threads as i32)
             .with_n_ctx(std::num::NonZeroU32::new(4096));
-
         let mut ctx = self.model.new_context(&self.backend, ctx_params)
             .context("failed to create LLM context")?;
 
@@ -133,14 +161,26 @@ impl LlmRefine {
         let tokens = self.model.str_to_token(prompt, AddBos::Always)
             .context("failed to tokenize prompt")?;
 
-        // Create a batch large enough for prompt + generation.
-        let batch_size = tokens.len() + self.config.max_tokens as usize;
-        let mut batch = LlamaBatch::new(batch_size, 1);
+        // Ensure prompt fits in context window.
+        let n_ctx = ctx.n_ctx() as usize;
+        let max_tokens = self.config.max_tokens as usize;
+        let (prompt_tokens, n_prompt) = if tokens.len() + max_tokens > n_ctx {
+            let max_prompt = n_ctx.saturating_sub(max_tokens);
+            let start = tokens.len().saturating_sub(max_prompt);
+            log::warn!(
+                "LLM refine: prompt ({} tokens) + max_tokens ({}) exceeds context ({}); \
+                 truncating prompt to {} tokens",
+                tokens.len(), max_tokens, n_ctx, max_prompt
+            );
+            (tokens[start..].to_vec(), (tokens.len() - start) as i32)
+        } else {
+            (tokens.clone(), tokens.len() as i32)
+        };
 
-        // Add all prompt tokens; only the last one needs logits.
-        let n_prompt = tokens.len() as i32;
-        for (i, &token) in tokens.iter().enumerate() {
-            let needs_logits = i == tokens.len() - 1;
+        let mut batch = LlamaBatch::new(prompt_tokens.len() + max_tokens, 1);
+
+        for (i, &token) in prompt_tokens.iter().enumerate() {
+            let needs_logits = i == prompt_tokens.len() - 1;
             batch.add(token, i as i32, &[0], needs_logits)
                 .map_err(|e| anyhow::anyhow!("failed to add token to batch: {e}"))?;
         }
@@ -160,17 +200,18 @@ impl LlmRefine {
                 true,
             )
         };
-
         let mut sampler = sampler;
-        let mut output = String::new();
-        let mut n_cur = n_prompt;
 
-        for _ in 0..self.config.max_tokens {
+        let mut output = String::new();
+
+        for n_cur in (n_prompt..).take(self.config.max_tokens as usize) {
             // Sample the next token from the last position.
             let new_token = sampler.sample(&ctx, batch.n_tokens() - 1);
 
-            // Check for end-of-generation.
-            if new_token == self.model.token_eos() {
+            // Check for end-of-generation (EOS, EOG, or stop sequence).
+            if self.stop_tokens.contains(&new_token)
+                || self.model.is_eog_token(new_token)
+            {
                 break;
             }
 
@@ -186,7 +227,6 @@ impl LlmRefine {
                 .map_err(|e| anyhow::anyhow!("failed to add generated token: {e}"))?;
             ctx.decode(&mut batch)
                 .context("failed to decode generated token")?;
-            n_cur += 1;
         }
 
         Ok(output.trim().to_string())
