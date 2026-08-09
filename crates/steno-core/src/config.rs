@@ -757,14 +757,28 @@ pub fn expand_tilde(p: &Path) -> Result<PathBuf> {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    home_dir_from(std::env::var_os("HOME"))
+    #[cfg(unix)]
+    {
+        home_dir_from(std::env::var_os("HOME"), "HOME")
+    }
+    #[cfg(windows)]
+    {
+        home_dir_from(
+            std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")),
+            "USERPROFILE",
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        home_dir_from(std::env::var_os("HOME"), "HOME")
+    }
 }
 
-fn home_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf> {
+fn home_dir_from(home: Option<std::ffi::OsString>, var_name: &str) -> Result<PathBuf> {
     match home {
         Some(h) if !h.as_os_str().is_empty() => Ok(PathBuf::from(h)),
         _ => bail!(
-            "the HOME environment variable is not set: set HOME, or pass explicit paths (--config, --model)"
+            "the {var_name} environment variable is not set: set {var_name}, or pass explicit paths (--config, --model)"
         ),
     }
 }
@@ -1338,14 +1352,14 @@ n_threads = 2
     fn home_dir_from_unset_is_an_error_not_a_panic() {
         // WHY: this used to be .expect("HOME is set on Linux"), a panic
         // with no corrective action under e.g. systemd.
-        let err = error_of(home_dir_from(None));
+        let err = error_of(home_dir_from(None, "HOME"));
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("--model"), "{err}");
         assert!(!err.contains("--dictionary"), "{err}");
-        let err = error_of(home_dir_from(Some(std::ffi::OsString::new())));
+        let err = error_of(home_dir_from(Some(std::ffi::OsString::new()), "HOME"));
         assert!(err.contains("HOME"), "{err}");
         assert_eq!(
-            home_dir_from(Some(std::ffi::OsString::from("/home/u"))).unwrap(),
+            home_dir_from(Some(std::ffi::OsString::from("/home/u")), "HOME").unwrap(),
             PathBuf::from("/home/u")
         );
     }
