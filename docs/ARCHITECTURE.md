@@ -16,7 +16,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | Single config + `[refine.dictionary]` (legacy `[dict.overrides]` merged) | **Verified**: unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
 | Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path passes `cfg.provider` (**Implemented/Verified**). |
 | Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |
-| Dictionary + verbatim case protection | **Verified** in unit tests; daemon needs restart after edits |
+| Dictionary phrase overrides | **Verified** in unit tests; daemon needs restart after edits |
 | Typing (`type_output`) | Fail-closed in code; **Unverified** on live session after engine cutover |
 | Daemon NDJSON API (`ping` / `status` / `transcribe` / `shutdown`) | **Verified** in unit/socket tests; live daemon path **Unverified** here |
 | `utterance.*` streaming ops | **Implemented** (text-only on stop; never types). `Event::UtteranceDone` reserved/emitted. Live daemon path **Unverified** here |
@@ -321,8 +321,8 @@ no plugin ABI; compile-time injection only.
 - [ ] Socket reconnect + partial-line framing
 - [ ] Model load errors always include corrective action
 - [x] Typing remains config-armed through API (handler never arms typing)
-- [ ] Crash → pidfile/socket cleaned; Caps Lock keysyms restored
-- [x] Config migrate: dictionary.toml → `[dict.overrides]` once (in-memory; operator copies to disk)
+- [x] Crash → pidfile/socket cleaned; Caps Lock keysyms restored (watchdog thread + auto-repair on CLI)
+- [x] Config migrate: `dictionary.toml` → `[refine.dictionary]` (in-memory merge; `[dict.overrides]` also merged on load)
 - [ ] `cargo test` / clippy clean across workspace (main runs final gates)
 - [ ] Remote X verification on axiomexec after platform extract
 - [x] Policy: no live-session typing / hotkey / soak from local agent runs

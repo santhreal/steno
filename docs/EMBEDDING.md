@@ -109,8 +109,9 @@ let (chunk, state) = pipeline.process_stream("first segment", FmtState::default(
 let (next, state) = pipeline.process_stream("second segment", state);
 ```
 
-`COMMANDS` is the built-in voice-command table. Dictionary replacements are
-verbatim (formatter never re-cases them).
+`COMMANDS` is the built-in voice-command table. Dictionary replacements
+are case-preserved at the dictionary level (matching is case-insensitive),
+but the formatter may re-capitalize them at sentence starts.
 
 ## Refine (`RefineBackend` & `RuleRefine`)
 

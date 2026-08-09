@@ -44,8 +44,10 @@ pub struct TextPipeline {
 }
 
 impl TextPipeline {
-    /// Build with the default [`RuleRefine`] backend (matches
-    /// `[refine] enabled = true`, `backend = "rules"`).
+    /// Build with the default [`RuleRefine`] backend (always active,
+    /// regardless of `[refine] enabled`). For config-driven backend
+    /// selection (including `NullRefine` when disabled), use
+    /// [`Self::with_refine`] with [`RefineConfig::make_backend`].
     pub fn new(cfg: TextConfig, dict: Dictionary) -> Self {
         Self::with_refine(cfg, Box::new(RuleRefine::new(dict)))
     }
