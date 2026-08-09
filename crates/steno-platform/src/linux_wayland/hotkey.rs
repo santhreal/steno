@@ -19,6 +19,7 @@
 //! X11 semantics).
 
 use std::fs;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
@@ -276,16 +277,50 @@ fn reader_thread(dev: &mut Device, tx: &SyncSender<HotkeyEvent>, stop: &AtomicBo
     let mut held = false;
     let mut press_time: Option<Instant> = None;
 
+    // Set the fd to non-blocking so we can poll with a timeout instead of
+    // blocking forever in fetch_events(). Without this, Drop's stop flag +
+    // join() would hang because the thread is stuck in a blocking read().
+    let fd = dev.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
     loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
 
-        // fetch_events blocks until events are available. We can't easily
-        // timeout, so we rely on the stop flag check between calls.
+        // Poll with a 100ms timeout so we can check the stop flag regularly.
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if !stop.load(Ordering::SeqCst) {
+                log::warn!("evdev hotkey: poll error: {err}");
+            }
+            break;
+        }
+        if ret == 0 {
+            // Timeout — no events, loop back to check stop flag.
+            continue;
+        }
+
         let events = match dev.fetch_events() {
             Ok(events) => events,
             Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    continue;
+                }
                 if !stop.load(Ordering::SeqCst) {
                     log::warn!("evdev hotkey: device read error: {e}");
                 }
