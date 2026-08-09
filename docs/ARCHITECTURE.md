@@ -311,7 +311,7 @@ no plugin ABI; compile-time injection only.
 | Overlay | done (ResolvedUi) | layer-shell pill (`zwlr-layer-shell-v1`; `wayland` feature, smithay-client-toolkit; verified on sway headless) | HWND + soft `box_blur_alpha` chip (ResolvedUi; no local UI soak) | NSPanel + tiny-skia soft-shadow chip (ResolvedUi; no local UI soak) |
 | IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
-| STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
+| STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/Metal |
 
 ---
 

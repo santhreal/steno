@@ -115,9 +115,9 @@ pub struct Config {
     pub model_path: Option<PathBuf>,
     /// Decode threads. Defaults to half the logical CPUs.
     pub n_threads: u32,
-    /// sherpa-onnx execution provider: `"cuda"` (default) or `"cpu"`.
-    /// CPU is for CI/headless hosts without NVIDIA. Unknown values fail
-    /// closed at load: there is no silent fallback between providers.
+    /// sherpa-onnx execution provider: `"cuda"` (default), `"cpu"`, or
+    /// `"metal"` (macOS Apple Silicon / GPU). Unknown values fail closed
+    /// at load: there is no silent fallback between providers.
     pub provider: String,
     /// Hard cap on one recording.
     pub max_record_secs: u64,
@@ -312,8 +312,8 @@ impl Config {
             i32::MAX
         );
         ensure!(
-            matches!(self.provider.as_str(), "cuda" | "cpu"),
-            "invalid provider = {:?} in {}: set it to \"cuda\" or \"cpu\"",
+            matches!(self.provider.as_str(), "cuda" | "cpu" | "metal"),
+            "invalid provider = {:?} in {}: set it to \"cuda\", \"cpu\", or \"metal\"",
             self.provider,
             path.display()
         );
@@ -867,8 +867,8 @@ mod tests {
     }
 
     #[test]
-    fn provider_cuda_and_cpu_parse() {
-        for value in ["cuda", "cpu"] {
+    fn provider_cuda_cpu_and_metal_parse() {
+        for value in ["cuda", "cpu", "metal"] {
             let path = temp_file(
                 &format!("provider-{value}.toml"),
                 format!("provider = \"{value}\"\n").as_bytes(),
