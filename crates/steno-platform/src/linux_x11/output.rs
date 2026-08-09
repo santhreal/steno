@@ -46,8 +46,9 @@ impl Emitter {
                 self.last = piece.chars().last();
             }
             OutputMode::Type => {
-                // Track the last character ACTUALLY typed (sanitized), so
-                // a trailing stripped control char can't skew the next join.
+                // type_text sanitizes internally; track the last character
+                // of the sanitized text so a trailing stripped control char
+                // can't skew the next join.
                 let typed = sanitize_for_typing(&piece);
                 type_text(&typed)?;
                 self.last = typed.chars().last();
