@@ -120,7 +120,11 @@ enum Command {
     },
     /// Internal worker process started by `steno start`.
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Run as supervisor: restart the daemon worker on crash.
+        #[arg(long)]
+        supervise: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -248,6 +252,12 @@ fn main() -> Result<()> {
                 ),
             };
         }
+        Some(Command::Daemon { supervise }) => {
+            if supervise {
+                return daemon::supervise(&cli);
+            }
+            return daemon::run_daemon(&cli);
+        }
         Some(Command::Theme { command }) => {
             return match command {
                 ThemeCommand::List => config_cmd::theme_list(cli.config.as_deref()),
@@ -256,7 +266,6 @@ fn main() -> Result<()> {
                 }
             };
         }
-        Some(Command::Daemon) => return daemon::run_daemon(&cli),
         None => {}
     }
 

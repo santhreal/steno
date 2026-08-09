@@ -273,7 +273,7 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
     let log_err = log.try_clone()?;
 
     let mut cmd = Command::new(&exe);
-    cmd.arg("daemon");
+    cmd.arg("daemon").arg("--supervise");
     forward_flags(&mut cmd, cli);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -980,6 +980,81 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                 // Spurious release/cancel with no press — ignore.
             }
             HotkeyEvent::Shutdown => return Ok(()),
+        }
+    }
+}
+
+/// Supervisor: restart the daemon worker on crash. The daemon process
+/// (`steno daemon --supervise`) runs this instead of `run_daemon` directly.
+/// If `run_daemon` returns `Err` and `SHUTDOWN` is not set, it cleans up
+/// (pidfile, socket, Caps Lock) and re-spawns after a backoff. SIGTERM
+/// sets `SHUTDOWN` and exits cleanly.
+pub fn supervise(cli: &Cli) -> Result<()> {
+    // Install signal handlers so SIGTERM/SIGINT/SIGQUIT set SHUTDOWN.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
+    }
+
+    let mut backoff = Duration::from_millis(500);
+    const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+    loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Reset SHUTDOWN before each run — a SIGTERM during one iteration
+        // must not prevent the next, and must stop the supervisor.
+        SHUTDOWN.store(false, Ordering::Relaxed);
+
+        let result = run_daemon(cli);
+
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            // Signal-driven exit: SIGTERM/SIGINT was delivered.
+            return Ok(());
+        }
+
+        match result {
+            Ok(()) => {
+                // Clean exit without a signal — treat as intentional stop.
+                return Ok(());
+            }
+            Err(e) => {
+                log::error!("daemon worker crashed: {e:#}; restarting in {backoff:?}");
+                eprintln!("steno: daemon crashed: {e:#}; restarting in {backoff:?}");
+
+                // Clean up stale state so the restart is clean.
+                if let Ok(path) = pid_path() {
+                    let _ = fs::remove_file(path);
+                }
+                if let Ok(ready) = ready_path() {
+                    let _ = fs::remove_file(&ready);
+                }
+                if let Ok(cfg) = Config::load(cli.config.as_deref()) {
+                    if cfg.api.enabled {
+                        if let Ok(sock) = resolve_api_socket(&cfg.api) {
+                            let _ = fs::remove_file(&sock);
+                        }
+                    }
+                }
+                let _ = restore_caps_lock_mapping();
+
+                // Wait with backoff, but check SHUTDOWN so SIGTERM during
+                // backoff exits immediately.
+                let start = std::time::Instant::now();
+                while start.elapsed() < backoff {
+                    if SHUTDOWN.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                // Exponential backoff capped at MAX_BACKOFF.
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
         }
     }
 }
