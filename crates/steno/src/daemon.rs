@@ -850,13 +850,8 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     );
     eprintln!("steno: model ready. Hotkey: hold Caps Lock.");
 
-    let record_cfg = audio::RecordConfig {
-        device: cli.device.clone(),
-        max_duration: Duration::from_secs(cfg.max_record_secs),
-        vad: cfg.vad,
-        target_rms: cfg.dsp.target_rms,
-        max_gain: cfg.dsp.max_gain,
-    };
+    let record_cfg = audio::RecordConfig::from_config(&cfg)
+        .with_device(cli.device.clone());
 
     let mut held = false;
     loop {

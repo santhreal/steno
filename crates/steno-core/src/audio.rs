@@ -38,6 +38,12 @@ impl RecordConfig {
             max_gain: cfg.dsp.max_gain,
         }
     }
+
+    /// Builder: override the input device substring match.
+    pub fn with_device(mut self, device: Option<String>) -> Self {
+        self.device = device;
+        self
+    }
 }
 
 /// Names of all input devices, for `steno --list-devices`.
