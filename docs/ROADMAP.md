@@ -51,8 +51,8 @@ overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable
 - [x] Phase 6 remote Xvfb re-verify: **PASS** on `axiomexec` (0057c06; XDG_CACHE_HOME, API socket, PTT hotkey, ping)
 
 ## Phase 7 - platform depth & extensions (future)
-- [ ] Wayland native status overlay (`zwlr-layer-shell-v1` status pill)
-- [ ] Wayland native global hotkey (XDG Global Shortcuts portal)
+- [x] Wayland native status overlay (`zwlr-layer-shell-v1` status pill; optional `wayland` cargo feature, smithay-client-toolkit; verified on sway headless)
+- [ ] Wayland native global hotkey (XDG Global Shortcuts portal — needs DBus portal client)
 - [ ] Windows native named pipe IPC backend for daemon API (`\\.\pipe\steno`)
 - [ ] High-DPI awareness & scale factor support for Windows HWND & macOS NSPanel overlays
 - [ ] macOS Metal execution provider support in `stt.rs` (`provider = "metal"`)
