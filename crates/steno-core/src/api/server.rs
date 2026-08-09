@@ -4,8 +4,6 @@
 //! writes a [`Response`] line per request. Event fan-out is reserved for a
 //! later pass (handlers can still encode [`Event`] lines themselves).
 
-// Public until daemon wiring; keep symbols for embedders/CLI.
-#![allow(dead_code)]
 
 use crate::api::protocol::{
     Event, Op, Request, Response, decode_line, encode_line, peek_request_id,
@@ -15,7 +13,7 @@ use crate::engine::Engine;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};

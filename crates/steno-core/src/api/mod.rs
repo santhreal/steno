@@ -2,8 +2,6 @@
 //!
 //! Wired by `daemon::run_daemon` when `[api].enabled`.
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
 
 pub mod client;
 pub mod protocol;

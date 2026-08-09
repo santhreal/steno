@@ -3,8 +3,6 @@
 //! One JSON object per line. Requests are flattened so the wire form is
 //! `{"id":1,"op":"ping"}` (not a nested `op` object).
 
-// Public until daemon wiring; keep symbols for embedders/CLI.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

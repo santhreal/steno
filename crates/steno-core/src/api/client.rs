@@ -1,7 +1,5 @@
 //! Thin Unix-socket NDJSON client for the steno daemon API.
 
-// Public until daemon wiring; keep symbols for embedders/CLI.
-#![allow(dead_code)]
 
 use crate::api::protocol::{Request, Response, decode_line, encode_line};
 use crate::api::server::MAX_API_LINE_BYTES;

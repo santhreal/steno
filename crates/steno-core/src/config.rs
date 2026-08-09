@@ -131,15 +131,16 @@ pub struct Config {
     pub dsp: DspConfig,
     pub text: TextConfig,
     pub ui: UiConfig,
-    /// Phrase overrides applied after voice commands.
+    /// Legacy `[dict.overrides]` — merged into `refine.dictionary` on load.
     pub dict: DictConfig,
-    /// Post-format ASR cleanup (`[refine]`).
+    /// Post-STT refinement (`[refine]`): GEC cleanup + vocabulary overrides.
     pub refine: RefineConfig,
     /// Unix-socket NDJSON API (daemon only).
     pub api: ApiConfig,
 }
 
-/// Dictionary section of the single config file (`[dict]` / `[dict.overrides]`).
+/// Legacy dictionary section (`[dict]` / `[dict.overrides]`). Merged into
+/// `[refine.dictionary]` on load; kept for backward-compatible TOML parsing.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DictConfig {
@@ -382,7 +383,10 @@ impl Config {
 /// Dotted keys accepted by [`config_get`] / [`config_set`].
 ///
 /// Top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`.
-/// API: `api.enabled`, `api.path`, `api.token`.
+/// API: `api.enabled`, `api.path`, `api.token`, `api.require_same_uid`.
+/// Refine: `refine.enabled`, `refine.backend`, `refine.dictionary.*`.
+/// VAD: `vad.silence_ms`, `vad.min_speech_ms`, `vad.start_timeout_secs`, `vad.speech_threshold`.
+/// DSP: `dsp.target_rms`, `dsp.max_gain`.
 /// UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`.
 /// Stages: `ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`,
 /// `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`.
@@ -404,9 +408,16 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "api.enabled",
         "api.path",
         "api.token",
+        "api.require_same_uid",
         "refine.enabled",
         "refine.backend",
         "refine.dictionary.*",
+        "vad.silence_ms",
+        "vad.min_speech_ms",
+        "vad.start_timeout_secs",
+        "vad.speech_threshold",
+        "dsp.target_rms",
+        "dsp.max_gain",
         "ui.theme",
         "ui.overlay",
         "ui.done_flash_ms",
@@ -490,24 +501,39 @@ fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Ite
         // Prefer explicit `[ui.colors]` style over dotted keys when we create.
         table.set_implicit(false);
     }
-    let leaf = parts[parts.len() - 1];
-    table.insert(leaf, value);
+    table.insert(parts[parts.len() - 1], value);
     Ok(())
 }
 
 fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     let v = match key {
-        "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled" | "refine.enabled" => {
+        "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled"
+            | "refine.enabled" | "api.require_same_uid" =>
+        {
             let b: bool = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be a boolean (true/false), got {raw:?}")
             })?;
             toml_edit::value(b)
         }
-        "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" | "max_record_secs" => {
+        "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" | "max_record_secs"
+            | "vad.silence_ms" | "vad.min_speech_ms" =>
+        {
             let n: i64 = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be an integer, got {raw:?}")
             })?;
             toml_edit::value(n)
+        }
+        "vad.start_timeout_secs" => {
+            let n: i64 = raw.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be an integer (seconds), got {raw:?}")
+            })?;
+            toml_edit::value(n)
+        }
+        "vad.speech_threshold" | "dsp.target_rms" | "dsp.max_gain" => {
+            let f: f64 = raw.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be a number, got {raw:?}")
+            })?;
+            toml_edit::value(f)
         }
         _ => toml_edit::value(raw),
     };
