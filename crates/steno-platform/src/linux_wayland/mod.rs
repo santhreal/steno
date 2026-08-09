@@ -1,10 +1,13 @@
-//! Linux Wayland platform: `wtype` typing + native layer-shell overlay.
+//! Linux Wayland platform: `wtype` typing, native layer-shell overlay,
+//! and evdev Caps Lock hotkey for pure Wayland sessions.
 //!
-//! Hotkey stays on the X11 path when `DISPLAY` is available; pure Wayland
-//! uses this module for typing and the layer-shell status pill.
+//! When `DISPLAY` is available the X11 hotkey/overlay path is preferred;
+//! pure Wayland uses evdev for the hotkey and layer-shell for the overlay.
 
 pub mod output;
 #[cfg(feature = "wayland")]
 pub mod overlay;
+#[cfg(feature = "wayland")]
+pub mod hotkey;
 
 pub use output::Emitter;

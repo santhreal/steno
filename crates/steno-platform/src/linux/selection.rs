@@ -15,6 +15,9 @@ pub enum TypingBackend {
 pub enum HotkeyBackend {
     /// Reuse the X11 grab (including XWayland when `DISPLAY` is set).
     X11,
+    /// evdev direct input reading (pure Wayland, requires `wayland` feature).
+    #[cfg(feature = "wayland")]
+    Evdev,
     /// No global Wayland grab yet: callers must fail loudly.
     Unavailable,
 }
@@ -57,13 +60,14 @@ pub fn typing_backend_from(display: Option<&str>, wayland: Option<&str>) -> Typi
         TypingBackend::Xdotool
     }
 }
-
-/// Select the hotkey backend from explicit env snapshots.
 pub fn hotkey_backend_from(display: Option<&str>, wayland: Option<&str>) -> HotkeyBackend {
     if has_display_var(display) {
         HotkeyBackend::X11
     } else if has_wayland_var(wayland) {
-        HotkeyBackend::Unavailable
+        #[cfg(feature = "wayland")]
+        { HotkeyBackend::Evdev }
+        #[cfg(not(feature = "wayland"))]
+        { HotkeyBackend::Unavailable }
     } else {
         // Neither set — let the X11 connect path report its own error.
         HotkeyBackend::X11
@@ -116,12 +120,13 @@ pub fn pure_wayland_hotkey_error() -> String {
         .to_string()
 }
 
-/// Warning text when the status chip cannot be shown on pure Wayland.
+/// Warning text when the status chip cannot be shown on pure Wayland
+/// (only used when the `wayland` cargo feature is disabled).
 pub fn pure_wayland_overlay_warn() -> &'static str {
-    "Wayland status overlay is not implemented yet (no layer-shell chip in-tree). \
-     Using NullOverlay; dictation continues. Follow-up: zwlr-layer-shell status pill. \
-     Workaround: run under XWayland (DISPLAY set) for the existing X11 pill, or set \
-     overlay = false / theme = \"null\" to silence this. See docs/PLATFORM_TRAITS.md."
+    "Wayland status overlay requires the 'wayland' cargo feature (smithay-client-toolkit). \
+     Using NullOverlay; dictation continues. Rebuild with --features wayland for the \
+     layer-shell status pill, or run under XWayland (DISPLAY set) for the existing X11 pill. \
+     See docs/PLATFORM_TRAITS.md."
 }
 
 #[cfg(test)]
@@ -160,29 +165,42 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_unavailable_only_on_pure_wayland() {
+    fn hotkey_backend_selection() {
         assert_eq!(
             hotkey_backend_from(Some(":0"), Some("wayland-0")),
             HotkeyBackend::X11
         );
+        // Pure Wayland: Evdev with feature, Unavailable without.
         assert_eq!(
             hotkey_backend_from(None, Some("wayland-0")),
-            HotkeyBackend::Unavailable
+            {
+                #[cfg(feature = "wayland")]
+                { HotkeyBackend::Evdev }
+                #[cfg(not(feature = "wayland"))]
+                { HotkeyBackend::Unavailable }
+            }
         );
         assert_eq!(hotkey_backend_from(None, None), HotkeyBackend::X11);
     }
 
     #[test]
-    fn overlay_null_warn_on_pure_wayland() {
+    fn overlay_backend_selection() {
         assert_eq!(
             overlay_backend_from(Some(":0"), Some("wayland-0")),
             OverlayBackendChoice::X11
         );
+        // Pure Wayland: Wayland with feature, NullWarn without.
         assert_eq!(
             overlay_backend_from(None, Some("wayland-0")),
-            OverlayBackendChoice::NullWarn
+            {
+                #[cfg(feature = "wayland")]
+                { OverlayBackendChoice::Wayland }
+                #[cfg(not(feature = "wayland"))]
+                { OverlayBackendChoice::NullWarn }
+            }
         );
     }
+
 
     #[test]
     fn pure_wayland_hotkey_error_has_corrective_action() {

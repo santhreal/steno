@@ -23,39 +23,55 @@ use selection::{
 pub use linux_x11::Overlay;
 pub use crate::traits::{HotkeyEvent, OutputMode};
 
-/// Caps Lock hotkey. Pure Wayland without `DISPLAY` fails loudly; hybrid
-/// XWayland sessions reuse the X11 grab.
-pub struct Hotkey {
-    inner: linux_x11::Hotkey,
+/// Caps Lock hotkey. Uses X11 grab when `DISPLAY` is set (including
+/// XWayland); evdev direct input on pure Wayland (with `wayland` feature).
+#[allow(clippy::large_enum_variant)]
+pub enum Hotkey {
+    X11(linux_x11::Hotkey),
+    #[cfg(feature = "wayland")]
+    Evdev(Box<linux_wayland::hotkey::EvdevHotkey>),
 }
 
 impl Hotkey {
-    /// Grab Caps Lock system-wide. On pure Wayland (no `DISPLAY`), returns
-    /// an error with corrective actions instead of a silent no-op.
+    /// Grab Caps Lock system-wide. On pure Wayland without the `wayland`
+    /// feature, returns an error with corrective actions.
     pub fn grab_caps_lock() -> Result<Self> {
         match hotkey_backend() {
-            HotkeyBackend::X11 => Ok(Self {
-                inner: linux_x11::Hotkey::grab_caps_lock()?,
-            }),
+            HotkeyBackend::X11 => Ok(Self::X11(linux_x11::Hotkey::grab_caps_lock()?)),
+            #[cfg(feature = "wayland")]
+            HotkeyBackend::Evdev => {
+                linux_wayland::hotkey::EvdevHotkey::grab_caps_lock()
+                    .map(|h| Self::Evdev(Box::new(h)))
+            }
             HotkeyBackend::Unavailable => bail!("{}", pure_wayland_hotkey_error()),
         }
     }
 
     /// Restore Caps Lock if a prior daemon left it mapped to NoSymbol.
-    /// No-op on pure Wayland (no X11 mapping to repair).
+    /// No-op on evdev (no X11 mapping to repair; turns off LED).
     pub fn restore_caps_lock_mapping() -> Result<bool> {
         match hotkey_backend() {
             HotkeyBackend::X11 => linux_x11::hotkey::restore_caps_lock_mapping(),
+            #[cfg(feature = "wayland")]
+            HotkeyBackend::Evdev => linux_wayland::hotkey::EvdevHotkey::restore_caps_lock_mapping(),
             HotkeyBackend::Unavailable => Ok(false),
         }
     }
 
     pub fn drain_pending(&mut self) {
-        self.inner.drain_pending();
+        match self {
+            Self::X11(h) => h.drain_pending(),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(h) => h.drain_pending(),
+        }
     }
 
     pub fn next_event(&mut self, held: &mut bool) -> Result<HotkeyEvent> {
-        self.inner.next_event(held)
+        match self {
+            Self::X11(h) => h.next_event(held),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(h) => h.next_event(held),
+        }
     }
 
     pub fn next_event_debug(
@@ -64,28 +80,66 @@ impl Hotkey {
         debug: bool,
         shutdown: &std::sync::atomic::AtomicBool,
     ) -> Result<HotkeyEvent> {
-        self.inner.next_event_debug(held, debug, shutdown)
+        match self {
+            Self::X11(h) => h.next_event_debug(held, debug, shutdown),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(h) => h.next_event_debug(held, debug, shutdown),
+        }
     }
 
+    /// X11 keycode for the trigger key. Returns 0 on evdev (no X11 keycode).
     pub fn trigger_keycode(&self) -> x11rb::protocol::xproto::Keycode {
-        self.inner.trigger_keycode()
+        match self {
+            Self::X11(h) => h.trigger_keycode(),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(_) => 0,
+        }
     }
 
+    /// Spawn a shutdown watchdog that restores Caps Lock via X11 when the
+    /// daemon is killed. No-op on evdev (no X11 mapping to restore).
     pub fn spawn_shutdown_watchdog(
         &self,
         shutdown: &'static std::sync::atomic::AtomicBool,
     ) -> std::thread::JoinHandle<()> {
-        self.inner.spawn_shutdown_watchdog(shutdown)
+        match self {
+            Self::X11(h) => h.spawn_shutdown_watchdog(shutdown),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(_) => {
+                // No X11 mapping to restore; spawn a no-op thread that
+                // just waits for shutdown and turns off the LED.
+                std::thread::Builder::new()
+                    .name("steno-evdev-watchdog".into())
+                    .spawn(move || {
+                        while !shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                        let _ = std::fs::write(
+                            "/sys/class/leds/capslock/brightness",
+                            "0",
+                        );
+                    })
+                    .expect("cannot spawn evdev watchdog thread")
+            }
+        }
     }
 }
 
 impl HotkeySource for Hotkey {
     fn next_event(&mut self) -> Result<HotkeyEvent> {
-        HotkeySource::next_event(&mut self.inner)
+        match self {
+            Self::X11(h) => HotkeySource::next_event(h),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(h) => HotkeySource::next_event(h.as_mut()),
+        }
     }
 
     fn drain_pending(&mut self) {
-        HotkeySource::drain_pending(&mut self.inner)
+        match self {
+            Self::X11(h) => HotkeySource::drain_pending(h),
+            #[cfg(feature = "wayland")]
+            Self::Evdev(h) => HotkeySource::drain_pending(h.as_mut()),
+        }
     }
 }
 
@@ -199,7 +253,12 @@ mod tests {
         );
         assert_eq!(
             hotkey_backend_from(None, Some("wayland-1")),
-            HotkeyBackend::Unavailable
+            {
+                #[cfg(feature = "wayland")]
+                { HotkeyBackend::Evdev }
+                #[cfg(not(feature = "wayland"))]
+                { HotkeyBackend::Unavailable }
+            }
         );
         let msg = pure_wayland_hotkey_error();
         assert!(msg.contains("Corrective actions"), "{msg}");
