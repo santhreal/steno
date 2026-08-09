@@ -45,3 +45,7 @@ x11rb = { version = "0.14.0", features = ["xtest"] }
 [features]
 default = []
 wayland = ["steno-platform/wayland"]
+llm = ["steno-core/llm"]
+llm-cuda = ["steno-core/llm-cuda"]
+llm-vulkan = ["steno-core/llm-vulkan"]
+llm-metal = ["steno-core/llm-metal"]
