@@ -24,7 +24,7 @@ use steno_core::{Config, Engine};
 let cfg = Config::load(None)?;                 // ~/.config/steno/config.toml
 let engine = Engine::load(&cfg)?;              // model resident (provider from cfg)
 let pcm: Vec<f32> = /* 16 kHz mono */;
-let text = engine.transcribe_f32(&pcm)?;       // commands → dictionary → format → refine
+let text = engine.transcribe_f32(&pcm)?;       // STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting
 
 // Or load default config and model in a single step:
 let engine = Engine::load_default()?;
@@ -64,30 +64,32 @@ let cleaned = engine.process_text("hello vayon world");
 ```
 ### Engine composition (custom pipeline)
 
-Hosts that inject a custom [`RefineBackend`], pre-built dictionary, or test
+Hosts that inject a custom [`RefineBackend`], [`RuleRefine`], pre-built dictionary, or test
 double assemble the engine explicitly:
 
 ```rust
 use steno_core::{
-    Config, Dictionary, Engine, NullRefine, RefineBackend, TextConfig, TextPipeline,
+    Config, Dictionary, Engine, NullRefine, RefineBackend, RuleRefine, TextConfig, TextPipeline,
     Transcriber,
 };
 
-struct MyRefine;
-impl RefineBackend for MyRefine {
-    fn refine(&self, text: &str) -> String { /* pure, offline */ text.to_string() }
+struct MyCustomRefine;
+impl RefineBackend for MyCustomRefine {
+    fn refine(&self, text: &str) -> String { /* custom GEC transformation */ text.to_string() }
 }
 
 let cfg = Config::load(None)?;
 let model = steno_core::resolve_model(None, &cfg)?;
 let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)?;
-let dict = Dictionary::from_map(cfg.dict.overrides.clone());
-let pipeline = TextPipeline::with_refine(cfg.text, dict, Box::new(MyRefine));
+let refine_backend = cfg.refine.make_backend();
+
+// Default pipeline uses RuleRefine for offline GEC + vocabulary overrides:
+let pipeline = TextPipeline::with_refine(cfg.text, refine_backend);
 let engine = Engine::from_parts(transcriber, pipeline);
 
-// Or swap after load:
+// Or swap in a custom RefineBackend implementation after load:
 let engine = Engine::load(&cfg)?.with_pipeline(
-    TextPipeline::with_refine(cfg.text, Dictionary::from_map(Default::default()), Box::new(NullRefine)),
+    TextPipeline::with_refine(cfg.text, Box::new(MyCustomRefine)),
 );
 ```
 
@@ -95,7 +97,7 @@ Accessors: `engine.transcriber()`, `engine.pipeline()`.
 
 ## Text pipeline
 
-Order is fixed: **commands → dictionary → format → refine**.
+Order is fixed: **STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting**.
 
 ```rust
 use steno_core::{Dictionary, FmtState, TextConfig, TextPipeline};
@@ -110,14 +112,20 @@ let (next, state) = pipeline.process_stream("second segment", state);
 `COMMANDS` is the built-in voice-command table. Dictionary replacements are
 verbatim (formatter never re-cases them).
 
-## Refine (`RefineBackend`)
+## Refine (`RefineBackend` & `RuleRefine`)
 
 `RefineBackend` requires `Send + Sync` so pipeline instances can be shared safely across threads:
 
 ```rust
+use steno_core::{NullRefine, RefineBackend, RuleRefine};
+
 pub trait RefineBackend: Send + Sync {
     fn refine(&self, text: &str) -> String;
 }
+
+// Default RuleRefine performs offline GEC cleanup:
+let default_refiner = RuleRefine;
+let refined = default_refiner.refine("they was going to an hour");
 ```
 
 `Engine::load` builds `TextPipeline::with_refine(..., cfg.refine.make_backend())`.
@@ -127,9 +135,8 @@ ASR phrase + subject-verb maps, a/an edges, light fillers, space-before-punct;
 offline tables only, not acoustic-garble repair). `enabled = false` →
 `NullRefine`.
 
-`RefineBackend` must stay pure and offline: there is no network path in
+`RefineBackend` implementations must stay pure and offline: there is no network path in
 `steno-core`. Heavier offline GEC belongs behind the same trait.
-
 ## Session (engine + overlay + optional typer)
 `Session` wraps a loaded `Engine` and a `Box<dyn OverlayBackend>`. One-shot
 PCM still goes through the engine; the session drives status stages around
@@ -281,24 +288,7 @@ provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
 enabled = true               # default; false → NullRefine
 backend = "rules"            # RuleRefine; unknown → warn + rules
 
-[ui]
-overlay = true
-done_flash_ms = 1200
-theme = "dusk"               # hint for platform create; hosts may ignore
-                             # and inject OverlayBackend instead
-
-[ui.colors]                  # optional #RRGGBB / #RRGGBBAA
-fg = "#ECECF0"
-
-[ui.stages]
-recording = "Listening"      # defaults: Transcribing / Processing / Done / Error
-transcribing = "Thinking"
-done = "Done"
-error = "Error"
-show_timer = true
-pulse_ms = 180
-
-[dict.overrides]
+[refine.overrides]           # or [refine.dictionary]
 "handy" = "Dictate"
 ```
 

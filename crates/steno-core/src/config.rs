@@ -1,8 +1,9 @@
 //! Configuration: built-in defaults, then `~/.config/steno/config.toml`,
 //! then CLI flags (merged by `main.rs`).
 //!
-//! Dictionary overrides live under `[dict.overrides]` in the same file.
-//! A legacy `dictionary.toml` is imported into memory once when that table
+//! Dictionary overrides live under `[refine.dictionary]` (legacy
+//! `[dict.overrides]` is merged into it on load). A legacy
+//! `dictionary.toml` is imported into memory once when that table
 //! is empty (never rewritten to disk):
 //! - default / XDG config load → `~/.config/steno/dictionary.toml`
 //! - explicit `--config` → only a sibling `dictionary.toml` beside that file
@@ -213,9 +214,10 @@ impl Config {
     /// path is an error; a silent typo would be worse. A malformed file
     /// is an error with the offending line context.
     ///
-    /// When `[dict.overrides]` is empty, a legacy `dictionary.toml` is
-    /// imported into memory (loud deprecation warning). Default loads use
-    /// `~/.config/steno/dictionary.toml`; an explicit `--config` only
+    /// When `[refine.dictionary]` is empty, a legacy `dictionary.toml` is
+    /// imported into memory (loud deprecation warning). `[dict.overrides]`
+    /// entries are merged into `[refine.dictionary]` on load. Default loads
+    /// use `~/.config/steno/dictionary.toml`; an explicit `--config` only
     /// considers a sibling `dictionary.toml` beside that file (never the
     /// operator XDG path). The on-disk config is never rewritten.
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -255,8 +257,9 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Import a legacy `dictionary.toml` into `dict.overrides` when that
-    /// table is empty. Read-only: never writes config.toml.
+    /// Merge `[dict.overrides]` into `[refine.dictionary]` (refine wins on
+    /// key collision), then import a legacy `dictionary.toml` when
+    /// `[refine.dictionary]` is still empty. Read-only: never writes config.toml.
     ///
     /// - `explicit == false` (default path): `$XDG_CONFIG_HOME/steno/dictionary.toml`
     /// - `explicit == true`: sibling `dictionary.toml` next to `loaded_from` only,
@@ -349,7 +352,7 @@ impl Config {
 ///
 /// Unknown keys are rejected. Helpers edit surgically via `toml_edit` and
 /// preserve unrelated keys/comments where the document allows. They never
-/// rewrite `[dict.overrides]` blindly and do not alter typing fail-closed
+/// rewrite `[refine.dictionary]` blindly and do not alter typing fail-closed
 /// semantics -- `type_output` is just another typed key.
 pub fn list_settable_keys() -> &'static [&'static str] {
     &[

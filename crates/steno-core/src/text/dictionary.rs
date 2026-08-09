@@ -47,7 +47,7 @@ impl Dictionary {
     /// a malformed one is an error naming the file.
     ///
     /// Standalone `[overrides]` TOML file entry (legacy dictionary.toml).
-    /// Runtime callers build from `Config.dict.overrides` via
+    /// Runtime callers build from `Config.refine.dictionary` via
     /// [`Self::from_entries`] / [`Self::from_map`]; migration uses this plus
     /// [`Self::load_overrides`].
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -74,7 +74,7 @@ impl Dictionary {
         Ok(parsed.overrides)
     }
 
-    /// Construct from an in-memory `HashMap` (config `[dict.overrides]`).
+    /// Construct from an in-memory `HashMap` (config `[refine.dictionary]`).
     pub fn from_map(map: HashMap<String, String>) -> Self {
         Self::from_entries(map)
     }

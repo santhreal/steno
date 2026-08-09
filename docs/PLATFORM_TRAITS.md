@@ -46,13 +46,31 @@ use steno_platform::{
 - **`create_platform_backends(mode: OutputMode, ui_cfg: &UiConfig) -> anyhow::Result<PlatformBackends>`**: Assembles all three platform backends (hotkey, typer, status overlay) in a single call:
 
 ```rust
+use steno_core::{
+    Config, Dictionary, Engine, RefineBackend, RuleRefine, Session, TextPipeline,
+};
+use steno_platform::{
+    create_platform_backends, OutputMode, PlatformBackends,
+};
+
 pub struct PlatformBackends {
     pub hotkey: Box<dyn HotkeySource>,
     pub typer: Box<dyn InjectTyper>,
     pub overlay: Box<dyn OverlayBackend>,
 }
 
+// Build engine with RuleRefine (or a custom RefineBackend implementation):
+let cfg = Config::load(None)?;
+let pipeline = TextPipeline::with_refine(cfg.text, cfg.refine.make_backend());
+let engine = Engine::load(&cfg)?.with_pipeline(pipeline);
+
+// Assemble platform backends and attach to Session:
 let backends = create_platform_backends(OutputMode::Type, &cfg.ui)?;
+let session = Session::builder(engine)
+    .from_config(&cfg)
+    .typer(backends.typer)
+    .overlay(backends.overlay)
+    .build();
 ```
 
 ### Core-Platform Decoupling (`InjectTyper`)
