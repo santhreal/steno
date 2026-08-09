@@ -23,9 +23,20 @@ clap = { version = "4", default-features = false, features = ["std", "derive", "
 steno-core = { path = "../steno-core" }
 steno-platform = { path = "../steno-platform" }
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
-libc = "0.2"
 log = "0.4"
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", features = ["xtest"] }

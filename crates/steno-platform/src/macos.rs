@@ -140,6 +140,58 @@ impl Hotkey {
             }
         }
     }
+
+    /// Same as `next_event` but also checks `shutdown` between poll timeouts.
+    pub fn next_event_debug(
+        &mut self,
+        held: &mut bool,
+        _debug: bool,
+        shutdown: &std::sync::atomic::AtomicBool,
+    ) -> Result<HotkeyEvent> {
+        loop {
+            match self.rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(ev) => {
+                    match ev {
+                        HotkeyEvent::Press => *held = true,
+                        HotkeyEvent::Release | HotkeyEvent::Cancel | HotkeyEvent::Shutdown => {
+                            *held = false;
+                        }
+                    }
+                    return Ok(ev);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return Ok(HotkeyEvent::Shutdown);
+                    }
+                    if self.stop.load(Ordering::SeqCst) {
+                        return Ok(HotkeyEvent::Shutdown);
+                    }
+                    if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
+                        return Ok(HotkeyEvent::Shutdown);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(HotkeyEvent::Shutdown),
+            }
+        }
+    }
+
+    /// No-op watchdog on macOS: Caps Lock is handled by CGEventTap, not X11
+    /// keymap manipulation, so there is nothing to restore on kill.
+    pub fn spawn_shutdown_watchdog(
+        &self,
+        shutdown: &'static std::sync::atomic::AtomicBool,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::Builder::new()
+            .name("steno-mac-watchdog".into())
+            .spawn(move || {
+                while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                // Nothing to restore on macOS — the CGEventTap's Drop
+                // disables it. This thread exists only for API parity.
+            })
+            .expect("cannot spawn macOS watchdog thread")
+    }
 }
 
 impl Drop for Hotkey {

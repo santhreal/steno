@@ -11,7 +11,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -20,13 +19,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use steno_core::api::{self, ApiError, ApiHandler, ApiResult, ServeOptions, UtteranceBuffer, authorize_token, decode_pcm_f32_le_b64};
 use steno_core::audio;
 use steno_core::config::{self, ApiConfig, Config};
 use steno_core::dsp::{self, DspConfig};
 use steno_core::stt::Transcriber;
 use steno_core::text::{self, RefineConfig, TextConfig, TextPipeline};
-use steno_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay, restore_caps_lock_mapping};
+use steno_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay};
+#[cfg(target_os = "linux")]
+use steno_platform::restore_caps_lock_mapping;
 use crate::{Cli, emit_transcript};
 
 pub fn cache_dir() -> Result<PathBuf> {
@@ -62,15 +66,33 @@ fn read_pid(path: &Path) -> Option<u32> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // signal 0: existence check, no delivery. EPERM means the process
-    // exists but belongs to another user — that is alive, not dead.
-    let rc = unsafe { libc::kill(pid as i32, 0) };
-    rc == 0 || unsafe { *libc::__errno_location() } == libc::EPERM
+    pid_alive_impl(pid)
 }
 
 /// True only when the pid is actually a steno process. Without this a
 /// recycled pid from a stale pidfile would get our signals.
 fn pid_is_steno(pid: u32) -> bool {
+    pid_is_steno_impl(pid)
+}
+
+/// Serialize start/stop/restart across processes: two concurrent starts
+/// must not race the pidfile and orphan an armed daemon.
+fn lifecycle_lock() -> Result<File> {
+    lifecycle_lock_impl()
+}
+
+// ── Unix implementations ────────────────────────────────────────────
+
+#[cfg(unix)]
+fn pid_alive_impl(pid: u32) -> bool {
+    // signal 0: existence check, no delivery. EPERM means the process
+    // exists but belongs to another user — that is alive, not dead.
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn pid_is_steno_impl(pid: u32) -> bool {
     // After `cargo install` replaces a running binary, Linux reports
     // `steno (deleted)` — still our process; must not drop the pidfile.
     std::fs::read_link(format!("/proc/{pid}/exe"))
@@ -82,9 +104,8 @@ fn pid_is_steno(pid: u32) -> bool {
         })
 }
 
-/// Serialize start/stop/restart across processes: two concurrent starts
-/// must not race the pidfile and orphan an armed daemon.
-fn lifecycle_lock() -> Result<File> {
+#[cfg(unix)]
+fn lifecycle_lock_impl() -> Result<File> {
     let path = cache_dir()?.join("steno.lock");
     let f = OpenOptions::new()
         .create(true)
@@ -94,6 +115,70 @@ fn lifecycle_lock() -> Result<File> {
         .with_context(|| format!("cannot open lifecycle lock {}", path.display()))?;
     let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("cannot lock {}", path.display()));
+    }
+    Ok(f)
+}
+
+// ── Windows implementations ─────────────────────────────────────────
+
+#[cfg(windows)]
+fn pid_alive_impl(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code as i32 == STILL_ACTIVE
+    }
+}
+
+#[cfg(windows)]
+fn pid_is_steno_impl(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return false;
+        }
+        let name = String::from_utf16_lossy(&buf[..len as usize]);
+        name.rsplit('\\').next().is_some_and(|base| base == "steno.exe" || base == "steno")
+    }
+}
+
+#[cfg(windows)]
+fn lifecycle_lock_impl() -> Result<File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let path = cache_dir()?.join("steno.lock");
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open lifecycle lock {}", path.display()))?;
+    let handle = f.as_raw_handle() as HANDLE;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut overlapped)
+    };
+    if ok == 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("cannot lock {}", path.display()));
     }
@@ -150,31 +235,41 @@ pub fn status() -> Result<()> {
 
 
 /// Best-effort: if a prior SIGKILL left Caps Lock as NoSymbol, put it back.
+/// On non-Linux platforms this is a no-op (Caps Lock is handled by the
+/// platform hotkey hook, not X11 keymap manipulation).
 pub fn repair_caps_lock(force: bool) -> Result<bool> {
-    if !force {
-        match is_running() {
-            Ok(Some(pid)) => {
-                log::info!("daemon PID {pid} is running; skipping automatic Caps Lock repair");
-                return Ok(false);
+    #[cfg(target_os = "linux")]
+    {
+        if !force {
+            match is_running() {
+                Ok(Some(pid)) => {
+                    log::info!("daemon PID {pid} is running; skipping automatic Caps Lock repair");
+                    return Ok(false);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("cannot check daemon pid: {e:#}");
+                }
             }
-            Ok(None) => {}
+        }
+        match restore_caps_lock_mapping() {
+            Ok(true) => {
+                eprintln!(
+                    "steno: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
+                );
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
             Err(e) => {
-                log::warn!("cannot check daemon pid: {e:#}");
+                log::warn!("could not check/restore Caps Lock mapping: {e:#}");
+                Err(e)
             }
         }
     }
-    match restore_caps_lock_mapping() {
-        Ok(true) => {
-            eprintln!(
-                "steno: restored Caps Lock mapping (it was left dead by a previous unclean exit)"
-            );
-            Ok(true)
-        }
-        Ok(false) => Ok(false),
-        Err(e) => {
-            log::warn!("could not check/restore Caps Lock mapping: {e:#}");
-            Err(e)
-        }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = force;
+        Ok(false)
     }
 }
 
@@ -187,44 +282,15 @@ pub fn stop() -> Result<()> {
     let path = pid_path()?;
     match is_running()? {
         Some(pid) => {
-            if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
-                let e = std::io::Error::last_os_error();
-                if e.raw_os_error() == Some(libc::EPERM) {
-                    anyhow::bail!(
-                        "cannot signal PID {pid}: permission denied — it is not your process; remove {} by hand if it is stale",
-                        path.display()
-                    );
-                }
-            }
-            // Wait for a clean exit so Hotkey::Drop can restore Caps Lock.
-            // Mid-transcription blocks in sherpa; allow several seconds before
-            // escalating to SIGKILL (which skips Drop).
+            terminate_process(pid, &path)?;
+            // Wait for exit so Hotkey::Drop can clean up.
             for _ in 0..100 {
                 if !pid_alive(pid) || !pid_is_steno(pid) {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
-            // Re-validate identity before SIGKILL — PID recycle during the wait
-            // must not kill an unrelated process.
-            if pid_alive(pid)
-                && pid_is_steno(pid)
-                && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
-            {
-                let e = std::io::Error::last_os_error();
-                if e.raw_os_error() == Some(libc::EPERM) {
-                    anyhow::bail!(
-                        "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
-                        path.display()
-                    );
-                }
-            }
-            if pid_alive(pid) && pid_is_steno(pid) {
-                anyhow::bail!(
-                    "PID {pid} is still alive after SIGKILL — investigate manually; the pidfile {} was left in place",
-                    path.display()
-                );
-            }
+            force_terminate_if_alive(pid, &path)?;
             let _ = fs::remove_file(&path);
             println!("Dictation stopped.");
         }
@@ -233,9 +299,101 @@ pub fn stop() -> Result<()> {
             println!("Dictation not running.");
         }
     }
-    // SIGKILL (escalate below) skips Hotkey::Drop — repair NoSymbol Caps Lock.
+    // Force-kill skips Hotkey::Drop — repair Caps Lock if needed.
     repair_caps_lock_if_needed();
     Ok(())
+}
+
+/// Send a graceful termination signal to the process.
+#[cfg(unix)]
+fn terminate_process(pid: u32, path: &Path) -> Result<()> {
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EPERM) {
+            anyhow::bail!(
+                "cannot signal PID {pid}: permission denied — it is not your process; remove {} by hand if it is stale",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Escalate to force-kill if the process is still alive.
+#[cfg(unix)]
+fn force_terminate_if_alive(pid: u32, path: &Path) -> Result<()> {
+    if pid_alive(pid)
+        && pid_is_steno(pid)
+        && unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    {
+        anyhow::bail!(
+            "cannot kill PID {pid}: permission denied — remove {} by hand if it is stale",
+            path.display()
+        );
+    }
+    if pid_alive(pid) && pid_is_steno(pid) {
+        anyhow::bail!(
+            "PID {pid} is still alive after SIGKILL — investigate manually; the pidfile {} was left in place",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Windows: terminate via TerminateProcess (no graceful signal equivalent).
+#[cfg(windows)]
+fn terminate_process(pid: u32, path: &Path) -> Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(5) {
+                anyhow::bail!(
+                    "cannot terminate PID {pid}: permission denied — remove {} by hand if it is stale",
+                    path.display()
+                );
+            }
+            return Ok(()); // process may have already exited
+        }
+        if TerminateProcess(handle, 1) == 0 {
+            let _ = CloseHandle(handle);
+            anyhow::bail!("failed to terminate PID {pid}: {}", std::io::Error::last_os_error());
+        }
+        let _ = CloseHandle(handle);
+    }
+    Ok(())
+}
+
+/// Windows: no escalation needed (TerminateProcess is already forceful).
+#[cfg(windows)]
+fn force_terminate_if_alive(_pid: u32, _path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Force-kill a process (used in start error path when daemon fails to
+/// become ready). Best-effort: ignores errors since we're already in an
+/// error path.
+#[cfg(unix)]
+fn force_terminate_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn force_terminate_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
 }
 
 /// Spawn the daemon worker (or run it in-process when `foreground`).
@@ -280,16 +438,26 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         .stderr(Stdio::from(log_err));
 
     // Detach from the controlling terminal so closing the shell does not
-    // SIGHUP the daemon. `pre_exec` runs in the child after fork, before exec.
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            libc::signal(libc::SIGHUP, libc::SIG_IGN);
-            Ok(())
-        });
+    // SIGHUP the daemon. On Unix, `pre_exec` runs in the child after fork,
+    // before exec. On Windows, CREATE_NO_WINDOW hides the console.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
     // Readiness handshake: the worker writes the ready file only after
@@ -334,13 +502,12 @@ pub fn start(cli: &Cli, foreground: bool) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+
     if !ok {
         if pid_alive(child.id()) && pid_is_steno(child.id()) {
-            unsafe {
-                libc::kill(child.id() as i32, libc::SIGKILL);
-            }
+            force_terminate_pid(child.id());
         }
-        // SIGKILL skips PidGuard — scrub pidfile / ready / possible API socket.
+        // Force-kill skips PidGuard — scrub pidfile / ready / possible API socket.
         let _ = fs::remove_file(pid_path()?);
         let _ = fs::remove_file(&ready);
         if let Ok(cfg) = Config::load(cli.config.as_deref()) {
@@ -393,6 +560,7 @@ impl Drop for PidGuard {
         }
         if let Some(sock) = self.socket.take() {
             // Unblock a non-blocking accept loop waiting on WouldBlock / connect.
+            #[cfg(unix)]
             let _ = std::os::unix::net::UnixStream::connect(&sock);
             let _ = fs::remove_file(&sock);
         }
@@ -459,12 +627,43 @@ fn preflight(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Set on SIGTERM: the event loop checks it and exits gracefully so
-/// Drop impls (grab release, pidfile removal) run.
+/// Set on SIGTERM/SIGINT (Unix) or Ctrl+C/Ctrl+Break (Windows): the event
+/// loop checks it and exits gracefully so Drop impls run.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn on_sigterm(_sig: libc::c_int) {
-    SHUTDOWN.store(true, Ordering::Relaxed);
+/// Install platform-appropriate shutdown signal handlers that set SHUTDOWN.
+fn install_shutdown_handlers() {
+    #[cfg(unix)]
+    {
+        extern "C" fn on_sigterm(_sig: libc::c_int) {
+            SHUTDOWN.store(true, Ordering::Relaxed);
+        }
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            SetConsoleCtrlHandler, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
+            CTRL_SHUTDOWN_EVENT,
+        };
+        unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
+            match ctrl_type {
+                CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_SHUTDOWN_EVENT => {
+                    SHUTDOWN.store(true, Ordering::Relaxed);
+                    1 // TRUE = handled
+                }
+                _ => 0,
+            }
+        }
+        unsafe {
+            SetConsoleCtrlHandler(Some(handler), 1);
+        }
+    }
 }
 
 fn jail_wav_path(path: &Path) -> Result<PathBuf, ApiError> {
@@ -745,17 +944,13 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     // we attempt best-effort restoration before dying.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        #[cfg(target_os = "linux")]
         let _ = restore_caps_lock_mapping();
         default_panic(info);
     }));
 
-    // Ignore SIGHUP in case we were started without setsid.
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
-    }
+    // Install shutdown handlers (SIGTERM/SIGINT on Unix, Ctrl+C on Windows).
+    install_shutdown_handlers();
     // The worker owns its pidfile: the parent must not publish the pid
     // before grab + model load succeed, and a second worker must not
     // clobber a live one's entry.
@@ -994,13 +1189,8 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
 /// (pidfile, socket, Caps Lock) and re-spawns after a backoff. SIGTERM
 /// sets `SHUTDOWN` and exits cleanly.
 pub fn supervise(cli: &Cli) -> Result<()> {
-    // Install signal handlers so SIGTERM/SIGINT/SIGQUIT set SHUTDOWN.
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-        libc::signal(libc::SIGTERM, on_sigterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_sigterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGQUIT, on_sigterm as *const () as libc::sighandler_t);
-    }
+    // Install shutdown handlers (SIGTERM/SIGINT on Unix, Ctrl+C on Windows).
+    install_shutdown_handlers();
 
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
@@ -1051,6 +1241,7 @@ pub fn supervise(cli: &Cli) -> Result<()> {
                         }
                     }
                 }
+                #[cfg(target_os = "linux")]
                 let _ = restore_caps_lock_mapping();
 
                 // Wait with backoff, but check SHUTDOWN so SIGTERM during
