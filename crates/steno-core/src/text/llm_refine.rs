@@ -40,7 +40,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
@@ -63,16 +63,16 @@ Output the corrected text only.";
 /// LLM refine backend using a local GGUF model via llama-cpp-2.
 ///
 /// The model is loaded once and kept resident. Each `refine()` call
-/// creates a fresh context (KV cache), runs a single generation pass,
-/// and returns the corrected text. Context creation for small models
-/// (<1B params) is fast enough that per-call creation is simpler than
-/// solving the self-referential lifetime between `LlamaModel` and
-/// `LlamaContext<'a>`.
+/// creates a fresh context (KV cache), applies the model's chat
+/// template, runs a single generation pass, and returns the corrected
+/// text.
 pub struct LlmRefine {
     backend: LlamaBackend,
     model: LlamaModel,
     config: LlmRefineConfig,
     system_prompt: String,
+    /// The model's built-in chat template (e.g. ChatML for Qwen).
+    chat_template: Option<LlamaChatTemplate>,
     /// Tokens that signal "stop generating" (beyond EOS).
     stop_tokens: Vec<LlamaToken>,
 }
@@ -120,10 +120,20 @@ impl LlmRefine {
             config.prompt.clone()
         };
 
+        // Load the model's built-in chat template (e.g. ChatML for Qwen).
+        // Falls back to None if the model has no template — the raw
+        // prompt format will be used instead.
+        let chat_template = model.chat_template(None).ok();
+        if chat_template.is_none() {
+            log::warn!(
+                "LLM refine: model has no chat template; using raw prompt format. \
+                 A chat model (e.g. Qwen3, Llama3) is recommended."
+            );
+        }
+
         // Collect stop tokens: EOS + common chat markers.
         let mut stop_tokens = vec![model.token_eos()];
-        // Try to tokenize common stop sequences and add their first tokens.
-        for stop_str in ["\n---", "\n\n---", "<|im_end|>", "</s>", "<|end|>"] {
+        for stop_str in ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>"] {
             if let Ok(toks) = model.str_to_token(stop_str, AddBos::Never) {
                 if let Some(&first) = toks.first() {
                     stop_tokens.push(first);
@@ -143,6 +153,7 @@ impl LlmRefine {
             model,
             config,
             system_prompt,
+            chat_template,
             stop_tokens,
         })
     }
@@ -239,14 +250,44 @@ impl RefineBackend for LlmRefine {
             return String::new();
         }
 
-        let prompt = format!(
-            "{system_prompt}\n\n---\nRaw transcript:\n{input}\n---\nCorrected transcript:\n",
-            system_prompt = self.system_prompt,
-            input = text,
-        );
+        // Build the prompt using the model's chat template if available
+        // (correct format for chat-tuned models like Qwen3, Llama3).
+        // Fall back to raw text format for base models.
+        let prompt = match &self.chat_template {
+            Some(tmpl) => {
+                let messages = match (
+                    LlamaChatMessage::new("system".into(), self.system_prompt.clone()),
+                    LlamaChatMessage::new("user".into(), format!(
+                        "/no_think\nCorrect this speech-to-text transcript. Output ONLY the corrected text, nothing else:\n\n{text}"
+                    )),
+                ) {
+                    (Ok(sys), Ok(user)) => vec![sys, user],
+                    _ => {
+                        log::warn!("LLM refine: failed to create chat messages; using raw prompt");
+                        return text.to_string();
+                    }
+                };
+                match self.model.apply_chat_template(tmpl, &messages, true) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("LLM refine: chat template failed: {e}; using raw prompt");
+                        format!(
+                            "{system_prompt}\n\n---\nRaw transcript:\n{input}\n---\nCorrected transcript:\n",
+                            system_prompt = self.system_prompt,
+                            input = text,
+                        )
+                    }
+                }
+            }
+            None => format!(
+                "{system_prompt}\n\n---\nRaw transcript:\n{input}\n---\nCorrected transcript:\n",
+                system_prompt = self.system_prompt,
+                input = text,
+            ),
+        };
 
         match self.generate(&prompt) {
-            Ok(corrected) if !corrected.is_empty() => corrected,
+            Ok(corrected) if !corrected.is_empty() => strip_think_blocks(&corrected),
             Ok(_) => {
                 log::warn!("LLM refine returned empty output; using original text");
                 text.to_string()
@@ -271,6 +312,38 @@ fn build_system_prompt(dictionary: &HashMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     DEFAULT_SYSTEM_PROMPT.replace("{dictionary}", &dict_str)
+}
+
+/// Strip `<think>...</think>` blocks from Qwen3 reasoning model output.
+/// If the block is unclosed (model still thinking when max_tokens hit),
+/// strip everything from `<think>` to end. Returns the cleaned text,
+/// or the original if no think block was found.
+fn strip_think_blocks(text: &str) -> String {
+    if !text.contains("<think>") {
+        return text.trim().to_string();
+    }
+    // Remove all <think>...</think> blocks (closed or unclosed).
+    // For unclosed blocks (model still thinking at max_tokens), discard
+    // everything from <think> to end.
+    let mut result = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        rest = &rest[start + "<think>".len()..];
+        if let Some(end) = rest.find("</think>") {
+            rest = &rest[end + "</think>".len()..];
+        } else {
+            // Unclosed think block — discard the rest.
+            rest = "";
+        }
+    }
+    result.push_str(rest);
+    let cleaned = result.trim();
+    if cleaned.is_empty() {
+        String::new()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -302,5 +375,47 @@ mod tests {
         assert_eq!(cfg.temperature, 0.1);
         assert!(cfg.model_path.is_none());
         assert!(cfg.prompt.is_empty());
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_closed_block() {
+        let open = "\u{3c}think\u{3e}";
+        let close = "\u{3c}/think\u{3e}";
+        let input = format!("{open}Let me think about this.{close}\n\nHello, world! How are you doing today?");
+        let result = strip_think_blocks(&input);
+        assert_eq!(result, "Hello, world! How are you doing today?");
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_unclosed_block() {
+        let open = "\u{3c}think\u{3e}";
+        let input = format!("{open}I'm still thinking...");
+        let result = strip_think_blocks(&input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_think_blocks_no_block_returns_trimmed() {
+        let input = "  Hello world  ";
+        let result = strip_think_blocks(input);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn strip_think_blocks_multiple_blocks() {
+        let open = "\u{3c}think\u{3e}";
+        let close = "\u{3c}/think\u{3e}";
+        let input = format!("{open}first thinking block{close}\n{open}second{close}\n\nHello, world! How are you doing today?");
+        let result = strip_think_blocks(&input);
+        assert_eq!(result, "Hello, world! How are you doing today?");
+    }
+
+    #[test]
+    fn strip_think_blocks_empty_after_strip() {
+        let open = "\u{3c}think\u{3e}";
+        let close = "\u{3c}/think\u{3e}";
+        let input = format!("{open}just thinking...{close}");
+        let result = strip_think_blocks(&input);
+        assert_eq!(result, "");
     }
 }
