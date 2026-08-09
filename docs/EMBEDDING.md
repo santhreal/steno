@@ -150,6 +150,7 @@ model_path = "~/.local/share/steno/models/qwen3-0.6b-q4_k_m.gguf"
 n_gpu_layers = -1   # -1 = all to GPU, 0 = CPU only
 n_threads = 4
 max_tokens = 512
+n_ctx = 4096        # context window (prompt + max_tokens must fit)
 temperature = 0.1
 ```
 
@@ -195,6 +196,12 @@ let mut session = Session::builder(engine)
     .overlay(MyLoader)                 // custom OverlayBackend animations
     .build();                          // default overlay = NullOverlay
 
+
+// Convenience decoders with the same overlay + typing rules:
+let text = session.transcribe_pcm_i16(&pcm_i16)?;       // 16 kHz mono 16-bit
+let text = session.transcribe_f32_at_rate(&pcm, 44100)?; // resamples to 16 kHz
+let text = session.transcribe_wav_file(Path::new("f.wav"))?; // WAV from disk
+let text = session.transcribe_f32_raw(&pcm)?;           // skip text pipeline
 let text = session.transcribe_f32(&pcm)?;
 ```
 

@@ -180,6 +180,15 @@ backend = "rules"            # RuleRefine; unknown → warn + rules
 "vayon" = "veyyon"
 "mukund" = "Mukund"
 "um" = ""
+
+[refine.llm]                # used when backend = "llm"
+# model_path = "…"          # GGUF model path
+n_gpu_layers = -1           # -1 = all GPU, 0 = CPU
+n_threads = 4
+max_tokens = 512
+n_ctx = 4096                # context window (prompt + max_tokens must fit)
+temperature = 0.1
+
 [ui]
 overlay = true
 done_flash_ms = 1200
