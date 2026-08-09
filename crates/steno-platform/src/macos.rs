@@ -8,8 +8,9 @@
 //!
 //! **Visual delta vs Linux X11 pill:** same soft `box_blur_alpha` shadow, icon
 //! disc + waveform/spinner/check/x, and recording timer (`show_timer`) as the
-//! Windows chip, not a pixel-perfect Linux port (no Xft DPI scale; AppKit
-//! panel chrome instead of an X override-redirect window; coarser motion).
+//! Windows chip, not a pixel-perfect Linux port (AppKit Retina backing scale
+//! via `backingScaleFactor`; AppKit panel chrome instead of an X
+//! override-redirect window; coarser motion).
 //! Colors/labels come from [`steno_core::resolve_ui`]. Bottom-center
 //! placement; fail-open like Linux.
 //!
@@ -680,9 +681,14 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     content.setWantsLayer(true);
     content.addSubview(&image_view);
 
-    let mut pixmap = SkPixmap::new(chip::WIN_W, chip::WIN_H)
+    // Retina backing scale: render at physical-pixel resolution, display at
+    // logical points. AppKit handles the logical↔physical mapping.
+    let scale = panel.backingScaleFactor() as f32;
+    let pw = ((chip::WIN_W as f32 * scale).round() as u32).max(1);
+    let ph = ((chip::WIN_H as f32 * scale).round() as u32).max(1);
+    let mut pixmap = SkPixmap::new(pw, ph)
         .ok_or_else(|| anyhow::anyhow!("tiny-skia pixmap alloc failed"))?;
-    let mut shadow_mask = SkPixmap::new(chip::WIN_W, chip::WIN_H)
+    let mut shadow_mask = SkPixmap::new(pw, ph)
         .ok_or_else(|| anyhow::anyhow!("tiny-skia shadow mask alloc failed"))?;
 
     let mut current = Stage::Hidden;
@@ -731,8 +737,9 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
                 stage_age,
                 rec_secs,
                 ui,
+                scale,
             );
-            let image = pixmap_to_nsimage(&pixmap)?;
+            let image = pixmap_to_nsimage(&pixmap, chip::WIN_W as f64, chip::WIN_H as f64)?;
             image_view.setImage(Some(&image));
             place_panel(&panel, mtm)?;
             if !visible {
@@ -785,26 +792,31 @@ fn place_panel(panel: &objc2_app_kit::NSPanel, mtm: objc2::MainThreadMarker) -> 
     Ok(())
 }
 
-fn pixmap_to_nsimage(pixmap: &SkPixmap) -> Result<objc2::rc::Retained<objc2_app_kit::NSImage>> {
+fn pixmap_to_nsimage(
+    pixmap: &SkPixmap,
+    logical_w: f64,
+    logical_h: f64,
+) -> Result<objc2::rc::Retained<objc2_app_kit::NSImage>> {
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage};
     use objc2_foundation::NSSize;
 
-    let w = pixmap.width() as isize;
-    let h = pixmap.height() as isize;
+    // Physical pixel dimensions for the bitmap representation (Retina-aware).
+    let pw = pixmap.width() as isize;
+    let ph = pixmap.height() as isize;
     // Null planes → AppKit allocates; we copy premultiplied RGBA into it.
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
-            w,
-            h,
+            pw,
+            ph,
             8,
             4,
             true,
             false,
             NSDeviceRGBColorSpace,
-            w * 4,
+            pw * 4,
             32,
         )
     }
@@ -815,13 +827,15 @@ fn pixmap_to_nsimage(pixmap: &SkPixmap) -> Result<objc2::rc::Retained<objc2_app_
     if dst_ptr.is_null() {
         bail!("NSBitmapImageRep bitmapData is null; check AppKit pixel format support");
     }
-    // SAFETY: AppKit-owned buffer sized bytesPerRow * height; we requested w*4.
+    // SAFETY: AppKit-owned buffer sized bytesPerRow * height; we requested pw*4.
     let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptr, src.len()) };
     dst.copy_from_slice(src);
 
+    // NSImage size = logical points so AppKit maps the physical-pixel rep
+    // to the correct logical dimensions on the NSImageView.
     let image = NSImage::initWithSize(
         NSImage::alloc(),
-        NSSize::new(w as f64, h as f64),
+        NSSize::new(logical_w, logical_h),
     );
     image.addRepresentation(&rep);
     Ok(image)
@@ -869,6 +883,7 @@ fn draw_chip(
     stage_age: f32,
     rec_secs: u64,
     ui: &ResolvedUi,
+    scale: f32,
 ) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
     if stage == Stage::Hidden {
@@ -876,10 +891,10 @@ fn draw_chip(
     }
 
     let colors = &ui.colors;
-    let pill_w = pill_width(stage);
-    let pill_h = chip::PILL_H;
-    let x = (chip::WIN_W as f32 - pill_w) * 0.5;
-    let y = chip::TOP_PAD;
+    let pill_w = pill_width(stage) * scale;
+    let pill_h = chip::PILL_H * scale;
+    let x = (chip::WIN_W as f32 * scale - pill_w) * 0.5;
+    let y = chip::TOP_PAD * scale;
 
     // Optional stage-change scale pulse (pulse_ms==0 disables).
     let pulse_secs = ui.stages.pulse_ms as f32 / 1000.0;
@@ -900,7 +915,7 @@ fn draw_chip(
     let py = cy - ph * 0.5;
 
     // Soft drop shadow (Linux-style separable box blur on alpha mask).
-    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, colors.shadow);
+    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, colors.shadow, scale);
 
     draw_round_rect(pixmap, px, py, pw, ph, ph * 0.5, rgba(colors.bg));
     stroke_round_rect(
@@ -914,9 +929,9 @@ fn draw_chip(
         1.0,
     );
 
-    let icon = chip::ICON * pulse;
-    let pad_x = chip::PAD_X * pulse;
-    let gap = chip::GAP * pulse;
+    let icon = chip::ICON * scale * pulse;
+    let pad_x = chip::PAD_X * scale * pulse;
+    let gap = chip::GAP * scale * pulse;
     let ix = px + pad_x;
     let iy = py + (ph - icon) * 0.5;
     let icon_disc = if stage == Stage::Error {
@@ -950,14 +965,14 @@ fn draw_chip(
         text,
         tx,
         ty,
-        chip::LABEL_PX * pulse,
+        chip::LABEL_PX * scale * pulse,
         rgba(colors.fg),
     );
 
     // Elapsed timer on live capture when `[ui.stages].show_timer` is true.
     if stage == Stage::Recording && ui.stages.show_timer {
         let meta = format!("{}:{:02}", rec_secs / 60, rec_secs % 60);
-        let meta_size = chip::META_PX * pulse;
+        let meta_size = chip::META_PX * scale * pulse;
         let tw = text_width(font, &meta, meta_size);
         draw_text(
             pixmap,
@@ -980,18 +995,19 @@ fn draw_shadow(
     w: f32,
     h: f32,
     shadow: [u8; 4],
+    scale: f32,
 ) {
     mask.fill(Color::from_rgba8(0, 0, 0, 0));
     draw_round_rect(
         mask,
         x,
-        y + chip::SHADOW_DY,
+        y + chip::SHADOW_DY * scale,
         w,
         h,
         h * 0.5,
         rgba(shadow),
     );
-    box_blur_alpha(mask, chip::SHADOW_BLUR.max(1.0) as u32);
+    box_blur_alpha(mask, (chip::SHADOW_BLUR * scale).max(1.0) as u32);
     pixmap.draw_pixmap(
         0,
         0,

@@ -15,6 +15,8 @@
 //! `UiConfig.overlay = false` / theme `null|none|off` still select
 //! [`NullOverlay`] via [`create`]. Fail-open: spawn/HWND/font/GDI errors
 //! disable the chip without affecting dictation.
+//! Per-monitor DPI aware (`SetProcessDpiAwarenessContext`): the pixmap is
+//! rendered at physical-pixel resolution and re-rendered on `WM_DPICHANGED`.
 
 use anyhow::{Context, Result, bail, ensure};
 use steno_core::config::UiConfig;
@@ -49,13 +51,17 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NUMLOCK,
     VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SHIFT, VIRTUAL_KEY,
 };
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
+    SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, GetSystemMetrics, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
     PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetWindowPos,
     SetWindowsHookExW, ShowWindow, TranslateMessage, ULW_ALPHA, UnhookWindowsHookEx,
     UpdateLayeredWindow, HC_ACTION, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WH_KEYBOARD_LL,
-    WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
+    WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     WS_POPUP,
 };
@@ -542,7 +548,8 @@ fn is_unicode_line_break(c: char) -> bool {
 /// Visual delta vs Linux X11 pill: simpler rounded chip (label + icon
 /// animation) with soft `box_blur_alpha` shadow (not CSS-identical); recording
 /// timer honors `show_timer`; scale pulse honors `pulse_ms`. Same stage API
-/// (`set` / `flash` / `active`). No Xft-style DPI scale factor.
+/// (`set` / `flash` / `active`). Per-monitor DPI aware: the pixmap is rendered
+/// at `WIN_W * scale × WIN_H * scale` physical pixels (scale = dpi / 96).
 pub struct Overlay {
     tx: Option<Sender<Stage>>,
     /// Set when the overlay thread failed (no HWND / font / GDI error).
@@ -661,6 +668,11 @@ const CLASS_NAME: &[u16] = &[
     b'p' as u16, 0,
 ];
 
+/// Current overlay DPI, updated from `chip_wnd_proc` on `WM_DPICHANGED`.
+/// Read by the overlay loop each frame to detect monitor moves and re-render
+/// at the new scale. 96 = standard DPI (scale 1.0).
+static OVERLAY_DPI: AtomicU32 = AtomicU32::new(96);
+
 fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>, ui: ResolvedUi) {
     if let Err(e) = run_overlay_inner(rx, &ui) {
         log::debug!("Windows overlay disabled: {e:#}");
@@ -669,14 +681,30 @@ fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>, ui: Reso
 }
 
 fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
+    // Mark the process per-monitor DPI aware so Windows does not virtualize
+    // the HWND. Safe to call multiple times; failure (already set another
+    // awareness) is non-fatal — rendering just uses 96 DPI as a fallback.
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
     let font = load_font().context("overlay font")?;
     let raw_hwnd = unsafe { create_chip_window() }.context("create status chip HWND")?;
     let mut hwnd = HwndGuard(raw_hwnd);
-    let mut layer = unsafe { LayerBuffer::new(chip::WIN_W as i32, chip::WIN_H as i32) }
+
+    // Query the monitor DPI and compute the scale factor (96 DPI = 1.0).
+    let dpi = unsafe { GetDpiForWindow(hwnd.raw()) };
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    OVERLAY_DPI.store(dpi, Ordering::Relaxed);
+    let mut scale = dpi as f32 / 96.0;
+
+    let pw = ((chip::WIN_W as f32 * scale).round() as u32).max(1);
+    let ph = ((chip::WIN_H as f32 * scale).round() as u32).max(1);
+    let mut layer = unsafe { LayerBuffer::new(pw as i32, ph as i32) }
         .context("CreateDIBSection for status chip")?;
-    let mut pixmap = SkPixmap::new(chip::WIN_W, chip::WIN_H)
+    let mut pixmap = SkPixmap::new(pw, ph)
         .ok_or_else(|| anyhow::anyhow!("tiny-skia pixmap alloc failed"))?;
-    let mut shadow_mask = SkPixmap::new(chip::WIN_W, chip::WIN_H)
+    let mut shadow_mask = SkPixmap::new(pw, ph)
         .ok_or_else(|| anyhow::anyhow!("tiny-skia shadow mask alloc failed"))?;
 
     let mut stage = Stage::Hidden;
@@ -686,7 +714,7 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
     let mut visible = false;
 
     loop {
-        // Pump Win32 messages (Destroy / quit).
+        // Pump Win32 messages (Destroy / quit / WM_DPICHANGED).
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -697,6 +725,22 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+        }
+
+        // Detect a monitor move (WM_DPICHANGED updated the static) and
+        // recompute the scale + resize the render buffers.
+        let cur_dpi = OVERLAY_DPI.load(Ordering::Relaxed);
+        if cur_dpi != 0 && (cur_dpi as f32 / 96.0 - scale).abs() > f32::EPSILON {
+            scale = cur_dpi as f32 / 96.0;
+            let nw = ((chip::WIN_W as f32 * scale).round() as u32).max(1);
+            let nh = ((chip::WIN_H as f32 * scale).round() as u32).max(1);
+            layer.destroy();
+            layer = unsafe { LayerBuffer::new(nw as i32, nh as i32) }
+                .context("resize LayerBuffer for DPI change")?;
+            pixmap = SkPixmap::new(nw, nh)
+                .ok_or_else(|| anyhow::anyhow!("tiny-skia pixmap realloc failed"))?;
+            shadow_mask = SkPixmap::new(nw, nh)
+                .ok_or_else(|| anyhow::anyhow!("tiny-skia shadow mask realloc failed"))?;
         }
 
         // Drain stage updates; keep the latest.
@@ -749,10 +793,12 @@ fn run_overlay_inner(rx: Receiver<Stage>, ui: &ResolvedUi) -> Result<()> {
         let anim_t = anim_start.elapsed().as_secs_f32();
         let stage_age = stage_changed_at.elapsed().as_secs_f32();
         let rec_secs = recording_started.elapsed().as_secs();
-        draw_chip(&mut pixmap, &mut shadow_mask, &font, stage, anim_t, stage_age, rec_secs, ui);
+        draw_chip(
+            &mut pixmap, &mut shadow_mask, &font, stage, anim_t, stage_age, rec_secs, ui, scale,
+        );
         unsafe {
             layer.blit_skia(&pixmap)?;
-            present_chip(hwnd.raw(), &layer)?;
+            present_chip(hwnd.raw(), &layer, scale)?;
             if !visible {
                 let _ = ShowWindow(hwnd.raw(), SW_SHOWNOACTIVATE);
                 visible = true;
@@ -823,6 +869,17 @@ unsafe extern "system" fn chip_wnd_proc(
         unsafe { PostQuitMessage(0) };
         return 0;
     }
+    if msg == WM_DPICHANGED {
+        // wparam HIWORD = new Y DPI. Store it so the overlay loop can resize
+        // its render buffers and re-present at the new scale. We return 0
+        // (suppressing DefWindowProcW's auto-resize) because UpdateLayeredWindow
+        // owns the window geometry.
+        let new_dpi = ((wparam >> 16) & 0xFFFF) as u32;
+        if new_dpi != 0 {
+            OVERLAY_DPI.store(new_dpi, Ordering::Relaxed);
+        }
+        return 0;
+    }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
@@ -857,14 +914,19 @@ fn destroy_chip(hwnd: &mut HwndGuard, layer: &mut LayerBuffer) {
     hwnd.destroy();
 }
 
-unsafe fn present_chip(hwnd: HWND, layer: &LayerBuffer) -> Result<()> {
+unsafe fn present_chip(hwnd: HWND, layer: &LayerBuffer, scale: f32) -> Result<()> {
     let (wx, wy, ww, wh) = primary_work_area();
-    let x = wx + (ww - chip::WIN_W as i32) / 2;
-    let y = wy + wh - chip::WIN_H as i32 - chip::BOTTOM_MARGIN;
+    // Per-monitor DPI aware → all coordinates are physical pixels. The chip
+    // occupies WIN_W*scale × WIN_H*scale physical px (= logical WIN_W × WIN_H).
+    let phys_w = layer.w;
+    let phys_h = layer.h;
+    let bottom_margin = (chip::BOTTOM_MARGIN as f32 * scale).round() as i32;
+    let x = wx + (ww - phys_w) / 2;
+    let y = wy + wh - phys_h - bottom_margin;
     let dst = POINT { x, y };
     let size = SIZE {
-        cx: layer.w,
-        cy: layer.h,
+        cx: phys_w,
+        cy: phys_h,
     };
     let src = POINT { x: 0, y: 0 };
     let blend = BLENDFUNCTION {
@@ -1085,6 +1147,7 @@ fn draw_chip(
     stage_age: f32,
     rec_secs: u64,
     ui: &ResolvedUi,
+    scale: f32,
 ) {
     pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
     if stage == Stage::Hidden {
@@ -1092,10 +1155,10 @@ fn draw_chip(
     }
 
     let colors = &ui.colors;
-    let pill_w = pill_width(stage);
-    let pill_h = chip::PILL_H;
-    let x = (chip::WIN_W as f32 - pill_w) * 0.5;
-    let y = chip::TOP_PAD;
+    let pill_w = pill_width(stage) * scale;
+    let pill_h = chip::PILL_H * scale;
+    let x = (chip::WIN_W as f32 * scale - pill_w) * 0.5;
+    let y = chip::TOP_PAD * scale;
 
     // Optional stage-change scale pulse (pulse_ms==0 disables).
     let pulse_secs = ui.stages.pulse_ms as f32 / 1000.0;
@@ -1116,7 +1179,7 @@ fn draw_chip(
     let py = cy - ph * 0.5;
 
     // Soft drop shadow (Linux-style separable box blur on alpha mask).
-    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, colors.shadow);
+    draw_shadow(pixmap, shadow_mask, px, py, pw, ph, colors.shadow, scale);
 
     draw_round_rect(pixmap, px, py, pw, ph, ph * 0.5, rgba(colors.bg));
     stroke_round_rect(
@@ -1130,9 +1193,9 @@ fn draw_chip(
         1.0,
     );
 
-    let icon = chip::ICON * pulse;
-    let pad_x = chip::PAD_X * pulse;
-    let gap = chip::GAP * pulse;
+    let icon = chip::ICON * scale * pulse;
+    let pad_x = chip::PAD_X * scale * pulse;
+    let gap = chip::GAP * scale * pulse;
     let ix = px + pad_x;
     let iy = py + (ph - icon) * 0.5;
     let icon_disc = if stage == Stage::Error {
@@ -1166,14 +1229,14 @@ fn draw_chip(
         text,
         tx,
         ty,
-        chip::LABEL_PX * pulse,
+        chip::LABEL_PX * scale * pulse,
         rgba(colors.fg),
     );
 
     // Elapsed timer on live capture when `[ui.stages].show_timer` is true.
     if stage == Stage::Recording && ui.stages.show_timer {
         let meta = format!("{}:{:02}", rec_secs / 60, rec_secs % 60);
-        let meta_size = chip::META_PX * pulse;
+        let meta_size = chip::META_PX * scale * pulse;
         let tw = text_width(font, &meta, meta_size);
         draw_text(
             pixmap,
@@ -1196,18 +1259,19 @@ fn draw_shadow(
     w: f32,
     h: f32,
     shadow: [u8; 4],
+    scale: f32,
 ) {
     mask.fill(Color::from_rgba8(0, 0, 0, 0));
     draw_round_rect(
         mask,
         x,
-        y + chip::SHADOW_DY,
+        y + chip::SHADOW_DY * scale,
         w,
         h,
         h * 0.5,
         rgba(shadow),
     );
-    box_blur_alpha(mask, chip::SHADOW_BLUR.max(1.0) as u32);
+    box_blur_alpha(mask, (chip::SHADOW_BLUR * scale).max(1.0) as u32);
     pixmap.draw_pixmap(
         0,
         0,
