@@ -687,7 +687,8 @@ pub fn default_model_dir() -> Result<PathBuf> {
 pub const MODEL_DOWNLOAD_HINT: &str = "download a model, e.g.:\n  \
     cd ~/.local/share/steno/models && \\\n  \
     curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \\\n  \
-    tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+    tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2\n  \
+    (on Windows, use %USERPROFILE%\\.local\\share\\steno\\models and 7z to extract)";
 
 /// Model resolution order: CLI flag, config file, the single sherpa-onnx
 /// model directory under the default model directory. A model is a
