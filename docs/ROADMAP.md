@@ -53,7 +53,7 @@ overlay / soak verification only on axiomexec (LAN or Tailscale) or a disposable
 ## Phase 7 - platform depth & extensions (future)
 - [x] Wayland native status overlay (`zwlr-layer-shell-v1` status pill; optional `wayland` cargo feature, smithay-client-toolkit; verified on sway headless)
 - [x] Wayland native global hotkey (evdev direct input `/dev/input/event*` Caps Lock hold-to-talk; optional `wayland` cargo feature, requires `input` group)
-- [ ] Windows native named pipe IPC backend for daemon API (`\\.\pipe\steno`)
+- [x] Windows native named pipe IPC backend for daemon API (`\\.\pipe\steno`; cross-compile verified x86_64-pc-windows-gnu)
 - [x] High-DPI awareness & scale factor support for Windows HWND & macOS NSPanel overlays (Per-Monitor V2 DPI on Windows; backingScaleFactor on macOS)
 - [x] macOS Metal execution provider support in `stt.rs` (`provider = "metal"`)
 - [x] External / LLM `RefineBackend` plugin integration (llama-cpp-2 GGUF; `refine.backend = "llm"`, `[refine.llm]` config; GPU via `llm-cuda`/`llm-vulkan`/`llm-metal` features, CPU via `llm`)
