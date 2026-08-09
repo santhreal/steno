@@ -1915,6 +1915,7 @@ dependencies = [
  "core-graphics",
  "evdev",
  "fontdue",
+ "libc",
  "log",
  "objc2",
  "objc2-app-kit",

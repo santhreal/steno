@@ -59,13 +59,14 @@ preamble or explanation:\n\
 6. Do NOT change the meaning, add information, or remove content.\n\
 7. Preserve newlines and paragraph structure.\n\
 Output the corrected text only.";
-
 /// LLM refine backend using a local GGUF model via llama-cpp-2.
 ///
 /// The model is loaded once and kept resident. Each `refine()` call
-/// creates a fresh context (KV cache), applies the model's chat
-/// template, runs a single generation pass, and returns the corrected
-/// text.
+/// creates a fresh context (KV cache) — this is necessary because
+/// `LlamaContext<'a>` borrows `&'a LlamaModel`, so the context cannot
+/// outlive the model or be co-stored in the same struct. Context
+/// creation is cheap relative to model load; the expensive part (model
+/// load + GPU offload) happens once in `new()`.
 pub struct LlmRefine {
     backend: LlamaBackend,
     model: LlamaModel,
@@ -147,7 +148,6 @@ impl LlmRefine {
             temperature,
             ..config.clone()
         };
-
         Ok(Self {
             backend,
             model,
