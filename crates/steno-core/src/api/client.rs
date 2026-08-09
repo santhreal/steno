@@ -1,22 +1,39 @@
-//! Thin Unix-socket NDJSON client for the steno daemon API.
+//! Thin NDJSON IPC client for the steno daemon API.
+//!
+//! On Unix this connects via a `AF_UNIX` stream socket; on Windows it opens
+//! a named pipe at `\\.\pipe\steno`. The wire protocol (one request line →
+//! one response line) is identical on both platforms.
 
 
 use crate::api::protocol::{Request, Response, decode_line, encode_line};
 use crate::api::server::MAX_API_LINE_BYTES;
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
+#[cfg(unix)]
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
+#[cfg(target_os = "windows")]
+use crate::api::server::NamedPipeStream;
+
+#[cfg(unix)]
+type Stream = UnixStream;
+
+#[cfg(target_os = "windows")]
+type Stream = NamedPipeStream;
 
 /// Blocking client: one request line → one response line.
 pub struct ApiClient {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Stream>,
+    writer: Stream,
 }
 
 impl ApiClient {
     /// Connect to a daemon socket at `path`.
+    #[cfg(unix)]
     pub fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let stream = UnixStream::connect(path).with_context(|| {
@@ -34,6 +51,25 @@ impl ApiClient {
             .ok();
         let writer = stream.try_clone().context(
             "failed to clone Unix stream for API client writes — check ulimit / EMFILE",
+        )?;
+        Ok(Self {
+            reader: BufReader::new(stream),
+            writer,
+        })
+    }
+
+    /// Connect to a daemon named pipe at `path`.
+    #[cfg(target_os = "windows")]
+    pub fn connect(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let stream = NamedPipeStream::connect(path).with_context(|| {
+            format!(
+                "failed to connect to steno API named pipe at {} — is the daemon running (`steno start`), and is [api] enabled?",
+                path.display()
+            )
+        })?;
+        let writer = stream.try_clone().context(
+            "failed to duplicate named pipe handle for API client writes",
         )?;
         Ok(Self {
             reader: BufReader::new(stream),
@@ -92,7 +128,8 @@ impl ApiClient {
         }
     }
 }
-#[cfg(test)]
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::api::protocol::Op;

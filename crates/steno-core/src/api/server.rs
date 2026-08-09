@@ -1,8 +1,12 @@
-//! Unix-domain NDJSON socket server (accept loop + ApiHandler dispatch).
+//! NDJSON IPC server (accept loop + ApiHandler dispatch).
 //!
 //! Accepts connections, frames by newline, dispatches to [`ApiHandler`], and
 //! writes a [`Response`] line per request. Event fan-out is reserved for a
 //! later pass (handlers can still encode [`Event`] lines themselves).
+//!
+//! On Unix this uses an `AF_UNIX` stream socket; on Windows it uses a named
+//! pipe at `\\.\pipe\steno`. The public API (`serve_unix` / `serve_unix_until`
+//! / `serve_unix_with`) is identical on both platforms.
 
 
 use crate::api::protocol::{
@@ -12,15 +16,41 @@ use anyhow::{Context, Result, bail};
 use crate::engine::Engine;
 use base64::Engine as _;
 use serde_json::{Value, json};
-use std::fs;
 use std::io::{BufReader, Read, Write};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING,
+    ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    PIPE_ACCESS_DUPLEX,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_UNLIMITED_INSTANCES,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 /// Error returned by handler methods. Mapped onto a failed [`Response`].
 #[derive(Debug, Clone)]
@@ -404,10 +434,22 @@ fn constant_time_eq(got: &[u8], expected: &[u8]) -> bool {
 }
 
 /// Read peer credentials via Linux `SO_PEERCRED`. Non-Linux returns Unsupported.
+#[cfg(unix)]
 pub fn peer_credentials(stream: &UnixStream) -> std::io::Result<PeerCred> {
     peer_credentials_fd(stream.as_raw_fd())
 }
 
+/// Read peer credentials on Windows. Named pipes do not expose `SO_PEERCRED`;
+/// returns `Unsupported`.
+#[cfg(target_os = "windows")]
+pub fn peer_credentials(_stream: &NamedPipeStream) -> std::io::Result<PeerCred> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "peer credentials are not available on Windows named pipes",
+    ))
+}
+
+#[cfg(unix)]
 fn peer_credentials_fd(fd: libc::c_int) -> std::io::Result<PeerCred> {
     #[cfg(target_os = "linux")]
     {
@@ -451,6 +493,7 @@ fn peer_credentials_fd(fd: libc::c_int) -> std::io::Result<PeerCred> {
     }
 }
 
+#[cfg(unix)]
 fn gate_accepted_peer(stream: &UnixStream, require_same_uid: bool) -> Result<(), ApiError> {
     match peer_credentials(stream) {
         Ok(cred) => {
@@ -480,8 +523,16 @@ fn gate_accepted_peer(stream: &UnixStream, require_same_uid: bool) -> Result<(),
     }
 }
 
+/// Windows: no `SO_PEERCRED` equivalent. The uid check is always skipped;
+/// rely on the named pipe namespace ACL for access control.
+#[cfg(target_os = "windows")]
+fn gate_accepted_peer(_stream: &NamedPipeStream, _require_same_uid: bool) -> Result<(), ApiError> {
+    Ok(())
+}
+
 /// Default socket path: `$XDG_RUNTIME_DIR/steno/steno.sock`, else
 /// `$XDG_CACHE_HOME/steno/steno.sock`, else `~/.cache/steno/steno.sock`.
+#[cfg(unix)]
 pub fn default_socket_path() -> Result<PathBuf> {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !runtime.is_empty() {
@@ -502,11 +553,19 @@ pub fn default_socket_path() -> Result<PathBuf> {
     Ok(home.join(".cache/steno/steno.sock"))
 }
 
+/// Default named pipe path on Windows: `\\.\pipe\steno`.
+#[cfg(target_os = "windows")]
+pub fn default_socket_path() -> Result<PathBuf> {
+    Ok(PathBuf::from(r"\\.\pipe\steno"))
+}
+
+#[cfg(unix)]
 /// Bind `path`, remove a stale socket file, accept forever, and dispatch.
 pub fn serve_unix(path: impl AsRef<Path>, handler: impl ApiHandler) -> Result<()> {
     serve_unix_until(path, handler, None)
 }
 
+#[cfg(unix)]
 /// Like [`serve_unix`], but exits the accept loop when `stop` is set.
 pub fn serve_unix_until(
     path: impl AsRef<Path>,
@@ -516,6 +575,7 @@ pub fn serve_unix_until(
     serve_unix_with(path, handler, stop, ServeOptions::default())
 }
 
+#[cfg(unix)]
 /// Accept loop with explicit [`ServeOptions`] (peer-uid gate, etc.).
 pub fn serve_unix_with(
     path: impl AsRef<Path>,
@@ -609,6 +669,379 @@ pub fn serve_unix_with(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Windows named-pipe server
+// ---------------------------------------------------------------------------
+
+/// Like [`serve_unix`] but backed by a Windows named pipe.
+#[cfg(target_os = "windows")]
+pub fn serve_unix(path: impl AsRef<Path>, handler: impl ApiHandler) -> Result<()> {
+    serve_unix_until(path, handler, None)
+}
+
+/// Like [`serve_unix`], but exits the accept loop when `stop` is set.
+#[cfg(target_os = "windows")]
+pub fn serve_unix_until(
+    path: impl AsRef<Path>,
+    handler: impl ApiHandler,
+    stop: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    serve_unix_with(path, handler, stop, ServeOptions::default())
+}
+
+/// Accept loop with explicit [`ServeOptions`] (peer-uid gate, etc.).
+#[cfg(target_os = "windows")]
+pub fn serve_unix_with(
+    path: impl AsRef<Path>,
+    handler: impl ApiHandler,
+    stop: Option<Arc<AtomicBool>>,
+    opts: ServeOptions,
+) -> Result<()> {
+    let path = path.as_ref();
+
+    // If another daemon is already listening on this pipe name, a client
+    // connect succeeds — refuse to steal the name.
+    if let Some(h) = open_pipe_client(path) {
+        unsafe { CloseHandle(h) };
+        bail!(
+            "API named pipe {} is already live — stop the other steno daemon before starting another",
+            path.display()
+        );
+    }
+
+    loop {
+        if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            break;
+        }
+
+        let handle = create_named_pipe(path)?;
+
+        if !accept_named_pipe(handle, stop.as_ref())? {
+            // stop was requested while waiting for a client.
+            unsafe { CloseHandle(handle) };
+            break;
+        }
+
+        let stream = NamedPipeStream::new(handle)?;
+
+        if let Err(err) = gate_accepted_peer(&stream, opts.require_same_uid) {
+            log::warn!(
+                "api rejecting connection: {}{}",
+                err.error,
+                err.hint
+                    .as_deref()
+                    .map(|h| format!(" — {h}"))
+                    .unwrap_or_default()
+            );
+            continue;
+        }
+
+        if let Err(err) = handle_connection(stream, &handler) {
+            log::warn!("api connection closed with error: {err:#}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a named pipe instance with overlapped I/O for duplex communication.
+#[cfg(target_os = "windows")]
+fn create_named_pipe(path: &Path) -> Result<HANDLE> {
+    let name: String = path.to_string_lossy().into_owned();
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name_wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        bail!(
+            "failed to create named pipe {} — {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(handle)
+}
+
+/// Wait for a client to connect to a named pipe instance.
+///
+/// Returns `Ok(true)` when a client has connected, `Ok(false)` when `stop`
+/// was set while waiting (the caller should close the handle and exit).
+#[cfg(target_os = "windows")]
+fn accept_named_pipe(handle: HANDLE, stop: Option<&Arc<AtomicBool>>) -> Result<bool> {
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+    if event.is_null() {
+        bail!(
+            "CreateEventW failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = event;
+
+    let connected = unsafe { ConnectNamedPipe(handle, &mut overlapped) };
+
+    if connected == 0 {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_IO_PENDING {
+            // Poll for completion or stop every 50 ms.
+            loop {
+                if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                    unsafe { CancelIo(handle) };
+                    let mut transferred: u32 = 0;
+                    let _ = unsafe {
+                        GetOverlappedResult(handle, &mut overlapped, &mut transferred, 1)
+                    };
+                    unsafe { CloseHandle(event) };
+                    return Ok(false);
+                }
+                let result = unsafe { WaitForSingleObject(event, 50) };
+                if result == WAIT_OBJECT_0 {
+                    break;
+                }
+                // WAIT_TIMEOUT — keep polling.
+            }
+        } else if err == ERROR_PIPE_CONNECTED {
+            // A client connected between CreateNamedPipeW and ConnectNamedPipe.
+        } else {
+            unsafe { CloseHandle(event) };
+            bail!(
+                "ConnectNamedPipe failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    unsafe { CloseHandle(event) };
+    Ok(true)
+}
+
+/// Try to open a named pipe as a client. Returns the handle on success,
+/// `None` if no pipe is listening. Used for the liveness probe.
+#[cfg(target_os = "windows")]
+fn open_pipe_client(path: &Path) -> Option<HANDLE> {
+    let name: String = path.to_string_lossy().into_owned();
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            name_wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        None
+    } else {
+        Some(handle)
+    }
+}
+
+/// Duplex stream over a Windows named pipe handle. Implements `Read` + `Write`
+/// via overlapped I/O with a 30-second timeout per operation.
+#[cfg(target_os = "windows")]
+pub struct NamedPipeStream {
+    handle: HANDLE,
+    event: HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+impl NamedPipeStream {
+    fn new(handle: HANDLE) -> Result<Self> {
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            unsafe { CloseHandle(handle) };
+            bail!("CreateEventW failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(Self { handle, event })
+    }
+
+    /// Open a named pipe as a client. Uses overlapped I/O so the same
+    /// 30-second timeout applies as on the server side.
+    pub fn connect(path: &Path) -> std::io::Result<Self> {
+        let name: String = path.to_string_lossy().into_owned();
+        let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = unsafe {
+            CreateFileW(
+                name_wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            unsafe { CloseHandle(handle) };
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { handle, event })
+    }
+
+    /// Duplicate the underlying pipe handle so the caller can split
+    /// read and write halves without sharing a single handle.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        let mut new_handle: HANDLE = std::ptr::null_mut();
+        // INVALID_HANDLE_VALUE (-1) is the current-process pseudo-handle,
+        // equivalent to GetCurrentProcess().
+        let ok = unsafe {
+            DuplicateHandle(
+                INVALID_HANDLE_VALUE,
+                self.handle,
+                INVALID_HANDLE_VALUE,
+                &mut new_handle,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            unsafe { CloseHandle(new_handle) };
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle: new_handle,
+            event,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl std::io::Read for NamedPipeStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = self.event;
+        let mut bytes_read: u32 = 0;
+        let ok = unsafe {
+            ReadFile(
+                self.handle,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut bytes_read,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err == ERROR_IO_PENDING {
+                let result = unsafe { WaitForSingleObject(self.event, 30000) };
+                if result == WAIT_TIMEOUT {
+                    unsafe { CancelIo(self.handle) };
+                    let mut transferred: u32 = 0;
+                    let _ = unsafe {
+                        GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 1)
+                    };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "named pipe read timed out (30s)",
+                    ));
+                }
+                if result != WAIT_OBJECT_0 {
+                    unsafe { CancelIo(self.handle) };
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut transferred: u32 = 0;
+                let ok2 = unsafe {
+                    GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 1)
+                };
+                if ok2 == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                bytes_read = transferred;
+            } else {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(bytes_read as usize)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl std::io::Write for NamedPipeStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = self.event;
+        let mut bytes_written: u32 = 0;
+        let ok = unsafe {
+            WriteFile(
+                self.handle,
+                buf.as_ptr(),
+                buf.len() as u32,
+                &mut bytes_written,
+                &mut overlapped,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err == ERROR_IO_PENDING {
+                let result = unsafe { WaitForSingleObject(self.event, 30000) };
+                if result == WAIT_TIMEOUT {
+                    unsafe { CancelIo(self.handle) };
+                    let mut transferred: u32 = 0;
+                    let _ = unsafe {
+                        GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 1)
+                    };
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "named pipe write timed out (30s)",
+                    ));
+                }
+                if result != WAIT_OBJECT_0 {
+                    unsafe { CancelIo(self.handle) };
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut transferred: u32 = 0;
+                let ok2 = unsafe {
+                    GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 1)
+                };
+                if ok2 == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                bytes_written = transferred;
+            } else {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(bytes_written as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for NamedPipeStream {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.event);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(unix)]
 fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()> {
     // Bound idle clients so daemon shutdown cannot wedge forever in read_until.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
@@ -618,6 +1051,26 @@ fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()
     )?;
     let mut reader = BufReader::new(stream);
     let mut writer = writer_stream;
+    handle_conn_loop(&mut reader, &mut writer, handler)
+}
+
+#[cfg(target_os = "windows")]
+fn handle_connection(stream: NamedPipeStream, handler: &impl ApiHandler) -> Result<()> {
+    let writer_stream = stream
+        .try_clone()
+        .context("failed to duplicate named pipe handle for reply writes")?;
+    let mut reader = BufReader::new(stream);
+    let mut writer = writer_stream;
+    handle_conn_loop(&mut reader, &mut writer, handler)
+}
+
+/// Shared NDJSON line-reading + dispatch loop. Platform-independent: the
+/// caller provides a buffered reader and a writer for the accepted stream.
+fn handle_conn_loop<R: Read, W: Write>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+    handler: &impl ApiHandler,
+) -> Result<()> {
     let mut buf = Vec::new();
 
     loop {
@@ -662,7 +1115,7 @@ fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()
                     "API client sent non-UTF-8 data — send UTF-8 NDJSON lines ending with \\n",
                     Some("send UTF-8 NDJSON lines ending with \\n".into()),
                 );
-                let _ = write_response(&mut writer, &response);
+                let _ = write_response(writer, &response);
                 return Ok(());
             }
         };
@@ -679,11 +1132,11 @@ fn handle_connection(stream: UnixStream, handler: &impl ApiHandler) -> Result<()
                             .into(),
                     ),
                 );
-                let _ = write_response(&mut writer, &response);
+                let _ = write_response(writer, &response);
                 return Ok(());
             }
         };
-        write_response(&mut writer, &response)?;
+        write_response(writer, &response)?;
     }
     Ok(())
 }
@@ -712,7 +1165,7 @@ fn dispatch(handler: &impl ApiHandler, req: Request) -> Response {
     }
 }
 
-fn write_response(writer: &mut UnixStream, response: &Response) -> Result<()> {
+fn write_response(writer: &mut impl Write, response: &Response) -> Result<()> {
     let line = encode_line(response).context("failed to encode API response JSON")?;
     writer
         .write_all(line.as_bytes())
@@ -728,7 +1181,7 @@ pub fn encode_event(event: &Event) -> Result<String> {
     encode_line(event).context("failed to encode API event JSON")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     //! WHY: API server socket creation, token authentication, client session handling, and request
     //! dispatching must operate securely and reliably over IPC sockets.

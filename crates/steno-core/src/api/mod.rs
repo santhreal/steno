@@ -1,6 +1,7 @@
-//! Daemon NDJSON IPC: protocol types, Unix socket client, and server.
+//! Daemon NDJSON IPC: protocol types, IPC client, and server.
 //!
-//! Wired by `daemon::run_daemon` when `[api].enabled`.
+//! On Unix the transport is a `AF_UNIX` stream socket; on Windows it is a
+//! named pipe. Wired by `daemon::run_daemon` when `[api].enabled`.
 
 
 pub mod client;
