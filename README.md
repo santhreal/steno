@@ -168,15 +168,16 @@ Commands match whole words only. The recognizer often adds its own
 punctuation around spoken commands ("bank, comma,"); duplicate punctuation
 is collapsed during formatting, so you get "bank, " and not "bank,, ".
 
-## Dictionary
+## Refinement & Vocabulary
 
-The dictionary rewrites phrases after commands run: names, jargon, product
-terms the recognizer gets wrong. Put overrides in the same config file under
-`[dict.overrides]`:
+Refinement cleans and rewrites text during processing (`STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting`). Vocabulary overrides handle names, jargon, and product terms the recognizer gets wrong. Put overrides in the same config file under `[refine.dictionary]` (alias `[refine.overrides]`):
 
 ```toml
 # ~/.config/steno/config.toml
-[dict.overrides]
+[refine]
+enabled = true
+
+[refine.dictionary]
 "handy" = "Dictate"
 "main street" = "Main Street"
 "um" = ""                # empty replacement deletes the phrase
@@ -187,13 +188,12 @@ replacement's case is used exactly as written.
 
 If you still have a legacy `~/.config/steno/dictionary.toml`, it is
 imported into memory once when loading the **default** config and
-`[dict.overrides]` is empty (with a deprecation warning). An explicit
+`[refine.dictionary]` (or legacy `[dict.overrides]`) is empty (with a deprecation warning). An explicit
 `--config /path/to.toml` only considers a sibling `dictionary.toml` beside
 that file, never the operator XDG path. Copy entries under
-`[dict.overrides]` and remove
+`[refine.dictionary]` and remove
 the old file; `steno` never rewrites your config for you. Restart the
 daemon after edits (`steno restart`).
-
 ## Configuration
 
 Everything has a default; `~/.config/steno/config.toml` overrides it; CLI
@@ -222,9 +222,13 @@ commands = true
 format = true
 
 [refine]
-enabled = true         # post-format offline ASR cleanup (default on)
+enabled = true         # offline refinement pipeline (default on)
 backend = "rules"      # RuleRefine; unknown names warn and use rules
 
+[refine.dictionary]   # or [refine.overrides]
+"handy" = "Dictate"
+"main street" = "Main Street"
+"um" = ""
 [ui]
 overlay = true         # bottom-center status overlay
 done_flash_ms = 1200   # how long done/error stays visible
@@ -248,22 +252,9 @@ enabled = true         # daemon listens on a local Unix socket
 # token = ""           # optional shared secret on each request
 # require_same_uid = true    # SO_PEERCRED same-uid gate (default true)
 
-[dict.overrides]
-"handy" = "Dictate"
-"main street" = "Main Street"
-"um" = ""
-```
 
-Post-format **refine** (`[refine]`) collapses duplicate words / short
-repeated clauses, fixes spaced or split contractions, high-precision ASR
-phrase maps (homophones with tight context, doubled prepositions, common
-mishears), a small subject-verb map, a/an edges, and light leading/trailing
-fillers, then strips space-before punctuation. Config knobs are only
-`enabled` and `backend = "rules"`; set `enabled = false` to skip it.
-RuleRefine stays offline (fixed tables, no token re-casing, no network/LLM)
-and still cannot repair acoustic garble like `chromax`; embedders can swap
-a custom `RefineBackend` in-process for heavier GEC.
-
+The **refine** section (`[refine]`) configures the unified refinement pipeline (`STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting`), combining GEC cleanup (`RuleRefine` / `RefineBackend`) and vocabulary / dictionary phrase overrides (`[refine.dictionary]`, alias `[refine.overrides]`). It collapses duplicate words / short repeated clauses, fixes spaced or split contractions, high-precision ASR phrase maps (homophones with tight context, doubled prepositions, common mishears), a small subject-verb map, a/an edges, and light leading/trailing fillers, then strips space-before punctuation. Config knobs are `enabled`, `backend = "rules"`, and overrides under `[refine.dictionary]` (alias `[refine.overrides]`); set `enabled = false` to skip it.
+RuleRefine stays offline (fixed tables, no token re-casing, no network/LLM) and still cannot repair acoustic garble like `chromax`; embedders can swap a custom `RefineBackend` in-process for heavier GEC.
 ## Themes
 
 Built-in overlay palettes (also listed by `steno theme list`):
@@ -379,7 +370,7 @@ types). `[api].require_same_uid` defaults true (SO_PEERCRED).
 mic ── capture (cpal/ALSA)
     ── resample to 16 kHz mono, DC-block, gain-normalize, trim silence
     ── sherpa-onnx decode on the GPU (Parakeet TDT)
-    ── voice commands → dictionary → formatter → refine
+    ── voice commands → refinement (GEC + vocabulary) → formatting
     ── streamed to stdout, or synthetic keystrokes (xdotool/wtype, when armed)
 ```
 

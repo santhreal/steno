@@ -1,7 +1,7 @@
 # Roadmap (execution order)
 
 ## Phase 1 - land in-tree (agents)
-- [x] Single config (`[dict.overrides]` + legacy dictionary.toml import)
+- [x] Single config (`[refine.dictionary]` vocabulary + legacy dictionary.toml import)
 - [x] IPC protocol + Unix socket skeleton
 - [x] OverlayBackend trait + NullOverlay + theme field
 
@@ -25,7 +25,7 @@
 - [x] CPU CI job (`.github/workflows/ci-cpu.yml` + `scripts/ci-cpu.sh`; unit/clippy vs CPU sherpa)
 
 ## Phase 5 - harden
-- [x] RuleRefine post-STT + RefineBackend hook (offline; expanded ASR/grammar tables; not full LLM GEC)
+- [x] RuleRefine post-STT + RefineBackend hook (offline unified refinement: GEC + vocabulary)
 - [x] GPU soak (100× en.wav) + nvidia-smi memory delta - **axiomexec / disposable VM only** (not operator workstation)
 - [x] Socket framing fuzz / partial lines (`api::server` framing_* tests)
 - [x] Caps Lock restore Drop helpers + SIGKILL recovery docs (keycode 66)

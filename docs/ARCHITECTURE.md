@@ -13,7 +13,7 @@ Legend: **Verified** = exercised in this tree (unit/e2e or prior remote proof).
 | --- | --- |
 | Workspace split (`steno-core` / `steno-platform` / `steno`) | **Verified**: builds as a Cargo workspace |
 | `Engine` + `Session` public API | **Verified**: unit-tested; `from_parts` / `with_pipeline` / `process_text` for embedders; GPU load not in unit tests |
-| Single config + `[dict.overrides]` | **Verified**: unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
+| Single config + `[refine.dictionary]` (legacy `[dict.overrides]` merged) | **Verified**: unit tests; legacy `dictionary.toml` import-in-memory (default/XDG only; `--config` uses sibling only) |
 | Parakeet TDT v3 via sherpa-onnx | **Verified** earlier on CUDA (JFK wav GPU smoke, ~498 MiB VRAM). `provider = "cuda"\|"cpu"` is honored by `Engine` / `Transcriber::load` (fail-closed; no silent fallback). Daemon hot-path passes `cfg.provider` (**Implemented/Verified**). |
 | Caps Lock PTT + cancel-any-key | **Verified** on X11 (axiomexec earlier); **Unverified** on this operator workstation after cutover |
 | Dictionary + verbatim case protection | **Verified** in unit tests; daemon needs restart after edits |
@@ -48,14 +48,14 @@ unless the main agent asks.
 
 ## Locked decisions
 
-0. **Post-STT refine**: `commands → dictionary → format → refine`. Default `RuleRefine` (offline ASR cleanup). Embedders can swap `RefineBackend` for heavier GEC; no network.
+0. **Unified Refinement Architecture**: `STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting`. Default `RuleRefine` + vocabulary overrides. Embedders can swap `RefineBackend` for heavier GEC; no network.
 
 1. **Single config file**: `~/.config/steno/config.toml` owns everything,
-   including dictionary overrides under `[dict.overrides]`. Legacy
-   `dictionary.toml` is imported once on default/XDG load (loud log; an
-   explicit `--config` only reads a sibling file beside that path). Once
-   `[dict.overrides]` is populated, the legacy file is ignored. No second
-   config file. `steno` never rewrites the operator's config for them.
+   including vocabulary overrides under `[refine.dictionary]`
+   (legacy `[dict.overrides]` is merged into it on load). Legacy `dictionary.toml` is imported once
+   on default/XDG load (loud log; an explicit `--config` only reads a sibling file
+   beside that path). Once `[refine.dictionary]` is populated, the legacy file is
+   ignored. No second config file. `steno` never rewrites the operator's config for them.
 2. **Workspace crates**
    - `steno-core`: STT, DSP, audio, text pipeline, config, `Engine` /
      `Session`, overlay trait/`Stage`, IPC protocol + Unix client/server.
@@ -82,14 +82,15 @@ unless the main agent asks.
 6. **STT stays Parakeet/sherpa**: no whisper shims. `provider = "cuda"`
    (default) or `"cpu"` in config; unknown values fail at config load /
    `Transcriber::load`. No silent fallback between providers.
-7. **Text pipeline order**: commands → dictionary → format → refine.
+7. **Text pipeline order**: `STT -> Commands -> Refinement (GEC + Vocabulary) -> Formatting`.
    Refine is wired and **on by default** (`[refine] enabled = true`,
-   `backend = "rules"` → `RuleRefine`). Config fields are only `enabled` +
-   `backend` (no max_* keys). Offline only; embedders may inject a custom
-   `RefineBackend`. `enabled = false` → `NullRefine`. RuleRefine scope: tiny
-   fixed rule tables (space-before-punctuation stripping, duplicate words/clauses,
-   contractions, ASR phrase maps, subject-verb map, a/an edges, fillers), no token
-   re-casing, no network/LLM in-tree.
+   `backend = "rules"` → `RuleRefine`). Vocabulary overrides (`[refine.dictionary]`,
+   alias `[refine.overrides]`) and GEC cleanup run inside the refinement stage before formatting.
+   Config fields include `enabled`, `backend`, and `dictionary` (alias `overrides`). Offline only;
+   embedders may inject a custom `RefineBackend`. `enabled = false` → `NullRefine`.
+   RuleRefine scope: tiny fixed rule tables (space-before-punctuation stripping,
+   duplicate words/clauses, contractions, ASR phrase maps, subject-verb map, a/an edges, fillers),
+   no token re-casing, no network/LLM in-tree.
 
 ---
 
@@ -98,9 +99,8 @@ unless the main agent asks.
 ```text
 raw STT text
   → voice commands
-  → dictionary ([dict.overrides]; legacy dictionary.toml import-in-memory)
-  → format (sentence case; verbatim markers protect dictionary casing)
-  → refine (RuleRefine by default: collapses duplicates/contractions/fillers, strips space-before punctuation; RefineBackend hook; NullRefine if disabled)
+  → refinement (GEC + vocabulary via [refine.dictionary] + RuleRefine / RefineBackend)
+  → formatting (sentence case; punctuation spacing)
   → stdout / typer (typer only when type_output armed)
 ```
 
@@ -175,6 +175,11 @@ format = true
 enabled = true               # default; false → NullRefine
 backend = "rules"            # RuleRefine; unknown → warn + rules
 
+[refine.overrides]           # or [refine.dictionary]
+"veyyon" = "veyyon"
+"vayon" = "veyyon"
+"mukund" = "Mukund"
+"um" = ""
 [ui]
 overlay = true
 done_flash_ms = 1200
@@ -201,11 +206,6 @@ enabled = true               # daemon listens on the socket
 [dsp]
 # …existing DspConfig fields…
 
-[dict.overrides]
-"veyyon" = "veyyon"
-"vayon" = "veyyon"
-"mukund" = "Mukund"
-"um" = ""
 ```
 `list_settable_keys()` in `steno-core` provides exact surgical key validation for `config_get` / `config_set` and `steno config set`. The full set of supported keys includes top-level options (`model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`), daemon API options (`api.enabled`, `api.path`, `api.token`), overlay settings (`ui.theme`, `ui.overlay`, `ui.done_flash_ms`), stage labels (`ui.stages.recording`, `ui.stages.transcribing`, `ui.stages.done`, `ui.stages.error`, `ui.stages.show_timer`, `ui.stages.pulse_ms`), and color overrides (`ui.colors.*`). Wildcard patterns are rejected.
 

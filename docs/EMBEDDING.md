@@ -288,7 +288,7 @@ provider = "cuda"            # or "cpu"; fail-closed, no silent fallback
 enabled = true               # default; false → NullRefine
 backend = "rules"            # RuleRefine; unknown → warn + rules
 
-[refine.overrides]           # or [refine.dictionary]
+[refine.dictionary]         # or [refine.overrides]
 "handy" = "Dictate"
 ```
 

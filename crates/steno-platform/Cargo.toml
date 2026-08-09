@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "OS backends for steno: hotkey, overlay, typing (Linux X11 + Wayland MVP)"
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
 
 [dependencies]
 anyhow = "1"

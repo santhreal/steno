@@ -14,6 +14,10 @@ license = "MIT OR Apache-2.0"
 authors = ["Santh <64453045+santhreal@users.noreply.github.com>"]
 repository = "https://github.com/santhreal/steno"
 description = "Minimal offline speech-to-text dictation CLI powered by sherpa-onnx (Parakeet TDT)"
+keywords = ["speech-to-text", "stt", "dictation", "offline", "sherpa-onnx"]
+categories = ["accessibility", "command-line-utilities", "multimedia::audio"]
+homepage = "https://github.com/santhreal/steno"
+readme = "README.md"
 [profile.release]
 lto = "thin"
 codegen-units = 1
