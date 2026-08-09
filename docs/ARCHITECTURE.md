@@ -306,9 +306,9 @@ no plugin ABI; compile-time injection only.
 
 | Capability | Linux X11 | Linux Wayland | Windows | macOS |
 | --- | --- | --- | --- | --- |
-| Hotkey | done | XWayland/X11 when `DISPLAY` set; pure Wayland fails loudly (native grab later) | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
-| Type | xdotool | **MVP:** `wtype` (+ `ydotool` fallback) on pure Wayland | SendInput | CGEvent |
-| Overlay | done (ResolvedUi) | NullOverlay + warn for now (layer-shell follow-up) | HWND + soft `box_blur_alpha` chip (ResolvedUi; no local UI soak) | NSPanel + tiny-skia soft-shadow chip (ResolvedUi; no local UI soak) |
+| Hotkey | done | evdev direct input (`/dev/input/event*` Caps Lock; `wayland` feature) or XWayland/X11 when `DISPLAY` set | WH_KEYBOARD_LL Caps Lock | CGEventTap Caps Lock |
+| Type | xdotool | `wtype` (+ `ydotool` fallback) on pure Wayland | SendInput | CGEvent |
+| Overlay | done (ResolvedUi) | layer-shell pill (`zwlr-layer-shell-v1`; `wayland` feature, smithay-client-toolkit; verified on sway headless) | HWND + soft `box_blur_alpha` chip (ResolvedUi; no local UI soak) | NSPanel + tiny-skia soft-shadow chip (ResolvedUi; no local UI soak) |
 | IPC | Unix socket | Unix socket | named pipe later | Unix socket |
 | Audio | cpal | cpal | cpal | cpal |
 | STT | sherpa cuda\|cpu | same | sherpa CPU/(CUDA) | sherpa CPU/(Metal later) |
@@ -329,6 +329,8 @@ no plugin ABI; compile-time injection only.
 - [x] Daemon supervisor: auto-restart on crash with exponential backoff
 - [x] Audio failover: fresh device open per utterance; error overlay + continue
 - [x] LLM refine backend: llama-cpp-2 GGUF, GPU/CPU via config + cargo features (llm + llm-cuda verified on axiomexec)
+- [x] Wayland layer-shell overlay: `zwlr-layer-shell-v1` status pill (smithay-client-toolkit 0.21; `wayland` feature; verified on sway headless)
+- [x] Wayland evdev hotkey: Caps Lock hold-to-talk via `/dev/input/event*` (`wayland` feature; requires `input` group)
 
 ---
 
@@ -338,5 +340,5 @@ no plugin ABI; compile-time injection only.
 - Plugin dylib ABI for themes (trait injection only)
 - HTTP/WebSocket API
 - Streaming partial tokens from Parakeet (offline full-utterance)
-- Full Wayland hotkey/overlay parity (typing MVP is in-tree; layer-shell + native grab later)
+- ~~Full Wayland hotkey/overlay parity~~ — **done**: evdev hotkey + layer-shell overlay (optional `wayland` feature)
 - Live-session testing on the operator workstation
