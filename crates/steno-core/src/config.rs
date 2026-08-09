@@ -406,6 +406,12 @@ impl Config {
                 self.refine.llm.temperature,
                 path.display()
             );
+            ensure!(
+                self.refine.llm.n_gpu_layers >= -1,
+                "invalid refine.llm.n_gpu_layers = {} in {}: set it to -1 (all GPU), 0 (CPU), or a positive layer count",
+                self.refine.llm.n_gpu_layers,
+                path.display()
+            );
         }
 
         Ok(())
