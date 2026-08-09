@@ -31,6 +31,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use super::Dictionary;
+#[cfg(feature = "llm")]
+use super::llm_refine::LlmRefine;
 
 /// Pluggable post-STT refinement. Implementations must be pure and offline.
 pub trait RefineBackend: Send + Sync {

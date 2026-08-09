@@ -34,17 +34,16 @@
 //! [`crate::text::RuleRefine`] so dictation keeps working.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::token::data_array::LlamaTokenDataArray;
+use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
 
-use super::{Dictionary, LlmRefineConfig, RefineBackend};
+use super::{LlmRefineConfig, RefineBackend};
 
 const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are a transcription correction engine. Fix the raw speech-to-text \
@@ -64,7 +63,7 @@ Output the corrected text only.";
 ///
 /// The model is loaded once and kept resident. Each `refine()` call
 /// constructs a prompt, runs a single generation pass, and returns the
-/// corrected text. Thread-safe via a Mutex on the model+context.
+/// corrected text.
 pub struct LlmRefine {
     backend: LlamaBackend,
     model: LlamaModel,
@@ -94,8 +93,14 @@ impl LlmRefine {
         let backend = LlamaBackend::init()
             .context("failed to initialize llama.cpp backend")?;
 
+        // n_gpu_layers: -1 (all to GPU) maps to u32::MAX; 0 = CPU only.
+        let n_gpu = if config.n_gpu_layers < 0 {
+            u32::MAX
+        } else {
+            config.n_gpu_layers as u32
+        };
         let model_params = LlamaModelParams::default()
-            .with_n_gpu_layers(config.n_gpu_layers);
+            .with_n_gpu_layers(n_gpu);
         let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
             .with_context(|| format!("failed to load GGUF model from {}", model_path.display()))?;
 
@@ -118,71 +123,70 @@ impl LlmRefine {
     fn generate(&self, prompt: &str) -> Result<String> {
         let ctx_params = LlamaContextParams::default()
             .with_n_threads(self.config.n_threads as i32)
-            .with_n_ctx(std::num::NonZeroU32::new(4096).unwrap());
+            .with_n_threads_batch(self.config.n_threads as i32)
+            .with_n_ctx(std::num::NonZeroU32::new(4096));
 
         let mut ctx = self.model.new_context(&self.backend, ctx_params)
             .context("failed to create LLM context")?;
 
-        // Tokenize the prompt.
-        let tokens = ctx.model.str_to_token(prompt, llama_cpp_2::llama_batch::AddEos::Always)
+        // Tokenize the prompt (adds BOS token).
+        let tokens = self.model.str_to_token(prompt, AddBos::Always)
             .context("failed to tokenize prompt")?;
 
-        // Create a batch and add the prompt tokens.
-        let mut batch = LlamaBatch::new(tokens.len() + self.config.max_tokens as usize, 1);
+        // Create a batch large enough for prompt + generation.
+        let batch_size = tokens.len() + self.config.max_tokens as usize;
+        let mut batch = LlamaBatch::new(batch_size, 1);
+
+        // Add all prompt tokens; only the last one needs logits.
+        let n_prompt = tokens.len() as i32;
         for (i, &token) in tokens.iter().enumerate() {
-            batch.add(token, i as i32, &[0], false)
-                .context("failed to add token to batch")?;
+            let needs_logits = i == tokens.len() - 1;
+            batch.add(token, i as i32, &[0], needs_logits)
+                .map_err(|e| anyhow::anyhow!("failed to add token to batch: {e}"))?;
         }
 
         ctx.decode(&mut batch)
             .context("failed to decode prompt batch")?;
 
-        // Generate tokens one at a time.
+        // Build the sampler: temp → greedy (or temp → dist for stochastic).
+        let sampler = if self.config.temperature <= 0.0 {
+            LlamaSampler::greedy()
+        } else {
+            LlamaSampler::chain(
+                [
+                    LlamaSampler::temp(self.config.temperature),
+                    LlamaSampler::dist(0),
+                ],
+                true,
+            )
+        };
+
+        let mut sampler = sampler;
         let mut output = String::new();
-        let n_prompt = tokens.len() as i32;
+        let mut n_cur = n_prompt;
 
         for _ in 0..self.config.max_tokens {
-            // Sample the next token.
-            let logits = ctx.get_logits_ith(batch.n_tokens() - 1)
-                .context("failed to get logits")?;
-            let mut candidates = LlamaTokenDataArray::from_iter(logits, false);
+            // Sample the next token from the last position.
+            let new_token = sampler.sample(&ctx, batch.n_tokens() - 1);
 
-            // Simple greedy/temperature sampling.
-            if self.config.temperature <= 0.0 {
-                // Greedy: pick the highest logit.
-                let best = candidates.data.iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        a.logit.partial_cmp(&b.logit).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                candidates.set_index(best);
-            } else {
-                ctx.sample_temp(&mut candidates, self.config.temperature);
-                candidates.sample();
-            }
-
-            let new_token = candidates.token_at_index()
-                .context("failed to sample token")?;
-
-            // Check for end-of-generation token.
-            if new_token == ctx.model.token_eos() {
+            // Check for end-of-generation.
+            if new_token == self.model.token_eos() {
                 break;
             }
 
             // Decode the token to text.
-            if let Some(piece) = ctx.model.token_to_str(new_token) {
-                output.push_str(&piece);
+            match self.model.token_to_piece_bytes(new_token, 8, true, None) {
+                Ok(bytes) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(e) => log::warn!("failed to decode token: {e}"),
             }
 
             // Feed the new token back for the next iteration.
             batch.clear();
-            let pos = ctx.n_ctx() as i32; // not ideal but works for single-turn
-            batch.add(new_token, n_prompt, &[0], true)
-                .context("failed to add generated token to batch")?;
+            batch.add(new_token, n_cur, &[0], true)
+                .map_err(|e| anyhow::anyhow!("failed to add generated token: {e}"))?;
             ctx.decode(&mut batch)
                 .context("failed to decode generated token")?;
+            n_cur += 1;
         }
 
         Ok(output.trim().to_string())
@@ -214,7 +218,6 @@ impl RefineBackend for LlmRefine {
         }
     }
 }
-
 
 /// Build the system prompt with dictionary entries embedded.
 fn build_system_prompt(dictionary: &HashMap<String, String>) -> String {
