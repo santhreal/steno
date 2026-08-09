@@ -24,7 +24,9 @@ pub enum HotkeyBackend {
 pub enum OverlayBackendChoice {
     /// Existing X11 pill (works under XWayland too).
     X11,
-    /// No layer-shell chip yet: `NullOverlay` + warning.
+    /// Wayland native layer-shell pill (requires `wayland` cargo feature).
+    Wayland,
+    /// No layer-shell chip: `NullOverlay` + warning.
     NullWarn,
 }
 
@@ -67,13 +69,14 @@ pub fn hotkey_backend_from(display: Option<&str>, wayland: Option<&str>) -> Hotk
         HotkeyBackend::X11
     }
 }
-
-/// Select the overlay backend from explicit env snapshots.
 pub fn overlay_backend_from(display: Option<&str>, wayland: Option<&str>) -> OverlayBackendChoice {
     if has_display_var(display) {
         OverlayBackendChoice::X11
     } else if has_wayland_var(wayland) {
-        OverlayBackendChoice::NullWarn
+        #[cfg(feature = "wayland")]
+        { OverlayBackendChoice::Wayland }
+        #[cfg(not(feature = "wayland"))]
+        { OverlayBackendChoice::NullWarn }
     } else {
         OverlayBackendChoice::X11
     }

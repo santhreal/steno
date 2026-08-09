@@ -148,6 +148,18 @@ impl InjectTyper for Emitter {
 pub fn create(cfg: &UiConfig) -> Box<dyn OverlayBackend> {
     match overlay_backend() {
         OverlayBackendChoice::X11 => linux_x11::create(cfg),
+        OverlayBackendChoice::Wayland => {
+            #[cfg(feature = "wayland")]
+            {
+                if cfg.overlay {
+                    match crate::linux_wayland::overlay::WaylandOverlay::new(cfg) {
+                        Ok(o) => return Box::new(o),
+                        Err(e) => log::warn!("Wayland overlay init failed: {e:#}; falling back to null"),
+                    }
+                }
+            }
+            Box::new(NullOverlay)
+        }
         OverlayBackendChoice::NullWarn => {
             if cfg.overlay {
                 match cfg.theme.as_str() {
