@@ -27,7 +27,7 @@ use steno_core::audio;
 use steno_core::config::{self, ApiConfig, Config};
 use steno_core::dsp::{self, DspConfig};
 use steno_core::stt::Transcriber;
-use steno_core::text::{self, RefineConfig, TextConfig, TextPipeline};
+use steno_core::text::{self, RefineConfig};
 use steno_platform::{Hotkey, HotkeyEvent, OutputMode, Stage, create as create_overlay};
 #[cfg(target_os = "linux")]
 use steno_platform::restore_caps_lock_mapping;
@@ -719,8 +719,12 @@ fn resolve_api_socket(api: &ApiConfig) -> Result<PathBuf> {
 /// Emitter/typer is never invoked from these API ops: fail-closed for API.
 struct DaemonHandler {
     transcriber: Arc<Transcriber>,
-    text_cfg: TextConfig,
+    /// Config snapshot for status reporting (the pipeline holds the
+    /// actual text config used for processing).
     refine: RefineConfig,
+    /// Cached text pipeline — shared with the hotkey path so the LLM
+    /// model is loaded once, not per API call.
+    pipeline: Arc<text::TextPipeline>,
     dsp: DspConfig,
     model: PathBuf,
     type_output_armed: bool,
@@ -816,11 +820,7 @@ impl DaemonHandler {
         if self.raw {
             return Ok(raw.trim().to_string());
         }
-        let pipeline = TextPipeline::with_refine(
-            self.text_cfg,
-            self.refine.make_backend(),
-        );
-        let (text, _) = pipeline.process_stream(&raw, text::FmtState::default());
+        let (text, _) = self.pipeline.process_stream(&raw, text::FmtState::default());
         Ok(text)
     }
 }
@@ -991,6 +991,14 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     log::debug!("overlay active={}", overlay.active());
     let stage = Arc::new(Mutex::new(String::from("idle")));
 
+    // Create the text pipeline once. For the LLM backend, this loads
+    // the GGUF model; recreating it per utterance or per API call would
+    // add seconds of latency. Shared via Arc between hotkey and API paths.
+    let pipeline = Arc::new(text::TextPipeline::with_refine(
+        text_cfg,
+        cfg.refine.make_backend(),
+    ));
+
     // API socket: spawn before hotkey loop so clients can ping while Caps Lock
     // is idle. Typing remains fail-closed (config-only); handler never types.
     if cfg.api.enabled {
@@ -999,8 +1007,8 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         let require_same_uid = cfg.api.require_same_uid;
         let handler = DaemonHandler {
             transcriber: Arc::clone(&transcriber),
-            text_cfg,
             refine: cfg.refine.clone(),
+            pipeline: Arc::clone(&pipeline),
             dsp: cfg.dsp,
             model: model.clone(),
             type_output_armed: cfg.type_output,
@@ -1048,13 +1056,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     let record_cfg = audio::RecordConfig::from_config(&cfg)
         .with_device(cli.device.clone());
 
-    // Create the text pipeline once. For the LLM backend, this loads
-    // the GGUF model; recreating it per utterance would add seconds
-    // of latency. The pipeline is shared via Rc across utterances.
-    let pipeline = std::rc::Rc::new(text::TextPipeline::with_refine(
-        text_cfg,
-        cfg.refine.make_backend(),
-    ));
 
     let mut held = false;
     loop {
@@ -1153,7 +1154,7 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                 if let Err(e) = emit_transcript(
                     &samples,
                     &transcriber,
-                    std::rc::Rc::clone(&pipeline),
+                    Arc::clone(&pipeline),
                     cli.raw,
                     mode,
                     overlay.as_ref(),
@@ -1457,8 +1458,11 @@ mod status_refine_tests {
 
         let handler = DaemonHandler {
             transcriber: Arc::new(Transcriber::dummy()),
-            text_cfg: TextConfig::default(),
             refine,
+            pipeline: Arc::new(text::TextPipeline::with_refine(
+                text::TextConfig::default(),
+                RefineConfig::default().make_backend(),
+            )),
             dsp: DspConfig::default(),
             model: PathBuf::from("/tmp/model"),
             type_output_armed: true,

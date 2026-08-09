@@ -360,13 +360,14 @@ fn main() -> Result<()> {
 
 /// Run the text pipeline + emitter over `samples`. Shared by one-shot and daemon.
 ///
-/// The pipeline is passed as `Rc` so the daemon can reuse a single
-/// instance across utterances (the LLM backend loads a GGUF model
-/// once; recreating it per utterance would add seconds of latency).
+/// The pipeline is passed as `Arc` so the daemon can share a single
+/// instance across utterances and with the API handler (the LLM backend
+/// loads a GGUF model once; recreating it per utterance would add
+/// seconds of latency).
 pub(crate) fn emit_transcript(
     samples: &[f32],
     transcriber: &steno_core::Transcriber,
-    pipeline: std::rc::Rc<text::TextPipeline>,
+    pipeline: std::sync::Arc<text::TextPipeline>,
     raw: bool,
     mode: OutputMode,
     overlay: &dyn OverlayBackend,
@@ -384,7 +385,7 @@ pub(crate) fn emit_transcript(
         error: None,
     }));
     let ctx2 = ctx.clone();
-    let pipeline2 = std::rc::Rc::clone(&pipeline);
+    let pipeline2 = std::sync::Arc::clone(&pipeline);
     let run_pipeline = move |chunk: &str| {
         let mut c = ctx2.borrow_mut();
         if c.error.is_some() {
