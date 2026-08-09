@@ -604,24 +604,21 @@ fn preflight(cli: &Cli) -> Result<()> {
     // fail inside Config::load above — surface them before advertising
     // "running".
     let _ = text::Dictionary::from_map(cfg.refine.dictionary.clone());
-    let display = std::env::var_os("DISPLAY");
-    let display_missing_or_empty = display.as_deref().is_none_or(std::ffi::OsStr::is_empty);
-    if display_missing_or_empty {
-        let wayland = std::env::var_os("WAYLAND_DISPLAY");
-        let wayland_set = wayland.as_deref().is_some_and(|s| !s.is_empty());
-        if wayland_set {
-            #[cfg(target_os = "linux")]
-            {
+    #[cfg(target_os = "linux")]
+    {
+        let display = std::env::var_os("DISPLAY");
+        let display_missing_or_empty = display.as_deref().is_none_or(std::ffi::OsStr::is_empty);
+        if display_missing_or_empty {
+            let wayland = std::env::var_os("WAYLAND_DISPLAY");
+            let wayland_set = wayland.as_deref().is_some_and(|s| !s.is_empty());
+            if wayland_set {
                 bail!("{}", steno_platform::linux::selection::pure_wayland_hotkey_error());
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                bail!(
-                    "Caps Lock hotkey is unavailable on a pure Wayland session (WAYLAND_DISPLAY is set, DISPLAY is not)."
-                );
-            }
-        } else {
-            bail!("DISPLAY is unset or empty — the daemon needs X11 for Caps Lock and typing");
+            bail!(
+                "DISPLAY is unset or empty — the daemon needs X11 (or XWayland) \
+                 for Caps Lock and typing. On pure Wayland, install the `wayland` \
+                 feature: `cargo build --features wayland`"
+            );
         }
     }
     Ok(())
