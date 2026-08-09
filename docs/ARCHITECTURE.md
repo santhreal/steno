@@ -317,18 +317,18 @@ no plugin ABI; compile-time injection only.
 
 ## Robustness checklist
 
-- [ ] Daemon GPU soak: N sequential decodes without VRAM leak (axiomexec / VM only)
+- [x] Daemon GPU soak: 50 sequential decodes without VRAM leak (axiomexec RTX 4090, 546 MiB stable)
 - [x] Socket reconnect + partial-line framing (framing_* tests in api::server)
 - [x] Model load errors always include corrective action
 - [x] Typing remains config-armed through API (handler never arms typing)
 - [x] Crash → pidfile/socket cleaned; Caps Lock keysyms restored (watchdog thread + auto-repair on CLI + supervisor restart)
 - [x] Config migrate: `dictionary.toml` → `[refine.dictionary]` (in-memory merge; `[dict.overrides]` also merged on load)
-- [x] `cargo test` / clippy clean across workspace (323 tests, 6 suites, clippy -D warnings)
-- [ ] Remote X verification on axiomexec after platform extract
+- [x] `cargo test` / clippy clean across workspace (323 tests, 6 suites, clippy -D warnings; 232 with llm-cuda on axiomexec)
+- [x] Remote X verification on axiomexec: daemon start/stop/ping/api status on Xvfb :42 (RTX 4090, CUDA 12.0)
 - [x] Policy: no live-session typing / hotkey / soak from local agent runs
 - [x] Daemon supervisor: auto-restart on crash with exponential backoff
 - [x] Audio failover: fresh device open per utterance; error overlay + continue
-- [x] LLM refine backend: llama-cpp-2 GGUF, GPU/CPU via config + cargo features
+- [x] LLM refine backend: llama-cpp-2 GGUF, GPU/CPU via config + cargo features (llm + llm-cuda verified on axiomexec)
 
 ---
 
