@@ -25,8 +25,11 @@ pub mod text;
 pub mod ui_theme;
 
 pub use api::{
-    ApiError, ApiHandler, ApiResult, MAX_UTTERANCE_SAMPLES, PcmTranscoder, ServeOptions,
-    UtteranceApiHandler, UtteranceBuffer, serve_unix,
+    ApiClient, ApiError, ApiHandler, ApiResult, Event, MAX_API_LINE_BYTES,
+    MAX_UTTERANCE_SAMPLES, Op, PcmTranscoder, PeerCred, Request, Response, ServeOptions,
+    StubHandler, UtteranceApiHandler, UtteranceBuffer, authorize_peer, authorize_token,
+    decode_line, decode_pcm_f32_le_b64, default_socket_path, encode_line, peer_credentials,
+    serve_unix, serve_unix_until, serve_unix_with,
 };
 pub use audio::{RecordConfig, list_input_devices, record, record_while};
 pub use config::{

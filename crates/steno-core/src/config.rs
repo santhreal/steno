@@ -334,6 +334,46 @@ impl Config {
             path.display()
         );
         crate::ui_theme::validate_color_overrides(&self.ui.colors, path)?;
+
+        // VAD: nonsensical thresholds / timeouts silently produce no
+        // transcription or hang forever. Catch them at load, not at record.
+        ensure!(
+            self.vad.silence_ms > 0,
+            "invalid vad.silence_ms = 0 in {}: set it to at least 1 ms",
+            path.display()
+        );
+        ensure!(
+            self.vad.min_speech_ms > 0,
+            "invalid vad.min_speech_ms = 0 in {}: set it to at least 1 ms",
+            path.display()
+        );
+        ensure!(
+            self.vad.start_timeout_secs > 0,
+            "invalid vad.start_timeout_secs = 0 in {}: set it to at least 1 second",
+            path.display()
+        );
+        ensure!(
+            self.vad.speech_threshold > 0.0 && self.vad.speech_threshold < 1.0,
+            "invalid vad.speech_threshold = {} in {}: set it between 0.0 and 1.0 (exclusive)",
+            self.vad.speech_threshold,
+            path.display()
+        );
+
+        // DSP: non-positive target_rms or max_gain silently skip
+        // normalization (quiet mics → bad decodes) or amplify noise.
+        ensure!(
+            self.dsp.target_rms > 0.0 && self.dsp.target_rms <= 1.0,
+            "invalid dsp.target_rms = {} in {}: set it between 0.0 and 1.0",
+            self.dsp.target_rms,
+            path.display()
+        );
+        ensure!(
+            self.dsp.max_gain >= 1.0,
+            "invalid dsp.max_gain = {} in {}: set it to at least 1.0",
+            self.dsp.max_gain,
+            path.display()
+        );
+
         Ok(())
     }
 }

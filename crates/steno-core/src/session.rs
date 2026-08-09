@@ -89,6 +89,16 @@ impl Session {
         self.maybe_type(&text)?;
         Ok(text)
     }
+    /// Decode a WAV file from disk (resampling to 16 kHz if needed), drive
+    /// overlay stages, and optionally type when armed + a typer was injected.
+    /// Same stage sequence and typing rules as [`Self::transcribe_f32`].
+    pub fn transcribe_wav_file(&mut self, path: &std::path::Path) -> Result<String> {
+        let text = Self::drive_overlay_stages(&*self.overlay, self.done_flash_ms, || {
+            self.engine.transcribe_wav_file(path)
+        })?;
+        self.maybe_type(&text)?;
+        Ok(text)
+    }
 
     /// Borrow the overlay sink.
     pub fn overlay(&self) -> &dyn OverlayBackend {

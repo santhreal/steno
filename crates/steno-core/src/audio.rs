@@ -23,6 +23,22 @@ pub struct RecordConfig {
     pub target_rms: f32,
     pub max_gain: f32,
 }
+impl RecordConfig {
+    /// Build a [`RecordConfig`] from a loaded [`crate::Config`], using the
+    /// VAD, DSP, and `max_record_secs` values the user configured.
+    ///
+    /// `device` is `None` (system default); callers that need a specific
+    /// device can override the field after construction.
+    pub fn from_config(cfg: &crate::Config) -> Self {
+        Self {
+            device: None,
+            max_duration: Duration::from_secs(cfg.max_record_secs),
+            vad: cfg.vad,
+            target_rms: cfg.dsp.target_rms,
+            max_gain: cfg.dsp.max_gain,
+        }
+    }
+}
 
 /// Names of all input devices, for `steno --list-devices`.
 pub fn list_input_devices() -> Result<Vec<String>> {
