@@ -435,7 +435,7 @@ fn preflight(cli: &Cli) -> Result<()> {
     // Legacy dictionary.toml parse errors (and other config issues) already
     // fail inside Config::load above — surface them before advertising
     // "running".
-    let _ = text::Dictionary::from_map(cfg.dict.overrides.clone());
+    let _ = text::Dictionary::from_map(cfg.refine.dictionary.clone());
     let display = std::env::var_os("DISPLAY");
     let display_missing_or_empty = display.as_deref().is_none_or(std::ffi::OsStr::is_empty);
     if display_missing_or_empty {
@@ -522,7 +522,6 @@ struct DaemonHandler {
     transcriber: Arc<Transcriber>,
     text_cfg: TextConfig,
     refine: RefineConfig,
-    dict: text::Dictionary,
     dsp: DspConfig,
     model: PathBuf,
     type_output_armed: bool,
@@ -620,7 +619,6 @@ impl DaemonHandler {
         }
         let pipeline = TextPipeline::with_refine(
             self.text_cfg,
-            self.dict.clone(),
             self.refine.make_backend(),
         );
         let (text, _) = pipeline.process_stream(&raw, text::FmtState::default());
@@ -652,7 +650,7 @@ impl ApiHandler for DaemonHandler {
             "refine": {
                 "enabled": self.refine.enabled,
                 "backend": self.refine.backend,
-                "dictionary_entries": self.dict.len(),
+                "dictionary_entries": self.refine.dictionary.len(),
             },
         })))
     }
@@ -784,11 +782,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         model.display()
     );
     let transcriber = Arc::new(Transcriber::load(&model, cfg.n_threads, &cfg.provider)?);
-    let dict = text::Dictionary::from_map(cfg.dict.overrides.clone());
-    if !dict.is_empty() {
+    if !cfg.refine.dictionary.is_empty() {
         eprintln!(
             "steno: refinement engine ({} dictionary overrides) loaded from {}; edits apply after `steno restart`",
-            cfg.dict.overrides.len(),
+            cfg.refine.dictionary.len(),
             config::default_config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "~/.config/steno/config.toml".into())
@@ -809,7 +806,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
             transcriber: Arc::clone(&transcriber),
             text_cfg,
             refine: cfg.refine.clone(),
-            dict: dict.clone(),
             dsp: cfg.dsp,
             model: model.clone(),
             type_output_armed: cfg.type_output,
@@ -954,7 +950,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                 overlay.set(Stage::Transcribing);
                 let pipeline = TextPipeline::with_refine(
                     text_cfg,
-                    dict.clone(),
                     cfg.refine.make_backend(),
                 );
                 if let Err(e) = emit_transcript(
@@ -1175,20 +1170,18 @@ mod status_refine_tests {
 
     #[test]
     fn daemon_handler_status_includes_refine_configuration_state() {
-        let mut map = std::collections::HashMap::new();
-        map.insert("vayon".into(), "veyyon".into());
-        let dict = text::Dictionary::from_map(map);
+        let mut dict_map = std::collections::HashMap::new();
+        dict_map.insert("vayon".into(), "veyyon".into());
         let refine = RefineConfig {
             enabled: true,
             backend: "rules".into(),
-            dictionary: std::collections::HashMap::new(),
+            dictionary: dict_map,
         };
 
         let handler = DaemonHandler {
             transcriber: Arc::new(Transcriber::dummy()),
             text_cfg: TextConfig::default(),
             refine,
-            dict,
             dsp: DspConfig::default(),
             model: PathBuf::from("/tmp/model"),
             type_output_armed: true,

@@ -278,7 +278,7 @@ fn main() -> Result<()> {
 
     // Warn about flags that have no effect in the chosen mode; silently
     // ignoring them would look like they worked.
-    if cli.raw && !cfg.dict.overrides.is_empty() {
+    if cli.raw && !cfg.refine.dictionary.is_empty() {
         log::warn!("--raw skips the refinement pipeline; [refine] dictionary entries are ignored");
     }
     if cli.input.is_some() && cli.device.is_some() {

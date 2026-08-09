@@ -1,19 +1,7 @@
 //! Post-transcription text pipeline, applied in this exact order:
 //! 1. voice commands  : "period", "new line", "scratch that", ...
-//! 2. dictionary      : multi-word phrase overrides, empty replacement deletes
+//! 2. refine          : offline ASR cleanup and dictionary phrase overrides
 //! 3. formatting      : sentence capitalization, punctuation spacing
-//! 4. refine          : offline ASR cleanup (duplicate words, spaced
-//!    contractions, space-before-punct); default on
-//!
-//! Dictionary replacements are inserted verbatim: the formatter spaces and
-//! punctuates around them but never re-cases them, so a lowercase-branded
-//! entry ("veyyon") stays lowercase even at a sentence start.
-//!
-//! Refine runs **after** format, on the final visible string (verbatim
-//! markers already stripped). RuleRefine never re-cases tokens, so brand
-//! replacements keep the casing format emitted. Limitation: once markers
-//! are gone, refine cannot special-case dictionary spans beyond
-//! case-preserving rules.
 //!
 //! Pure string logic; no I/O except legacy dictionary.toml parsing.
 
@@ -27,6 +15,8 @@ pub use dictionary::Dictionary;
 pub use format::FmtState;
 pub use refine::{NullRefine, RefineBackend, RefineConfig, RuleRefine, rule_refine};
 
+pub(crate) const VERBATIM_START: char = '\u{E000}';
+pub(crate) const VERBATIM_END: char = '\u{E001}';
 use serde::Deserialize;
 
 /// Text pipeline configuration (`[text]`).
@@ -48,18 +38,10 @@ impl Default for TextConfig {
     }
 }
 
-/// Private-use sentinel pair wrapping each dictionary replacement between
-/// stages 2 and 3. The formatter copies marked text through without case
-/// transforms and strips the markers; they never reach emitted output.
-/// Chosen from the Unicode private use area so real transcripts and
-/// dictionary entries cannot contain them.
-const VERBATIM_START: char = '\u{E000}';
-const VERBATIM_END: char = '\u{E001}';
 
 /// Post-transcription text processing pipeline.
 pub struct TextPipeline {
     cfg: TextConfig,
-    dict: Dictionary,
     refine: Box<dyn RefineBackend>,
 }
 
@@ -67,12 +49,12 @@ impl TextPipeline {
     /// Build with the default [`RuleRefine`] backend (matches
     /// `[refine] enabled = true`, `backend = "rules"`).
     pub fn new(cfg: TextConfig, dict: Dictionary) -> Self {
-        Self::with_refine(cfg, dict, Box::new(RuleRefine))
+        Self::with_refine(cfg, Box::new(RuleRefine::new(dict)))
     }
 
     /// Build with an explicit refine backend (from [`RefineConfig::make_backend`]).
-    pub fn with_refine(cfg: TextConfig, dict: Dictionary, refine: Box<dyn RefineBackend>) -> Self {
-        Self { cfg, dict, refine }
+    pub fn with_refine(cfg: TextConfig, refine: Box<dyn RefineBackend>) -> Self {
+        Self { cfg, refine }
     }
 
     /// One-shot: process `raw` with a fresh [`FmtState`].
@@ -88,28 +70,25 @@ impl TextPipeline {
     /// state to the next call. `scratch that` can only delete within the
     /// current segment: earlier segments are already emitted.
     ///
-    /// Refine runs last on the formatted (or dictionary-only) string.
+    /// Text pipeline order: voice commands -> refine -> format.
     pub fn process_stream(&self, raw: &str, state: format::FmtState) -> (String, format::FmtState) {
         let mut s = raw.to_string();
         if self.cfg.commands {
             s = commands::apply(&s);
         }
-        let (mut s, state) = if self.cfg.format {
-            // Marked replacements let the formatter protect their case.
-            s = self.dict.apply_marked(&s);
+        s = self.refine.refine(&s);
+        let (s, state) = if self.cfg.format {
             format::format_with(&s, state)
         } else {
-            s = self.dict.apply(&s);
             (s.trim().to_string(), state)
         };
-        s = self.refine.refine(&s);
         (s, state)
     }
 }
 
 #[cfg(test)]
 mod pipeline_refine_tests {
-    //! WHY: pipeline must apply refine after format, and NullRefine must
+    //! WHY: pipeline must apply refine before format, and NullRefine must
     //! leave duplicates intact when refine is disabled.
 
     use super::*;
@@ -126,7 +105,6 @@ mod pipeline_refine_tests {
     fn disabled_refine_leaves_duplicates() {
         let pipe = TextPipeline::with_refine(
             TextConfig::default(),
-            Dictionary::default(),
             Box::new(NullRefine),
         );
         let (text, _) = pipe.process_stream("the the cat", Default::default());

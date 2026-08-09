@@ -24,7 +24,7 @@ pub fn resolve_config_path(cli: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// `steno config show`: effective path, settable keys, resolved model,
-/// and `dict.overrides` count (not the map itself).
+/// and `[refine]` dictionary entries count (not the map itself).
 pub fn config_show(config_path: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config_path)?;
     let cfg = load_for_show(config_path, &path)?;
@@ -41,7 +41,7 @@ pub fn config_show(config_path: Option<&Path>) -> Result<()> {
         Ok(m) => println!("model (resolved) = {}", m.display()),
         Err(e) => println!("model (resolved) = (unavailable: {e})"),
     }
-    println!("dict.overrides = {} entries", cfg.dict.overrides.len());
+    println!("refine.dictionary = {} entries", cfg.refine.dictionary.len());
     Ok(())
 }
 
@@ -100,6 +100,18 @@ pub fn config_set_cmd(config_path: Option<&Path>, key: &str, value: &str) -> Res
                 anyhow::anyhow!("value for {key} must be an integer, got {value:?}")
             })?;
             ensure!(n > 0, "n_threads must be greater than 0, got {n}");
+        }
+        "refine.enabled" => {
+            let _: bool = value.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be a boolean (true/false), got {value:?}")
+            })?;
+        }
+        "refine.backend" => {
+            let val = value.trim();
+            ensure!(
+                matches!(val, "rules"),
+                "invalid refine backend {value:?} — use \"rules\""
+            );
         }
         k if k.starts_with("ui.colors.") => {
             steno_core::parse_rgba(value)?;
@@ -283,6 +295,8 @@ fn effective_value(cfg: &Config, key: &str) -> String {
             .as_deref()
             .unwrap_or("(unset)")
             .to_string(),
+        "refine.enabled" => cfg.refine.enabled.to_string(),
+        "refine.backend" => cfg.refine.backend.clone(),
         "ui.theme" => cfg.ui.theme.clone(),
         "ui.overlay" => cfg.ui.overlay.to_string(),
         "ui.done_flash_ms" => cfg.ui.done_flash_ms.to_string(),
@@ -546,6 +560,43 @@ mod tests {
         let path = temp_cfg("model-list");
         fs::write(&path, "").unwrap();
         model_list(Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+    }
+    #[test]
+    fn config_set_cmd_validates_refine() {
+        let path = temp_cfg("valid-refine");
+        let _ = fs::remove_file(&path);
+
+        let err1 = config_set_cmd(Some(&path), "refine.enabled", "maybe")
+            .unwrap_err()
+            .to_string();
+        assert!(err1.contains("boolean"), "{err1}");
+
+        let err2 = config_set_cmd(Some(&path), "refine.backend", "magic")
+            .unwrap_err()
+            .to_string();
+        assert!(err2.contains("invalid refine backend"), "{err2}");
+
+        assert!(!path.exists());
+
+        config_set_cmd(Some(&path), "refine.enabled", "false").unwrap();
+        assert_eq!(
+            config_get(&path, "refine.enabled").unwrap().as_deref(),
+            Some("false")
+        );
+        config_set_cmd(Some(&path), "refine.backend", "rules").unwrap();
+        assert_eq!(
+            config_get(&path, "refine.backend").unwrap().as_deref(),
+            Some("rules")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_show_reflects_refine_dictionary() {
+        let path = temp_cfg("show-refine");
+        fs::write(&path, "[dict.overrides]\n\"vayon\" = \"veyyon\"\n").unwrap();
+        config_show(Some(&path)).unwrap();
         let _ = fs::remove_file(&path);
     }
 }

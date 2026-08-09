@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 
 use crate::engine::Engine;
 use crate::overlay::{NullOverlay, OverlayBackend, Stage};
-
+use crate::text::TextPipeline;
 /// Keystroke sink for [`Session`].
 ///
 /// Same shape as `steno_platform::Typer`. Defined here so `Session` stays
@@ -55,6 +55,10 @@ impl Session {
     /// Create a session with default settings (NullOverlay, typing disarmed, 0 flash).
     pub fn with_defaults(engine: Engine) -> Self {
         Self::builder(engine).build()
+    }
+    /// Create a session configured from `cfg` around `engine`.
+    pub fn from_config(engine: Engine, cfg: &crate::Config) -> Self {
+        Self::builder(engine).from_config(cfg).build()
     }
 
 
@@ -182,6 +186,9 @@ impl SessionBuilder {
     pub fn from_config(mut self, cfg: &crate::Config) -> Self {
         self.type_output = cfg.type_output;
         self.done_flash_ms = cfg.ui.done_flash_ms;
+        let refine_backend = cfg.refine.make_backend();
+        let pipeline = TextPipeline::with_refine(cfg.text, refine_backend);
+        self.engine = self.engine.with_pipeline(pipeline);
         self
     }
 

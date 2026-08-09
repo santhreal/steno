@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 
 use crate::config::{self, Config};
 use crate::stt::Transcriber;
-use crate::text::{Dictionary, TextPipeline};
+use crate::text::TextPipeline;
 
 /// Resident STT + text pipeline. Prefer this over raw [`Transcriber`] for
 /// one-shot / embedder use; the daemon may still hold an `Arc<Transcriber>`
@@ -30,7 +30,7 @@ impl Engine {
     }
 
     /// Resolve the model path, load STT onto the configured provider, and
-    /// build the text pipeline from `cfg.dict` / `cfg.text` / `cfg.refine`.
+    /// build the text pipeline from `cfg.text` / `cfg.refine`.
     pub fn load(cfg: &Config) -> Result<Self> {
         Self::load_model(cfg, None)
     }
@@ -42,7 +42,7 @@ impl Engine {
         let transcriber = Transcriber::load(&model, cfg.n_threads, &cfg.provider)
             .with_context(|| format!("failed to load STT model from {}", model.display()))?;
         let refine_backend = cfg.refine.make_backend();
-        let pipeline = TextPipeline::with_refine(cfg.text, Dictionary::default(), refine_backend);
+        let pipeline = TextPipeline::with_refine(cfg.text, refine_backend);
         Ok(Self::from_parts(transcriber, pipeline))
     }
 
@@ -74,14 +74,14 @@ impl Engine {
         &self.pipeline
     }
 
-    /// Run commands → dictionary → format → refine on already-decoded text
-    /// (no STT). Useful for reprocessing stored transcripts with a new dict.
+    /// Run commands → refine → format on already-decoded text
+    /// (no STT). Useful for reprocessing stored transcripts with new refine settings.
     pub fn process_text(&self, raw: &str) -> String {
         self.pipeline.process(raw)
     }
 
     /// Decode `pcm_16k` (16 kHz mono f32) and run the text pipeline
-    /// (commands → dictionary → format → refine).
+    /// (commands → refine → format).
     pub fn transcribe_f32(&self, pcm_16k: &[f32]) -> Result<String> {
         if pcm_16k.is_empty() {
             return Ok(String::new());
@@ -189,7 +189,7 @@ mod tests {
         let mut cfg = crate::Config::default();
         cfg.refine.dictionary.insert("vayon".into(), "veyyon".into());
         let backend = cfg.refine.make_backend();
-        let pipeline = TextPipeline::with_refine(TextConfig::default(), Dictionary::default(), backend);
+        let pipeline = TextPipeline::with_refine(TextConfig::default(), backend);
         let engine = Engine::from_parts(crate::stt::Transcriber::dummy(), pipeline);
         assert_eq!(engine.process_text("hello vayon world"), "Hello veyyon world");
     }

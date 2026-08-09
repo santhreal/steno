@@ -262,7 +262,16 @@ impl Config {
     /// - `explicit == true`: sibling `dictionary.toml` next to `loaded_from` only,
     ///   unless `loaded_from` *is* the default config path (then XDG legacy applies)
     fn migrate_legacy_dictionary(&mut self, loaded_from: &Path, explicit: bool) -> Result<()> {
+        // Merge [dict.overrides] into [refine.dictionary]. The pipeline only
+        // reads refine.dictionary (via RefineConfig::make_backend), so entries
+        // left solely in [dict.overrides] would be silently dropped when both
+        // tables are populated. Refine takes precedence on key collision.
         if !self.dict.overrides.is_empty() {
+            for (k, v) in &self.dict.overrides {
+                self.refine.dictionary.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if !self.refine.dictionary.is_empty() {
             return Ok(());
         }
         let legacy = legacy_dictionary_candidate(loaded_from, explicit)?;
@@ -274,13 +283,15 @@ impl Config {
         }
         if legacy.is_dir() {
             bail!(
-                    "legacy dictionary path '{}' is a directory: replace it with a TOML file, or move overrides under [dict.overrides] in config.toml",
+                    "legacy dictionary path '{}' is a directory: replace it with a TOML file, or move overrides under [refine.dictionary] in config.toml",
                 legacy.display()
             );
         }
-        self.dict.overrides = Dictionary::load(Some(&legacy))?.to_map();
+        let map = Dictionary::load(Some(&legacy))?.to_map();
+        self.dict.overrides = map.clone();
+        self.refine.dictionary = map;
         log::warn!(
-            "{} is deprecated; dictionary overrides now live under [dict.overrides] in config.toml: copy them there and remove the old file",
+            "{} is deprecated; dictionary overrides now live under [refine.dictionary] in config.toml: copy them there and remove the old file",
             legacy.display()
         );
         Ok(())
@@ -350,6 +361,9 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "api.enabled",
         "api.path",
         "api.token",
+        "refine.enabled",
+        "refine.backend",
+        "refine.dictionary.*",
         "ui.theme",
         "ui.overlay",
         "ui.done_flash_ms",
@@ -372,6 +386,9 @@ pub fn list_settable_keys() -> &'static [&'static str] {
 }
 
 fn ensure_settable(key: &str) -> Result<()> {
+    if key.starts_with("refine.dictionary.") {
+        return Ok(());
+    }
     ensure!(
         list_settable_keys().contains(&key),
         "unsupported config key {key:?}: supported keys: {}",
@@ -437,7 +454,7 @@ fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Ite
 
 fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     let v = match key {
-        "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled" => {
+        "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled" | "refine.enabled" => {
             let b: bool = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be a boolean (true/false), got {raw:?}")
             })?;
@@ -1411,5 +1428,22 @@ theme = "pill"
         assert_eq!(cfg.api.path, Some(PathBuf::from("/tmp/dictate-test.sock")));
         assert_eq!(cfg.api.token.as_deref(), Some("secret-token"));
         assert_eq!(cfg.max_record_secs, 120);
+    }
+    #[test]
+    fn config_set_get_refine_keys() {
+        let path = temp_file("refine-settable.toml", b"");
+        config_set(&path, "refine.enabled", "true").unwrap();
+        config_set(&path, "refine.backend", "rules").unwrap();
+        config_set(&path, "refine.dictionary.vayon", "veyyon").unwrap();
+
+        assert_eq!(config_get(&path, "refine.enabled").unwrap().as_deref(), Some("true"));
+        assert_eq!(config_get(&path, "refine.backend").unwrap().as_deref(), Some("rules"));
+        assert_eq!(config_get(&path, "refine.dictionary.vayon").unwrap().as_deref(), Some("veyyon"));
+
+        let cfg = load_without_legacy(Some(&path)).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(cfg.refine.enabled);
+        assert_eq!(cfg.refine.backend, "rules");
+        assert_eq!(cfg.refine.dictionary.get("vayon").map(String::as_str), Some("veyyon"));
     }
 }
