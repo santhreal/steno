@@ -62,7 +62,7 @@ const LABEL_PX: f32 = 13.0;
 pub struct WaylandOverlay {
     stage: Arc<std::sync::Mutex<Stage>>,
     active: Arc<std::sync::Mutex<bool>>,
-    _thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WaylandOverlay {
@@ -94,8 +94,21 @@ impl WaylandOverlay {
         Ok(Self {
             stage,
             active,
-            _thread: Some(thread),
+            thread: Some(thread),
         })
+    }
+}
+
+impl Drop for WaylandOverlay {
+    fn drop(&mut self) {
+        // Signal the event loop to stop.
+        if let Ok(mut a) = self.active.lock() {
+            *a = false;
+        }
+        // Wait for the thread to finish (it should exit within ~100ms).
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -180,10 +193,17 @@ fn run_event_loop(
         .insert_source(
             Timer::from_duration(Duration::from_millis(100)),
             |_, _, state| {
-                state.poll_redraw();
-                if state.exit {
+                // Check external shutdown signal (active set to false by Drop).
+                let still_active = state
+                    .active
+                    .lock()
+                    .map(|a| *a)
+                    .unwrap_or(false);
+                if state.exit || !still_active {
+                    state.exit = true;
                     TimeoutAction::Drop
                 } else {
+                    state.poll_redraw();
                     TimeoutAction::ToDuration(Duration::from_millis(100))
                 }
             },
@@ -203,6 +223,10 @@ fn run_event_loop(
             }
         })
         .context("event loop error")?;
+    // Mark inactive — the overlay is shutting down.
+    if let Ok(mut a) = active.lock() {
+        *a = false;
+    }
 
     Ok(())
 }
