@@ -24,3 +24,18 @@ serde_json = "1"
 sherpa-onnx = { version = "1.13.4", default-features = false, features = ["shared"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 toml_edit = "0.22"
+
+# LLM refine backend (optional). Enable via features:
+#   --features llm         → CPU-only LLM inference
+#   --features llm-cuda    → NVIDIA GPU offload
+#   --features llm-vulkan  → AMD/Intel/NVIDIA Vulkan
+#   --features llm-metal   → macOS Metal
+# At runtime, n_gpu_layers in [refine.llm] controls GPU offload (0 = CPU).
+llama-cpp-2 = { version = "0.1", optional = true, default-features = false, features = ["sampler"] }
+
+[features]
+default = []
+llm = ["dep:llama-cpp-2"]
+llm-cuda = ["llm", "llama-cpp-2/cuda"]
+llm-vulkan = ["llm", "llama-cpp-2/vulkan"]
+llm-metal = ["llm", "llama-cpp-2/metal"]

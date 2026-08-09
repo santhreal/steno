@@ -1175,6 +1175,7 @@ mod status_refine_tests {
             enabled: true,
             backend: "rules".into(),
             dictionary: dict_map,
+            llm: steno_core::LlmRefineConfig::default(),
         };
 
         let handler = DaemonHandler {

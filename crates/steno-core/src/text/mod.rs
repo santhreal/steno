@@ -9,11 +9,15 @@ mod commands;
 mod dictionary;
 mod format;
 mod refine;
+#[cfg(feature = "llm")]
+mod llm_refine;
 
 pub use commands::COMMANDS;
 pub use dictionary::Dictionary;
 pub use format::FmtState;
-pub use refine::{NullRefine, RefineBackend, RefineConfig, RuleRefine, rule_refine};
+pub use refine::{LlmRefineConfig, NullRefine, RefineBackend, RefineConfig, RuleRefine, rule_refine};
+#[cfg(feature = "llm")]
+pub use llm_refine::LlmRefine;
 
 use serde::Deserialize;
 

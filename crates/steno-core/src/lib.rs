@@ -45,9 +45,11 @@ pub use overlay::{FnOverlay, NullOverlay, OverlayBackend, Stage};
 pub use session::{InjectTyper, Session, SessionBuilder};
 pub use stt::Transcriber;
 pub use text::{
-    COMMANDS, Dictionary, FmtState, NullRefine, RefineBackend, RefineConfig, RuleRefine,
-    TextConfig, TextPipeline,
+    COMMANDS, Dictionary, FmtState, LlmRefineConfig, NullRefine, RefineBackend, RefineConfig,
+    RuleRefine, TextConfig, TextPipeline,
 };
+#[cfg(feature = "llm")]
+pub use text::LlmRefine;
 pub use ui_theme::{
     ResolvedUi, Rgba, ThemePalette, list_themes, parse_rgba, resolve_ui, stage_label,
 };

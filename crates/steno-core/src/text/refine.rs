@@ -29,6 +29,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use super::Dictionary;
 
 /// Pluggable post-STT refinement. Implementations must be pure and offline.
@@ -71,17 +72,68 @@ impl RefineBackend for RuleRefine {
 }
 
 /// `[refine]` section: enable/disable, backend name, and dictionary overrides.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RefineConfig {
     /// When false, the pipeline uses [`NullRefine`].
     pub enabled: bool,
-    /// `"rules"` selects [`RuleRefine`]. Unknown names warn and fall back
-    /// to rules (fail soft on the cleanup pass, not closed).
+    /// `"rules"` selects [`RuleRefine`]. `"llm"` selects [`LlmRefine`]
+    /// (requires the `llm` cargo feature). Unknown names warn and fall
+    /// back to rules.
     pub backend: String,
     /// Custom dictionary/vocabulary overrides (phrase -> replacement).
     #[serde(alias = "overrides")]
     pub dictionary: HashMap<String, String>,
+    /// LLM backend configuration (`[refine.llm]`). Used when
+    /// `backend = "llm"`.
+    #[serde(default)]
+    pub llm: LlmRefineConfig,
+}
+
+
+/// LLM refine backend configuration (`[refine.llm]`).
+///
+/// Used when `refine.backend = "llm"`. The model is a GGUF file loaded
+/// via llama-cpp-2. GPU offload is controlled by `n_gpu_layers`:
+/// 0 = CPU only, >0 = offload that many layers to GPU, -1 = all layers.
+///
+/// Requires the `llm` cargo feature (or `llm-cuda` / `llm-vulkan` /
+/// `llm-metal` for GPU acceleration).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmRefineConfig {
+    /// Path to a GGUF model file (e.g. Qwen3-0.6B-Q4_K_M.gguf).
+    pub model_path: Option<PathBuf>,
+    /// Number of layers to offload to GPU. 0 = CPU only, -1 = all layers.
+    /// Default: -1 (all layers to GPU when a GPU backend is compiled in;
+    /// llama.cpp falls back to CPU when no GPU is available).
+    pub n_gpu_layers: i32,
+    /// CPU threads for prompt processing and CPU-only inference.
+    /// Default: 4.
+    pub n_threads: u32,
+    /// Maximum tokens to generate in the correction response.
+    /// Default: 512 (enough for any single utterance).
+    pub max_tokens: u32,
+    /// Sampling temperature. Lower = more deterministic.
+    /// Default: 0.1 (conservative corrections).
+    pub temperature: f32,
+    /// Custom system prompt. If empty, a built-in prompt is used that
+    /// instructs the model to fix grammar, punctuation, and apply
+    /// dictionary substitutions without changing meaning.
+    pub prompt: String,
+}
+
+impl Default for LlmRefineConfig {
+    fn default() -> Self {
+        Self {
+            model_path: None,
+            n_gpu_layers: -1,
+            n_threads: 4,
+            max_tokens: 512,
+            temperature: 0.1,
+            prompt: String::new(),
+        }
+    }
 }
 
 impl Default for RefineConfig {
@@ -90,6 +142,7 @@ impl Default for RefineConfig {
             enabled: true,
             backend: "rules".to_string(),
             dictionary: HashMap::new(),
+            llm: LlmRefineConfig::default(),
         }
     }
 }
@@ -103,10 +156,34 @@ impl RefineConfig {
         }
         match self.backend.as_str() {
             "rules" => Box::new(RuleRefine::from_map(self.dictionary.clone())),
+            "llm" => {
+                #[cfg(feature = "llm")]
+                {
+                    match LlmRefine::new(&self.llm, &self.dictionary) {
+                        Ok(backend) => Box::new(backend),
+                        Err(e) => {
+                            log::error!(
+                                "LLM refine backend failed to load: {e:#}. \
+                                 Falling back to rules."
+                            );
+                            Box::new(RuleRefine::from_map(self.dictionary.clone()))
+                        }
+                    }
+                }
+                #[cfg(not(feature = "llm"))]
+                {
+                    log::error!(
+                        "refine backend = \"llm\" but the `llm` cargo feature is not enabled. \
+                         Rebuild with --features llm (CPU) or --features llm-cuda / \
+                         llm-vulkan / llm-metal (GPU). Falling back to rules."
+                    );
+                    Box::new(RuleRefine::from_map(self.dictionary.clone()))
+                }
+            }
             other => {
                 log::warn!(
                     "unknown refine backend {other:?}; using \"rules\". \
-                     Set backend = \"rules\" or enabled = false"
+                     Set backend = \"rules\", \"llm\", or enabled = false"
                 );
                 Box::new(RuleRefine::from_map(self.dictionary.clone()))
             }
@@ -744,6 +821,7 @@ mod tests {
             enabled: false,
             backend: "rules".into(),
             dictionary: HashMap::new(),
+            llm: LlmRefineConfig::default(),
         };
         let b = cfg.make_backend();
         assert_eq!(b.refine("the the cat"), "the the cat");
@@ -764,6 +842,7 @@ mod tests {
             enabled: true,
             backend: "llm".into(),
             dictionary: HashMap::new(),
+            llm: LlmRefineConfig::default(),
         };
         let b = cfg.make_backend();
         assert_eq!(b.refine("Hello hello"), "Hello");
