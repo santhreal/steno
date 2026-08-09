@@ -521,7 +521,7 @@ fn push_vk(inputs: &mut Vec<INPUT>, vk: VIRTUAL_KEY, up: bool) {
 fn sanitize_for_typing(text: &str) -> String {
     // Keep intentional '\n' (voice "new line"). Strip Cc controls AND Unicode
     // Zl/Zp line/paragraph separators (U+2028/U+2029) — Rust's is_control()
-    // only covers Cc, so those would otherwise inject breaks via xdotool/wtype.
+    // only covers Cc, so those would otherwise inject breaks via SendInput.
     let clean: String = text
         .chars()
         .filter(|&c| c == '\n' || (!c.is_control() && !is_unicode_line_break(c)))
@@ -656,9 +656,9 @@ mod chip {
 }
 
 const CLASS_NAME: &[u16] = &[
-    b'D' as u16, b'i' as u16, b'c' as u16, b't' as u16, b'a' as u16, b't' as u16, b'e' as u16,
-    b'S' as u16, b't' as u16, b'a' as u16, b't' as u16, b'u' as u16, b's' as u16, b'C' as u16,
-    b'h' as u16, b'i' as u16, b'p' as u16, 0,
+    b'S' as u16, b't' as u16, b'e' as u16, b'n' as u16, b'o' as u16, b'S' as u16, b't' as u16,
+    b'a' as u16, b't' as u16, b'u' as u16, b's' as u16, b'C' as u16, b'h' as u16, b'i' as u16,
+    b'p' as u16, 0,
 ];
 
 fn run_overlay(rx: Receiver<Stage>, failed: std::sync::Arc<AtomicBool>, ui: ResolvedUi) {

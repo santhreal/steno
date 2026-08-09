@@ -1,17 +1,16 @@
-//! Post-format ASR cleanup (offline, rule-based).
+//! Post-STT ASR cleanup (offline, rule-based).
 //!
-//! Runs as the **last** stage of [`super::TextPipeline`] on the already
-//! formatted string (verbatim markers are already stripped by format).
-//! Rules are deliberately small and case-preserving so dictionary brand
-//! replacements that survived formatting keep their casing.
+//! Runs as the **second** stage of [`super::TextPipeline`] (after voice
+//! commands, before formatting). Rules are deliberately small and
+//! case-preserving so dictionary brand replacements keep their casing.
 //!
-//! Limitation: after markers are stripped, refine cannot tell a brand
-//! token from ordinary text. Rules never re-case tokens (duplicate-word
-//! collapse keeps the first spelling; phrase maps follow the first
-//! matched token's capitalization when the replacement is not a forced
-//! literal). Tokens with internal capitals or short all-lowercase brands
-//! emitted by format are left alone by case-transform rules: there are
-//! none that rewrite token case beyond first-letter carry for phrase hits.
+//! Limitation: refine cannot tell a brand token from ordinary text.
+//! Rules never re-case tokens (duplicate-word collapse keeps the first
+//! spelling; phrase maps follow the first matched token's capitalization
+//! when the replacement is not a forced literal). Tokens with internal
+//! capitals or short all-lowercase brands are left alone by case-transform
+//! rules: there are none that rewrite token case beyond first-letter carry
+//! for phrase hits.
 //!
 //! ## Honest limits
 //!
@@ -29,6 +28,8 @@
 //! LanguageTool dependency.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use super::Dictionary;
 
 /// Pluggable post-STT refinement. Implementations must be pure and offline.
 pub trait RefineBackend: Send + Sync {
@@ -46,17 +47,31 @@ impl RefineBackend for NullRefine {
 }
 
 /// Default offline rule backend (`backend = "rules"`).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuleRefine;
+#[derive(Debug, Default, Clone)]
+pub struct RuleRefine {
+    pub dictionary: Dictionary,
+}
 
-impl RefineBackend for RuleRefine {
-    fn refine(&self, text: &str) -> String {
-        rule_refine(text)
+impl RuleRefine {
+    pub fn new(dictionary: Dictionary) -> Self {
+        Self { dictionary }
+    }
+
+    pub fn from_map(map: HashMap<String, String>) -> Self {
+        Self {
+            dictionary: Dictionary::from_map(map),
+        }
     }
 }
 
-/// `[refine]` section: enable/disable and backend name.
-#[derive(Debug, Clone, serde::Deserialize)]
+impl RefineBackend for RuleRefine {
+    fn refine(&self, text: &str) -> String {
+        rule_refine_with_dict(text, &self.dictionary)
+    }
+}
+
+/// `[refine]` section: enable/disable, backend name, and dictionary overrides.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RefineConfig {
     /// When false, the pipeline uses [`NullRefine`].
@@ -64,6 +79,9 @@ pub struct RefineConfig {
     /// `"rules"` selects [`RuleRefine`]. Unknown names warn and fall back
     /// to rules (fail soft on the cleanup pass, not closed).
     pub backend: String,
+    /// Custom dictionary/vocabulary overrides (phrase -> replacement).
+    #[serde(alias = "overrides")]
+    pub dictionary: HashMap<String, String>,
 }
 
 impl Default for RefineConfig {
@@ -71,6 +89,7 @@ impl Default for RefineConfig {
         Self {
             enabled: true,
             backend: "rules".to_string(),
+            dictionary: HashMap::new(),
         }
     }
 }
@@ -83,13 +102,13 @@ impl RefineConfig {
             return Box::new(NullRefine);
         }
         match self.backend.as_str() {
-            "rules" => Box::new(RuleRefine),
+            "rules" => Box::new(RuleRefine::from_map(self.dictionary.clone())),
             other => {
                 log::warn!(
                     "unknown refine backend {other:?}; using \"rules\". \
                      Set backend = \"rules\" or enabled = false"
                 );
-                Box::new(RuleRefine)
+                Box::new(RuleRefine::from_map(self.dictionary.clone()))
             }
         }
     }
@@ -318,11 +337,22 @@ fn is_closing_punct(c: char) -> bool {
     )
 }
 
-/// Apply the full rule set to formatted transcript text.
+/// Apply the full rule set to transcript text.
 pub fn rule_refine(text: &str) -> String {
+    super::format::strip_verbatim(&rule_refine_with_dict(text, &Dictionary::default()))
+}
+
+/// Apply the full rule set including dictionary phrase overrides to transcript text.
+pub fn rule_refine_with_dict(text: &str, dict: &Dictionary) -> String {
     if text.is_empty() {
         return String::new();
     }
+
+    let text = if !dict.is_empty() {
+        dict.apply(text)
+    } else {
+        text.to_string()
+    };
 
     // Preserve paragraph structure: refine each line independently so
     // newlines from "new line" / "new paragraph" survive.
@@ -713,6 +743,7 @@ mod tests {
         let cfg = RefineConfig {
             enabled: false,
             backend: "rules".into(),
+            dictionary: HashMap::new(),
         };
         let b = cfg.make_backend();
         assert_eq!(b.refine("the the cat"), "the the cat");
@@ -732,6 +763,7 @@ mod tests {
         let cfg = RefineConfig {
             enabled: true,
             backend: "llm".into(),
+            dictionary: HashMap::new(),
         };
         let b = cfg.make_backend();
         assert_eq!(b.refine("Hello hello"), "Hello");
@@ -739,7 +771,7 @@ mod tests {
 
     #[test]
     fn rule_refine_via_trait() {
-        assert_eq!(RuleRefine.refine("the the cat"), "the cat");
+        assert_eq!(RuleRefine::default().refine("the the cat"), "the cat");
     }
 
     #[test]
@@ -754,6 +786,31 @@ mod tests {
         assert!(!cfg.enabled);
         assert_eq!(cfg.backend, "rules");
         assert_eq!(cfg.make_backend().refine("the the"), "the the");
+    }
+
+    #[test]
+    fn refine_config_deserializes_dictionary_table() {
+        let toml_str = "enabled = true\nbackend = \"rules\"\n\n[dictionary]\nvayon = \"veyyon\"\n";
+        let cfg: RefineConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.dictionary.get("vayon").map(String::as_str), Some("veyyon"));
+        let backend = cfg.make_backend();
+        assert_eq!(backend.refine("hello vayon world"), "hello veyyon world");
+    }
+
+    #[test]
+    fn refine_config_deserializes_overrides_alias() {
+        let toml_str = "enabled = true\nbackend = \"rules\"\n\n[overrides]\nvayon = \"veyyon\"\n";
+        let cfg: RefineConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.dictionary.get("vayon").map(String::as_str), Some("veyyon"));
+    }
+
+    #[test]
+    fn rule_refine_applies_dictionary_rules() {
+        let mut map = HashMap::new();
+        map.insert("chromax".into(), "Chromax".into());
+        let refine = RuleRefine::from_map(map);
+        assert_eq!(refine.refine("open chromax now"), "open Chromax now");
     }
 
     #[test]

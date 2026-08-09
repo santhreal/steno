@@ -447,7 +447,7 @@ fn join(last: Option<char>, chunk: &str) -> String {
 fn sanitize_for_typing(text: &str) -> String {
     // Keep intentional '\n' (voice "new line"). Strip Cc controls AND Unicode
     // Zl/Zp line/paragraph separators (U+2028/U+2029) — Rust's is_control()
-    // only covers Cc, so those would otherwise inject breaks via xdotool/wtype.
+    // only covers Cc, so those would otherwise inject breaks via CGEvent.
     let clean: String = text
         .chars()
         .filter(|&c| c == '\n' || (!c.is_control() && !is_unicode_line_break(c)))
