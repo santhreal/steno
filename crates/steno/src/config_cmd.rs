@@ -109,8 +109,8 @@ pub fn config_set_cmd(config_path: Option<&Path>, key: &str, value: &str) -> Res
         "refine.backend" => {
             let val = value.trim();
             ensure!(
-                matches!(val, "rules"),
-                "invalid refine backend {value:?} — use \"rules\""
+                matches!(val, "rules" | "llm"),
+                "invalid refine backend {value:?} — use \"rules\" or \"llm\""
             );
         }
         k if k.starts_with("ui.colors.") => {
@@ -602,6 +602,11 @@ mod tests {
         assert_eq!(
             config_get(&path, "refine.backend").unwrap().as_deref(),
             Some("rules")
+        );
+        config_set_cmd(Some(&path), "refine.backend", "llm").unwrap();
+        assert_eq!(
+            config_get(&path, "refine.backend").unwrap().as_deref(),
+            Some("llm")
         );
         let _ = fs::remove_file(&path);
     }
