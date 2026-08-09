@@ -158,7 +158,9 @@ fn run_event_loop(
     layer.set_size(SURFACE_W, SURFACE_H);
     layer.commit();
 
-    let pool = SlotPool::new((SURFACE_W * SURFACE_H * 4) as usize, &shm)
+    // Allocate enough for 4x scale (max common HiDPI) to avoid pool exhaustion.
+    let pool_size = (SURFACE_W * SURFACE_H * 4 * 4) as usize;
+    let pool = SlotPool::new(pool_size, &shm)
         .context("cannot create SHM pool")?;
 
     let font = load_font();
@@ -172,6 +174,7 @@ fn run_event_loop(
         qh: qh.clone(),
         width: SURFACE_W,
         height: SURFACE_H,
+        scale: 1,
         first_configure: true,
         exit: false,
         stage,
@@ -243,6 +246,7 @@ struct WaylandState {
     qh: QueueHandle<WaylandState>,
     width: u32,
     height: u32,
+    scale: i32,
     first_configure: bool,
     exit: bool,
     stage: Arc<std::sync::Mutex<Stage>>,
@@ -266,19 +270,24 @@ impl WaylandState {
     }
 
     fn draw(&mut self) {
-        let w = self.width;
-        let h = self.height;
-        let stride = w as i32 * 4;
+        // Render at physical resolution: logical size × scale factor.
+        // The compositor scales the buffer back down to logical size for
+        // display, giving us crisp text on HiDPI outputs.
+        let phys_w = self.width * self.scale as u32;
+        let phys_h = self.height * self.scale as u32;
+        let stride = phys_w as i32 * 4;
 
         // Render to an off-screen pixmap first, before borrowing the SHM
         // pool mutably. This avoids splitting borrows of `self`.
         let stage = self.current_stage();
-        let Some(mut pixmap) = SkPixmap::new(w, h) else { return };
-        render_pill(&mut pixmap, stage, &self.ui, self.font.as_ref());
+        let Some(mut pixmap) = SkPixmap::new(phys_w, phys_h) else { return };
+        // Scale the rendering to physical pixels.
+        let scale_factor = self.scale as f32;
+        render_pill_scaled(&mut pixmap, stage, &self.ui, self.font.as_ref(), scale_factor);
 
         let (buffer, canvas) = match self
             .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .create_buffer(phys_w as i32, phys_h as i32, stride, wl_shm::Format::Argb8888)
         {
             Ok(v) => v,
             Err(e) => {
@@ -297,7 +306,7 @@ impl WaylandState {
         }
 
         let surface = self.layer.wl_surface();
-        surface.damage_buffer(0, 0, w as i32, h as i32);
+        surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
         if let Err(e) = buffer.attach_to(surface) {
             log::warn!("Wayland overlay: cannot attach buffer: {e}");
@@ -312,10 +321,15 @@ impl CompositorHandler for WaylandState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        self.scale = new_factor.max(1);
+        surface.set_buffer_scale(self.scale);
+        // Force a redraw at the new scale on the next poll.
+        self.last_drawn = Stage::Hidden;
     }
+
 
     fn transform_changed(
         &mut self,
@@ -530,6 +544,81 @@ fn render_pill(pixmap: &mut SkPixmap, stage: Stage, ui: &ResolvedUi, font: Optio
             text_x,
             PILL_Y + PILL_H * 0.5,
             LABEL_PX,
+            rgba(c.fg),
+        );
+    }
+}
+
+/// Render the pill at physical-pixel resolution by scaling all metrics.
+/// This produces crisp text and shapes on HiDPI Wayland outputs.
+fn render_pill_scaled(
+    pixmap: &mut SkPixmap,
+    stage: Stage,
+    ui: &ResolvedUi,
+    font: Option<&Font>,
+    scale: f32,
+) {
+    if scale == 1.0 {
+        render_pill(pixmap, stage, ui, font);
+        return;
+    }
+    pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
+    if stage == Stage::Hidden {
+        return;
+    }
+
+    let c = &ui.colors;
+    let s = |v: f32| v * scale;
+
+    // Pill body + hairline border.
+    draw_round_rect(pixmap, s(PILL_X), s(PILL_Y), s(PILL_W), s(PILL_H), s(PILL_R), rgba(c.bg));
+    stroke_round_rect(
+        pixmap,
+        s(PILL_X + 0.5),
+        s(PILL_Y + 0.5),
+        s(PILL_W - 1.0),
+        s(PILL_H - 1.0),
+        s(PILL_R),
+        rgba(c.border),
+        s(1.0),
+    );
+
+    // Icon disc.
+    let icon_y = s(PILL_Y + (PILL_H - ICON) * 0.5);
+    let disc = if stage == Stage::Error {
+        rgba(c.error)
+    } else {
+        rgba(c.icon_bg)
+    };
+    fill_circle(
+        pixmap,
+        s(ICON_X + ICON * 0.5),
+        icon_y + s(ICON * 0.5),
+        s(ICON * 0.5),
+        disc,
+    );
+
+    // Icon glyph.
+    let glyph = rgba(c.icon_fg);
+    match stage {
+        Stage::Recording => draw_wave(pixmap, s(ICON_X), icon_y, glyph),
+        Stage::Transcribing => draw_spinner(pixmap, s(ICON_X), icon_y, glyph),
+        Stage::Done => draw_check(pixmap, s(ICON_X), icon_y, glyph),
+        Stage::Error => draw_x(pixmap, s(ICON_X), icon_y, glyph),
+        Stage::Hidden => {}
+    }
+
+    // Label.
+    if let Some(f) = font {
+        let text = stage_text(ui, stage);
+        let text_x = s(ICON_X + ICON + GAP);
+        draw_text(
+            pixmap,
+            f,
+            text,
+            text_x,
+            s(PILL_Y + PILL_H * 0.5),
+            s(LABEL_PX),
             rgba(c.fg),
         );
     }
