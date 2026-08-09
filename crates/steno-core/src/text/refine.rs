@@ -339,7 +339,7 @@ fn is_closing_punct(c: char) -> bool {
 
 /// Apply the full rule set to transcript text.
 pub fn rule_refine(text: &str) -> String {
-    super::format::strip_verbatim(&rule_refine_with_dict(text, &Dictionary::default()))
+    rule_refine_with_dict(text, &Dictionary::default())
 }
 
 /// Apply the full rule set including dictionary phrase overrides to transcript text.

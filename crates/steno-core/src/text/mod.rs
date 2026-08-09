@@ -15,8 +15,6 @@ pub use dictionary::Dictionary;
 pub use format::FmtState;
 pub use refine::{NullRefine, RefineBackend, RefineConfig, RuleRefine, rule_refine};
 
-pub(crate) const VERBATIM_START: char = '\u{E000}';
-pub(crate) const VERBATIM_END: char = '\u{E001}';
 use serde::Deserialize;
 
 /// Text pipeline configuration (`[text]`).

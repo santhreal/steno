@@ -454,19 +454,4 @@ mod tests {
         assert_eq!(d.apply("Vay on fire"), "veyyon fire");
         assert_eq!(d.apply("vay fire"), "V fire");
     }
-
-    /// With formatting disabled the pipeline outputs refined dictionary text directly.
-    #[test]
-    fn verbatim_markers_never_reach_output_when_formatting_disabled() {
-        let dict = Dictionary::from_entries([("vayon", "veyyon")]);
-        let cfg = crate::text::TextConfig {
-            commands: false,
-            format: false,
-        };
-        let pipe = crate::text::TextPipeline::new(cfg, dict);
-        assert_eq!(
-            pipe.process_stream("vayon is great", Default::default()).0,
-            "veyyon is great"
-        );
-    }
 }
