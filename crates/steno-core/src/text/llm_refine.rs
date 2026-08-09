@@ -287,7 +287,20 @@ impl RefineBackend for LlmRefine {
         };
 
         match self.generate(&prompt) {
-            Ok(corrected) if !corrected.is_empty() => strip_think_blocks(&corrected),
+            Ok(corrected) if !corrected.is_empty() => {
+                let stripped = strip_think_blocks(&corrected);
+                if stripped.is_empty() {
+                    // The model only produced a think block with no
+                    // corrected text after it. Return the original.
+                    log::warn!(
+                        "LLM refine: model output was only a think block; \
+                         using original text"
+                    );
+                    text.to_string()
+                } else {
+                    stripped
+                }
+            }
             Ok(_) => {
                 log::warn!("LLM refine returned empty output; using original text");
                 text.to_string()

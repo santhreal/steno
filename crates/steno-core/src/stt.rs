@@ -100,7 +100,12 @@ impl Transcriber {
         Ok(())
     }
 }
+
 impl Transcriber {
+    /// Create a zeroed dummy transcriber for testing. **Never call this
+    /// in production** — the recognizer is zeroed and will segfault if
+    /// `transcribe_streaming` is called on it.
+    #[doc(hidden)]
     pub fn dummy() -> Self {
         let recognizer: sherpa_onnx::OfflineRecognizer = unsafe { std::mem::zeroed() };
         Self {
