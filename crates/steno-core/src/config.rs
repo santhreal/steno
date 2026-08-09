@@ -412,6 +412,12 @@ impl Config {
                 self.refine.llm.n_gpu_layers,
                 path.display()
             );
+            ensure!(
+                self.refine.llm.n_ctx >= 512,
+                "invalid refine.llm.n_ctx = {} in {}: set it to at least 512 (must fit prompt + max_tokens)",
+                self.refine.llm.n_ctx,
+                path.display()
+            );
         }
 
         Ok(())
@@ -456,6 +462,8 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "refine.llm.n_threads",
         "refine.llm.max_tokens",
         "refine.llm.temperature",
+        "refine.llm.n_ctx",
+        "refine.llm.prompt",
         "refine.backend",
         "refine.dictionary.*",
         "vad.silence_ms",
@@ -563,7 +571,7 @@ fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
         }
         "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" | "max_record_secs"
             | "vad.silence_ms" | "vad.min_speech_ms" | "refine.llm.n_threads"
-            | "refine.llm.max_tokens" =>
+            | "refine.llm.max_tokens" | "refine.llm.n_ctx" =>
         {
             let n: i64 = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be an integer, got {raw:?}")

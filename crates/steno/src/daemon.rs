@@ -692,7 +692,7 @@ fn jail_wav_path(path: &Path) -> Result<PathBuf, ApiError> {
     let canon = path.canonicalize().map_err(|_| {
         ApiError::new(
             "wav_path not found",
-            Some("pass an existing WAV under $HOME, $TMPDIR, or XDG cache/runtime".into()),
+            Some("pass an existing WAV under your home, temp, or cache directory".into()),
         )
     })?;
     if !canon.is_file() {
@@ -702,15 +702,27 @@ fn jail_wav_path(path: &Path) -> Result<PathBuf, ApiError> {
         ));
     }
     let mut roots: Vec<PathBuf> = Vec::new();
-    for key in ["HOME", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"] {
-        if let Some(v) = std::env::var_os(key) {
-            if !v.is_empty() {
-                roots.push(PathBuf::from(v));
+    if cfg!(unix) {
+        for key in ["HOME", "TMPDIR", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"] {
+            if let Some(v) = std::env::var_os(key) {
+                if !v.is_empty() {
+                    roots.push(PathBuf::from(v));
+                }
             }
         }
-    }
-    if roots.iter().all(|r| r.as_os_str() != "/tmp") {
-        roots.push(PathBuf::from("/tmp"));
+        if roots.iter().all(|r| r.as_os_str() != "/tmp") {
+            roots.push(PathBuf::from("/tmp"));
+        }
+    } else if cfg!(windows) {
+        for key in ["USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(key) {
+                if !v.is_empty() {
+                    roots.push(PathBuf::from(v));
+                }
+            }
+        }
+    } else {
+        roots.push(std::env::temp_dir());
     }
     let allowed = roots.iter().any(|root| {
         root.canonicalize()
@@ -720,7 +732,7 @@ fn jail_wav_path(path: &Path) -> Result<PathBuf, ApiError> {
     if !allowed {
         return Err(ApiError::new(
             "wav_path is outside the allowed directories",
-            Some("place the WAV under $HOME or $TMPDIR (symlinks escaping those roots are rejected)".into()),
+            Some("place the WAV under your home or temp directory (symlinks escaping those roots are rejected)".into()),
         ));
     }
     Ok(canon)

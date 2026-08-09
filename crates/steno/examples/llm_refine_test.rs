@@ -33,6 +33,7 @@ fn main() {
             n_gpu_layers: -1,
             n_threads: 4,
             max_tokens: 256,
+            n_ctx: 4096,
             temperature: 0.1,
             prompt: String::new(),
         },

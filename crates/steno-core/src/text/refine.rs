@@ -116,6 +116,11 @@ pub struct LlmRefineConfig {
     /// Maximum tokens to generate in the correction response.
     /// Default: 512 (enough for any single utterance).
     pub max_tokens: u32,
+    /// LLM context window size in tokens. The prompt (system + user +
+    /// chat template overhead) plus `max_tokens` must fit within this.
+    /// Default: 4096. Lower values reduce VRAM; raise it only if
+    /// truncation warnings appear in the log.
+    pub n_ctx: u32,
     /// Sampling temperature. Lower = more deterministic.
     /// Default: 0.1 (conservative corrections).
     pub temperature: f32,
@@ -132,6 +137,7 @@ impl Default for LlmRefineConfig {
             n_gpu_layers: -1,
             n_threads: 4,
             max_tokens: 512,
+            n_ctx: 4096,
             temperature: 0.1,
             prompt: String::new(),
         }

@@ -100,6 +100,26 @@ impl Session {
         Ok(text)
     }
 
+    /// Decode `pcm_i16` (16 kHz mono signed 16-bit) with the same overlay
+    /// / typing rules as [`Self::transcribe_f32`].
+    pub fn transcribe_pcm_i16(&mut self, pcm_i16: &[i16]) -> Result<String> {
+        let text = Self::drive_overlay_stages(&*self.overlay, self.done_flash_ms, || {
+            self.engine.transcribe_pcm_i16(pcm_i16)
+        })?;
+        self.maybe_type(&text)?;
+        Ok(text)
+    }
+
+    /// Decode mono f32 PCM at `sample_rate` (resampling to 16 kHz if
+    /// needed) with the same overlay / typing rules as [`Self::transcribe_f32`].
+    pub fn transcribe_f32_at_rate(&mut self, pcm: &[f32], sample_rate: u32) -> Result<String> {
+        let text = Self::drive_overlay_stages(&*self.overlay, self.done_flash_ms, || {
+            self.engine.transcribe_f32_at_rate(pcm, sample_rate)
+        })?;
+        self.maybe_type(&text)?;
+        Ok(text)
+    }
+
     /// Borrow the overlay sink.
     pub fn overlay(&self) -> &dyn OverlayBackend {
         &*self.overlay

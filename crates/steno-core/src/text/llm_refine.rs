@@ -164,7 +164,7 @@ impl LlmRefine {
         let ctx_params = LlamaContextParams::default()
             .with_n_threads(self.config.n_threads as i32)
             .with_n_threads_batch(self.config.n_threads as i32)
-            .with_n_ctx(std::num::NonZeroU32::new(4096));
+            .with_n_ctx(std::num::NonZeroU32::new(self.config.n_ctx));
         let mut ctx = self.model.new_context(&self.backend, ctx_params)
             .context("failed to create LLM context")?;
 
@@ -298,7 +298,7 @@ impl RefineBackend for LlmRefine {
                     );
                     text.to_string()
                 } else {
-                    stripped
+                    strip_wrapping_quotes(&stripped)
                 }
             }
             Ok(_) => {
@@ -357,6 +357,29 @@ fn strip_think_blocks(text: &str) -> String {
     } else {
         cleaned.to_string()
     }
+}
+
+/// Strip matching wrapping quotes from LLM output. Chat models often wrap
+/// the corrected text in `"..."` or `'...'` despite instructions not to.
+/// Only strips when the first and last characters are the same quote type
+/// and the string contains no other instances of that quote (so multi-line
+/// text with internal quotes is preserved).
+fn strip_wrapping_quotes(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() < 2 {
+        return trimmed.to_string();
+    }
+    let first = trimmed.chars().next().unwrap();
+    let last = trimmed.chars().last().unwrap();
+    if (first == '"' || first == '\'') && first == last {
+        let inner = &trimmed[first.len_utf8()..trimmed.len() - last.len_utf8()];
+        // Only strip if no internal occurrences of the same quote mark
+        // (otherwise we'd corrupt quoted dialogue).
+        if !inner.contains(first) {
+            return inner.trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 #[cfg(test)]
@@ -430,5 +453,46 @@ mod tests {
         let input = format!("{open}just thinking...{close}");
         let result = strip_think_blocks(&input);
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_removes_double_quotes() {
+        assert_eq!(strip_wrapping_quotes("\"Hello world\""), "Hello world");
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_removes_single_quotes() {
+        assert_eq!(strip_wrapping_quotes("'Hello world'"), "Hello world");
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_preserves_internal_quotes() {
+        // Internal double quotes mean we should NOT strip the wrapping ones.
+        assert_eq!(
+            strip_wrapping_quotes(r#""He said "hi" to me""#),
+            r#""He said "hi" to me""#
+        );
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_preserves_unquoted() {
+        assert_eq!(strip_wrapping_quotes("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_preserves_mismatched() {
+        assert_eq!(strip_wrapping_quotes("\"Hello'"), "\"Hello'");
+    }
+
+    #[test]
+    fn strip_wrapping_quotes_too_short() {
+        assert_eq!(strip_wrapping_quotes("\""), "\"");
+        assert_eq!(strip_wrapping_quotes(""), "");
+    }
+
+    #[test]
+    fn default_config_has_n_ctx() {
+        let cfg = LlmRefineConfig::default();
+        assert_eq!(cfg.n_ctx, 4096);
     }
 }
