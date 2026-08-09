@@ -323,7 +323,7 @@ no plugin ABI; compile-time injection only.
 - [x] Typing remains config-armed through API (handler never arms typing)
 - [x] Crash → pidfile/socket cleaned; Caps Lock keysyms restored (watchdog thread + auto-repair on CLI + supervisor restart)
 - [x] Config migrate: `dictionary.toml` → `[refine.dictionary]` (in-memory merge; `[dict.overrides]` also merged on load)
-- [x] `cargo test` / clippy clean across workspace (323 tests, 6 suites, clippy -D warnings; 232 with llm-cuda on axiomexec)
+- [x] `cargo test` / clippy clean across workspace (323 tests, 6 suites, clippy -D warnings; cross-compile clean for Windows + macOS)
 - [x] Remote X verification on axiomexec: daemon start/stop/ping/api status on Xvfb :42 (RTX 4090, CUDA 12.0)
 - [x] Policy: no live-session typing / hotkey / soak from local agent runs
 - [x] Daemon supervisor: auto-restart on crash with exponential backoff
@@ -331,6 +331,11 @@ no plugin ABI; compile-time injection only.
 - [x] LLM refine backend: llama-cpp-2 GGUF, GPU/CPU via config + cargo features (llm + llm-cuda verified on axiomexec)
 - [x] Wayland layer-shell overlay: `zwlr-layer-shell-v1` status pill (smithay-client-toolkit 0.21; `wayland` feature; verified on sway headless)
 - [x] Wayland evdev hotkey: Caps Lock hold-to-talk via `/dev/input/event*` (`wayland` feature; requires `input` group)
+- [x] Pipeline cached once, shared between hotkey + API paths (Arc<TextPipeline>; LLM model loaded once, not per utterance/call)
+- [x] Evdev reader non-blocking: O_NONBLOCK + poll() 100ms timeout (was blocking forever in fetch_events)
+- [x] Wayland overlay HiDPI: scale_factor_changed + set_buffer_scale + render_pill_scaled
+- [x] Cross-platform daemon: Windows (TerminateProcess, LockFileEx, SetConsoleCtrlHandler, CREATE_NO_WINDOW) + macOS (CGEventTap, NSPanel)
+- [x] Cross-platform paths: cache_dir (LOCALAPPDATA on Windows), home_dir (USERPROFILE on Windows)
 
 ---
 
