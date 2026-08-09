@@ -359,10 +359,14 @@ fn main() -> Result<()> {
 }
 
 /// Run the text pipeline + emitter over `samples`. Shared by one-shot and daemon.
+///
+/// The pipeline is passed as `Rc` so the daemon can reuse a single
+/// instance across utterances (the LLM backend loads a GGUF model
+/// once; recreating it per utterance would add seconds of latency).
 pub(crate) fn emit_transcript(
     samples: &[f32],
     transcriber: &steno_core::Transcriber,
-    pipeline: text::TextPipeline,
+    pipeline: std::rc::Rc<text::TextPipeline>,
     raw: bool,
     mode: OutputMode,
     overlay: &dyn OverlayBackend,
@@ -380,6 +384,7 @@ pub(crate) fn emit_transcript(
         error: None,
     }));
     let ctx2 = ctx.clone();
+    let pipeline2 = std::rc::Rc::clone(&pipeline);
     let run_pipeline = move |chunk: &str| {
         let mut c = ctx2.borrow_mut();
         if c.error.is_some() {
@@ -388,7 +393,7 @@ pub(crate) fn emit_transcript(
         let (text, state) = if raw {
             (chunk.trim().to_string(), c.state)
         } else {
-            pipeline.process_stream(chunk, c.state)
+            pipeline2.process_stream(chunk, c.state)
         };
         c.state = state;
         if let Err(e) = c.emitter.push(&text) {

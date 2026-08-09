@@ -853,6 +853,14 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     let record_cfg = audio::RecordConfig::from_config(&cfg)
         .with_device(cli.device.clone());
 
+    // Create the text pipeline once. For the LLM backend, this loads
+    // the GGUF model; recreating it per utterance would add seconds
+    // of latency. The pipeline is shared via Rc across utterances.
+    let pipeline = std::rc::Rc::new(text::TextPipeline::with_refine(
+        text_cfg,
+        cfg.refine.make_backend(),
+    ));
+
     let mut held = false;
     loop {
         match hotkey.next_event_debug(&mut held, false, &SHUTDOWN)? {
@@ -947,14 +955,10 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
                     *g = "transcribing".into();
                 }
                 overlay.set(Stage::Transcribing);
-                let pipeline = TextPipeline::with_refine(
-                    text_cfg,
-                    cfg.refine.make_backend(),
-                );
                 if let Err(e) = emit_transcript(
                     &samples,
                     &transcriber,
-                    pipeline,
+                    std::rc::Rc::clone(&pipeline),
                     cli.raw,
                     mode,
                     overlay.as_ref(),
@@ -1001,14 +1005,21 @@ pub fn supervise(cli: &Cli) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
+    // Reset SHUTDOWN from a possible prior run (e.g. `steno stop` then
+    // `steno start` in the same process). After this, only the signal
+    // handler sets it; we never reset it per iteration.
+    SHUTDOWN.store(false, Ordering::Relaxed);
+
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             return Ok(());
         }
 
-        // Reset SHUTDOWN before each run — a SIGTERM during one iteration
-        // must not prevent the next, and must stop the supervisor.
-        SHUTDOWN.store(false, Ordering::Relaxed);
+        // SHUTDOWN is reset once before the first run. The signal handler
+        // sets it on SIGTERM/SIGINT; run_daemon checks it and exits.
+        // We do NOT reset it per iteration — a signal that arrives between
+        // the check above and a reset would be lost, causing the supervisor
+        // to start a new daemon instead of exiting.
 
         let result = run_daemon(cli);
 
