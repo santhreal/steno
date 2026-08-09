@@ -30,3 +30,7 @@ serde_json = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", features = ["xtest"] }
 
+
+[features]
+default = []
+wayland = ["steno-platform/wayland"]
