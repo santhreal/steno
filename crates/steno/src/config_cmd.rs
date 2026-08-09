@@ -297,6 +297,13 @@ fn effective_value(cfg: &Config, key: &str) -> String {
             .to_string(),
         "refine.enabled" => cfg.refine.enabled.to_string(),
         "refine.backend" => cfg.refine.backend.clone(),
+        "refine.llm.model_path" => cfg.refine.llm.model_path.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unset)".into()),
+        "refine.llm.n_gpu_layers" => cfg.refine.llm.n_gpu_layers.to_string(),
+        "refine.llm.n_threads" => cfg.refine.llm.n_threads.to_string(),
+        "refine.llm.max_tokens" => cfg.refine.llm.max_tokens.to_string(),
+        "refine.llm.temperature" => cfg.refine.llm.temperature.to_string(),
         "vad.silence_ms" => cfg.vad.silence_ms.to_string(),
         "vad.min_speech_ms" => cfg.vad.min_speech_ms.to_string(),
         "vad.start_timeout_secs" => cfg.vad.start_timeout_secs.to_string(),

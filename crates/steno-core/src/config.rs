@@ -375,6 +375,29 @@ impl Config {
             path.display()
         );
 
+        // LLM refine: validate when backend = "llm" so load-time errors
+        // surface before the daemon tries to make_backend.
+        if self.refine.enabled && self.refine.backend == "llm" {
+            ensure!(
+                self.refine.llm.n_threads >= 1,
+                "invalid refine.llm.n_threads = {} in {}: set it to at least 1",
+                self.refine.llm.n_threads,
+                path.display()
+            );
+            ensure!(
+                self.refine.llm.max_tokens >= 1,
+                "invalid refine.llm.max_tokens = {} in {}: set it to at least 1",
+                self.refine.llm.max_tokens,
+                path.display()
+            );
+            ensure!(
+                self.refine.llm.temperature >= 0.0,
+                "invalid refine.llm.temperature = {} in {}: set it to >= 0.0",
+                self.refine.llm.temperature,
+                path.display()
+            );
+        }
+
         Ok(())
     }
 }
@@ -385,6 +408,8 @@ impl Config {
 /// Top-level: `model_path`, `provider`, `type_output`, `n_threads`, `max_record_secs`.
 /// API: `api.enabled`, `api.path`, `api.token`, `api.require_same_uid`.
 /// Refine: `refine.enabled`, `refine.backend`, `refine.dictionary.*`.
+/// LLM: `refine.llm.model_path`, `refine.llm.n_gpu_layers`, `refine.llm.n_threads`,
+/// `refine.llm.max_tokens`, `refine.llm.temperature`.
 /// VAD: `vad.silence_ms`, `vad.min_speech_ms`, `vad.start_timeout_secs`, `vad.speech_threshold`.
 /// DSP: `dsp.target_rms`, `dsp.max_gain`.
 /// UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`.
@@ -410,6 +435,11 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "api.token",
         "api.require_same_uid",
         "refine.enabled",
+        "refine.llm.model_path",
+        "refine.llm.n_gpu_layers",
+        "refine.llm.n_threads",
+        "refine.llm.max_tokens",
+        "refine.llm.temperature",
         "refine.backend",
         "refine.dictionary.*",
         "vad.silence_ms",
@@ -516,7 +546,8 @@ fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             toml_edit::value(b)
         }
         "n_threads" | "ui.done_flash_ms" | "ui.stages.pulse_ms" | "max_record_secs"
-            | "vad.silence_ms" | "vad.min_speech_ms" =>
+            | "vad.silence_ms" | "vad.min_speech_ms" | "refine.llm.n_threads"
+            | "refine.llm.max_tokens" =>
         {
             let n: i64 = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be an integer, got {raw:?}")
@@ -529,7 +560,15 @@ fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
             })?;
             toml_edit::value(n)
         }
-        "vad.speech_threshold" | "dsp.target_rms" | "dsp.max_gain" => {
+        "refine.llm.n_gpu_layers" => {
+            let n: i64 = raw.parse().map_err(|_| {
+                anyhow::anyhow!("value for {key} must be an integer (-1 = all GPU, 0 = CPU), got {raw:?}")
+            })?;
+            toml_edit::value(n)
+        }
+        "vad.speech_threshold" | "dsp.target_rms" | "dsp.max_gain"
+            | "refine.llm.temperature" =>
+        {
             let f: f64 = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be a number, got {raw:?}")
             })?;
