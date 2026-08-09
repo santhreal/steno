@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use steno_core::text::{LlmRefineConfig, RefineBackend, RefineConfig};
+use steno_core::text::{LlmRefineConfig, RefineConfig};
 
 fn main() {
     env_logger::init();
