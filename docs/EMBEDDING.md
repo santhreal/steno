@@ -136,6 +136,36 @@ ASR phrase + subject-verb maps, a/an edges, light fillers, space-before-punct;
 offline tables only, not acoustic-garble repair). `enabled = false` →
 `NullRefine`.
 
+### LLM refine backend (`refine.backend = "llm"`)
+
+For neural GEC + dictionary + formatting in one pass, set `backend = "llm"`
+and configure `[refine.llm]`:
+
+```toml
+[refine]
+backend = "llm"
+
+[refine.llm]
+model_path = "~/.local/share/steno/models/qwen3-0.6b-q4_k_m.gguf"
+n_gpu_layers = -1   # -1 = all to GPU, 0 = CPU only
+n_threads = 4
+max_tokens = 512
+temperature = 0.1
+```
+
+Requires the `llm` cargo feature (CPU) or `llm-cuda` / `llm-vulkan` /
+`llm-metal` for GPU acceleration. Build with:
+
+```sh
+cargo build --features llm-cuda    # NVIDIA
+cargo build --features llm-vulkan  # AMD/Intel/NVIDIA
+cargo build --features llm-metal   # macOS
+cargo build --features llm         # CPU only
+```
+
+If the model fails to load, `make_backend` logs an error and falls back
+to `RuleRefine` so dictation keeps working.
+
 `RefineBackend` implementations must stay pure and offline: there is no network path in
 `steno-core`. Heavier offline GEC belongs behind the same trait.
 ## Session (engine + overlay + optional typer)
