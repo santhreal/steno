@@ -401,8 +401,8 @@ impl Config {
                 path.display()
             );
             ensure!(
-                self.refine.llm.temperature >= 0.0,
-                "invalid refine.llm.temperature = {} in {}: set it to >= 0.0",
+                self.refine.llm.temperature >= 0.0 && self.refine.llm.temperature <= 2.0,
+                "invalid refine.llm.temperature = {} in {}: set it between 0.0 and 2.0",
                 self.refine.llm.temperature,
                 path.display()
             );
