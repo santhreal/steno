@@ -227,7 +227,7 @@ impl LlmRefine {
             }
 
             // Decode the token to text.
-            match self.model.token_to_piece_bytes(new_token, 8, true, None) {
+            match self.model.token_to_piece_bytes(new_token, 64, true, None) {
                 Ok(bytes) => output.push_str(&String::from_utf8_lossy(&bytes)),
                 Err(e) => log::warn!("failed to decode token: {e}"),
             }
