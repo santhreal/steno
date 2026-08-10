@@ -213,6 +213,96 @@ pub fn model_use(
     Ok(())
 }
 
+/// URL for the default STT model (sherpa-onnx Parakeet TDT v3 int8).
+const STT_MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+
+/// URL for the default LLM refine model (LFM2.5-2.6B Q4_K_M GGUF).
+const LLM_MODEL_URL: &str = "https://huggingface.co/LiquidAI/LFM2-2.6B-GGUF/resolve/main/LFM2-2.6B-Q4_K_M.gguf";
+
+/// `steno model download [--llm]`: download the default STT model and
+/// optionally the LLM refine model into the default models directory.
+/// Uses `curl` and `tar` as external commands — no Rust HTTP dependency.
+pub fn model_download(config_path: Option<&Path>, download_llm: bool) -> Result<()> {
+    let models_dir = default_model_dir()?;
+    fs::create_dir_all(&models_dir)
+        .with_context(|| format!("cannot create models dir {}", models_dir.display()))?;
+
+    // --- STT model ---
+    let stt_name = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+    let stt_dir = models_dir.join(stt_name);
+    if stt_dir.is_dir() && stt_dir.join("tokens.txt").is_file() {
+        println!("STT model already present: {}", stt_dir.display());
+    } else {
+        println!("Downloading STT model (Parakeet TDT v3 int8, ~150 MB)...");
+        let archive = models_dir.join(format!("{stt_name}.tar.bz2"));
+        run_curl(STT_MODEL_URL, &archive)?;
+        println!("Extracting...");
+        run_tar_extract(&archive, &models_dir)?;
+        fs::remove_file(&archive).ok();
+        println!("STT model ready: {}", stt_dir.display());
+    }
+
+    // Write model_path if not already set.
+    let cfg_path = resolve_config_path(config_path)?;
+    if config_get(&cfg_path, "model_path")?.is_none() {
+        let rendered = format!("~/.local/share/steno/models/{stt_name}");
+        config_set(&cfg_path, "model_path", &rendered)?;
+        println!("Set model_path = {rendered}");
+    }
+
+    // --- LLM model ---
+    if download_llm {
+        let llm_name = "LFM2.5-2.6B-Q4_K_M.gguf";
+        let llm_path = models_dir.join(llm_name);
+        if llm_path.is_file() {
+            println!("LLM model already present: {}", llm_path.display());
+        } else {
+            println!("Downloading LLM model (LFM2.5-2.6B Q4_K_M, ~1.6 GB)...");
+            run_curl(LLM_MODEL_URL, &llm_path)?;
+            println!("LLM model ready: {}", llm_path.display());
+        }
+
+        if config_get(&cfg_path, "refine.llm.model_path")?.is_none() {
+            let rendered = format!("~/.local/share/steno/models/{llm_name}");
+            config_set(&cfg_path, "refine.llm.model_path", &rendered)?;
+            println!("Set refine.llm.model_path = {rendered}");
+        }
+        if config_get(&cfg_path, "refine.backend")?.is_none() {
+            config_set(&cfg_path, "refine.backend", "llm")?;
+            println!("Set refine.backend = llm");
+        }
+    }
+
+    println!("\nDone. Run `steno` to start dictating.");
+    Ok(())
+}
+
+/// Download a URL to a file using `curl`. Follows redirects, fails on
+/// HTTP errors, shows a progress bar on terminals.
+fn run_curl(url: &str, dest: &Path) -> Result<()> {
+    let status = std::process::Command::new("curl")
+        .args(["-L", "--fail", "--progress-bar", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .context("failed to spawn curl — is it installed?")?;
+    ensure!(status.success(), "curl failed with status {status} for {url}");
+    Ok(())
+}
+
+/// Extract a tar.bz2 archive into a directory.
+fn run_tar_extract(archive: &Path, dest_dir: &Path) -> Result<()> {
+    let status = std::process::Command::new("tar")
+        .args(["xjf"])
+        .arg(archive)
+        .arg("-C")
+        .arg(dest_dir)
+        .status()
+        .context("failed to spawn tar — is it installed?")?;
+    ensure!(status.success(), "tar failed with status {status} for {}", archive.display());
+    Ok(())
+}
+
 /// `steno theme list`
 pub fn theme_list(config_path: Option<&Path>) -> Result<()> {
     let cfg = Config::load(config_path)?;

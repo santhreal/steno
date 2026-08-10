@@ -176,6 +176,12 @@ enum ModelCommand {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Download the default STT model (sherpa-onnx Parakeet TDT v3 int8).
+    Download {
+        /// Also download the default LLM refine model (LFM2.5-2.6B Q4_K_M GGUF).
+        #[arg(long)]
+        llm: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,6 +256,9 @@ fn main() -> Result<()> {
                     &name_or_path,
                     provider.as_deref(),
                 ),
+                ModelCommand::Download { llm } => {
+                    config_cmd::model_download(cli.config.as_deref(), llm)
+                }
             };
         }
         Some(Command::Daemon { supervise }) => {
