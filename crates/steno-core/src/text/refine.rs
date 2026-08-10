@@ -128,6 +128,10 @@ pub struct LlmRefineConfig {
     /// instructs the model to fix grammar, punctuation, and apply
     /// dictionary substitutions without changing meaning.
     pub prompt: String,
+    /// Prepend `/no_think` to the user message to suppress reasoning
+    /// output in Qwen3-family models. Has no effect on other models.
+    /// Default: false. Set to true when using a Qwen3 model.
+    pub no_think: bool,
 }
 
 impl Default for LlmRefineConfig {
@@ -140,6 +144,7 @@ impl Default for LlmRefineConfig {
             n_ctx: 4096,
             temperature: 0.1,
             prompt: String::new(),
+            no_think: false,
         }
     }
 }

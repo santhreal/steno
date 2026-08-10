@@ -431,7 +431,7 @@ impl Config {
 /// API: `api.enabled`, `api.path`, `api.token`, `api.require_same_uid`.
 /// Refine: `refine.enabled`, `refine.backend`, `refine.dictionary.*`.
 /// LLM: `refine.llm.model_path`, `refine.llm.n_gpu_layers`, `refine.llm.n_threads`,
-/// `refine.llm.max_tokens`, `refine.llm.temperature`.
+/// `refine.llm.max_tokens`, `refine.llm.temperature`, `refine.llm.no_think`.
 /// VAD: `vad.silence_ms`, `vad.min_speech_ms`, `vad.start_timeout_secs`, `vad.speech_threshold`.
 /// DSP: `dsp.target_rms`, `dsp.max_gain`.
 /// UI: `ui.theme`, `ui.overlay`, `ui.done_flash_ms`.
@@ -464,6 +464,7 @@ pub fn list_settable_keys() -> &'static [&'static str] {
         "refine.llm.temperature",
         "refine.llm.n_ctx",
         "refine.llm.prompt",
+        "refine.llm.no_think",
         "refine.backend",
         "refine.dictionary.*",
         "vad.silence_ms",
@@ -562,7 +563,7 @@ fn set_dotted(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Ite
 fn typed_toml_value(key: &str, raw: &str) -> Result<toml_edit::Item> {
     let v = match key {
         "type_output" | "ui.overlay" | "ui.stages.show_timer" | "api.enabled"
-            | "refine.enabled" | "api.require_same_uid" =>
+            | "refine.enabled" | "api.require_same_uid" | "refine.llm.no_think" =>
         {
             let b: bool = raw.parse().map_err(|_| {
                 anyhow::anyhow!("value for {key} must be a boolean (true/false), got {raw:?}")

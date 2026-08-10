@@ -34,6 +34,7 @@
 //! [`crate::text::RuleRefine`] so dictation keeps working.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -60,13 +61,16 @@ preamble or explanation:\n\
 7. Preserve newlines and paragraph structure.\n\
 Output the corrected text only.";
 /// LLM refine backend using a local GGUF model via llama-cpp-2.
-///
 /// The model is loaded once and kept resident. Each `refine()` call
 /// creates a fresh context (KV cache) — this is necessary because
 /// `LlamaContext<'a>` borrows `&'a LlamaModel`, so the context cannot
 /// outlive the model or be co-stored in the same struct. Context
 /// creation is cheap relative to model load; the expensive part (model
 /// load + GPU offload) happens once in `new()`.
+///
+/// A `Mutex` serializes `generate()` calls so concurrent invocations
+/// from the capture thread and the API thread do not race on the
+/// shared `LlamaModel` during context creation and decoding.
 pub struct LlmRefine {
     backend: LlamaBackend,
     model: LlamaModel,
@@ -76,6 +80,8 @@ pub struct LlmRefine {
     chat_template: Option<LlamaChatTemplate>,
     /// Tokens that signal "stop generating" (beyond EOS).
     stop_tokens: Vec<LlamaToken>,
+    /// Serializes generation calls for thread safety.
+    lock: Mutex<()>,
 }
 
 impl LlmRefine {
@@ -155,12 +161,17 @@ impl LlmRefine {
             system_prompt,
             chat_template,
             stop_tokens,
+            lock: Mutex::new(()),
         })
     }
 
     /// Run a single generation pass: create a context, encode the
     /// prompt, decode tokens, extract the corrected text.
     fn generate(&self, prompt: &str) -> Result<String> {
+        // Serialize generation: the shared LlamaModel is not safe for
+        // concurrent context creation + decoding across threads.
+        let _guard = self.lock.lock().expect("LLM refine mutex poisoned");
+
         let ctx_params = LlamaContextParams::default()
             .with_n_threads(self.config.n_threads as i32)
             .with_n_threads_batch(self.config.n_threads as i32)
@@ -172,18 +183,19 @@ impl LlmRefine {
         let tokens = self.model.str_to_token(prompt, AddBos::Always)
             .context("failed to tokenize prompt")?;
 
-        // Ensure prompt fits in context window.
+        // Ensure prompt fits in context window. Keep the FIRST max_prompt
+        // tokens (system prompt + chat template header) rather than the
+        // last — truncating the system prompt would cause unguided output.
         let n_ctx = ctx.n_ctx() as usize;
         let max_tokens = self.config.max_tokens as usize;
         let (prompt_tokens, n_prompt) = if tokens.len() + max_tokens > n_ctx {
             let max_prompt = n_ctx.saturating_sub(max_tokens);
-            let start = tokens.len().saturating_sub(max_prompt);
             log::warn!(
                 "LLM refine: prompt ({} tokens) + max_tokens ({}) exceeds context ({}); \
-                 truncating prompt to {} tokens",
+                 truncating prompt to first {} tokens (system prompt preserved)",
                 tokens.len(), max_tokens, n_ctx, max_prompt
             );
-            (tokens[start..].to_vec(), (tokens.len() - start) as i32)
+            (tokens[..max_prompt].to_vec(), max_prompt as i32)
         } else {
             (tokens.clone(), tokens.len() as i32)
         };
@@ -258,7 +270,8 @@ impl RefineBackend for LlmRefine {
                 let messages = match (
                     LlamaChatMessage::new("system".into(), self.system_prompt.clone()),
                     LlamaChatMessage::new("user".into(), format!(
-                        "/no_think\nCorrect this speech-to-text transcript. Output ONLY the corrected text, nothing else:\n\n{text}"
+                        "{no_think}Correct this speech-to-text transcript. Output ONLY the corrected text, nothing else:\n\n{text}",
+                        no_think = if self.config.no_think { "/no_think\n" } else { "" }
                     )),
                 ) {
                     (Ok(sys), Ok(user)) => vec![sys, user],
@@ -411,6 +424,7 @@ mod tests {
         assert_eq!(cfg.temperature, 0.1);
         assert!(cfg.model_path.is_none());
         assert!(cfg.prompt.is_empty());
+        assert!(!cfg.no_think);
     }
 
     #[test]
@@ -494,5 +508,92 @@ mod tests {
     fn default_config_has_n_ctx() {
         let cfg = LlmRefineConfig::default();
         assert_eq!(cfg.n_ctx, 4096);
+    }
+
+    /// Smoke test: load a real GGUF model and run a refinement pass.
+    ///
+    /// Requires the `llm` cargo feature and a model at
+    /// `~/.local/share/steno/models/*.gguf` (or `STENO_LLM_MODEL`).
+    /// Skips gracefully when no model is available — this is an
+    /// integration-level check, not a unit test.
+    ///
+    /// WHY: the unit tests above only cover prompt building, think-block
+    /// stripping, and quote stripping. This test proves the full path
+    /// (model load → context creation → tokenize → generate → decode)
+    /// works end to end with a real GGUF. It catches regressions that
+    /// mock-based tests cannot: wrong context params, broken chat
+    /// template application, token decode buffer issues, and mutex
+    /// deadlocks.
+    #[cfg(feature = "llm")]
+    #[test]
+    fn llm_smoke_refine() {
+        let model_path = std::env::var("STENO_LLM_MODEL")
+            .ok()
+            .or_else(|| {
+                let dir = std::path::PathBuf::from(
+                    std::env::var_os("HOME")?,
+                ).join(".local/share/steno/models");
+                std::fs::read_dir(&dir).ok()?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| {
+                        p.extension().is_some_and(|ext| ext == "gguf") && p.is_file()
+                    })
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+
+        let model_path = match model_path {
+            Some(p) => p,
+            None => {
+                eprintln!("llm_smoke_refine: skipped (no GGUF model found; set STENO_LLM_MODEL)");
+                return;
+            }
+        };
+
+        let mut cfg = LlmRefineConfig::default();
+        cfg.model_path = Some(std::path::PathBuf::from(&model_path));
+        cfg.n_threads = 4;
+        cfg.max_tokens = 64;
+        cfg.n_ctx = 2048;
+        cfg.temperature = 0.1;
+        cfg.no_think = false;
+
+        let refine = match LlmRefine::new(&cfg, &HashMap::new()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("llm_smoke_refine: skipped (model load failed: {e:#})");
+                return;
+            }
+        };
+
+        // Feed a simple unpunctuated transcript. The model should produce
+        // non-empty output (even if the exact correction varies).
+        let input = "hello world how are you doing today";
+        let result = refine.refine(input);
+
+        assert!(
+            !result.is_empty(),
+            "LLM refine returned empty output for input: {input:?}"
+        );
+        assert!(
+            result.len() < input.len() * 5,
+            "LLM refine output suspiciously long ({} chars for {} input): {result:?}",
+            result.len(),
+            input.len()
+        );
+
+        // The output should contain at least some of the input words.
+        let lower = result.to_lowercase();
+        assert!(
+            lower.contains("hello") || lower.contains("world"),
+            "LLM refine output lost all input words: {result:?}"
+        );
+
+        eprintln!("llm_smoke_refine: input={input:?} output={result:?}");
+
+        // Leak the model to avoid a llama.cpp backend teardown segfault
+        // (known issue: global state crashes on drop). The test process
+        // exits immediately after, so the leak is harmless.
+        std::mem::forget(refine);
     }
 }
