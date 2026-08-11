@@ -96,33 +96,6 @@ impl Hotkey {
         }
     }
 
-    /// Spawn a shutdown watchdog that restores Caps Lock via X11 when the
-    /// daemon is killed. No-op on evdev (no X11 mapping to restore).
-    pub fn spawn_shutdown_watchdog(
-        &self,
-        shutdown: &'static std::sync::atomic::AtomicBool,
-    ) -> std::thread::JoinHandle<()> {
-        match self {
-            Self::X11(h) => h.spawn_shutdown_watchdog(shutdown),
-            #[cfg(feature = "wayland")]
-            Self::Evdev(_) => {
-                // No X11 mapping to restore; spawn a no-op thread that
-                // just waits for shutdown and turns off the LED.
-                std::thread::Builder::new()
-                    .name("steno-evdev-watchdog".into())
-                    .spawn(move || {
-                        while !shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                        }
-                        let _ = std::fs::write(
-                            "/sys/class/leds/capslock/brightness",
-                            "0",
-                        );
-                    })
-                    .expect("cannot spawn evdev watchdog thread")
-            }
-        }
-    }
 }
 
 impl HotkeySource for Hotkey {

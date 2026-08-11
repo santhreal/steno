@@ -5,48 +5,43 @@
 //! key still reaches the focused app, nothing is swallowed). Modifier
 //! keys never cancel.
 //!
-//! Caps Lock is fully swallowed while the daemon runs: the keycode is
-//! remapped to NoSymbol for the daemon's lifetime (restored on exit),
-//! so the Lock modifier can never latch and caps state never toggles:
-//! a passive grab alone would NOT stop XKB from locking caps on press.
+//! Caps Lock is swallowed via a SYNC passive grab: when the grabbed key
+//! fires, the X server freezes the keyboard and queues the event without
+//! processing the XKB Lock action. We receive the event, call
+//! `XAllowEvents(AsyncKeyboard)` to discard it and unfreeze, so the Lock
+//! modifier never latches and caps state never toggles. No keymap
+//! modification is needed — when the daemon dies (even SIGKILL), the X
+//! server automatically releases the passive grab and Caps Lock works
+//! normally again instantly.
 //!
 //! Failures are loud: if another client already owns the grab (e.g. a
 //! GNOME custom shortcut on the same key), we say so instead of
 //! silently never firing.
-//!
-//! **SIGKILL / stuck Caps Lock.** `kill -9` never runs `Drop`, so the
-//! keycode can stay mapped to NoSymbol and Caps Lock appears dead even
-//! with the daemon gone. Recovery:
-//! 1. `restore_caps_lock_mapping()` (also called from `steno stop`)
-//! 2. Next `grab_caps_lock()` resolves the keycode via keysym, then a
-//!    persisted keycode cache, then PC-keyboard fallback 66: looking
-//!    up Caps_Lock by keysym alone fails once the mapping is empty.
-//!
-//! Manual fix: `xmodmap -e 'keycode 66 = Caps_Lock'`
 
 use anyhow::{Context, Result, anyhow, bail};
 use crate::traits::HotkeyEvent;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xinput::{self, XIEventMask};
 use x11rb::protocol::xproto::{
-    ConnectionExt as _, GrabMode, Keycode, Keysym, ModMask, Window,
+    Allow, ConnectionExt as _, GrabMode, Keycode, Keysym, ModMask, Window,
 };
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 use x11rb_protocol::xauth;
 
-/// X11 keysym for Caps Lock (`XK_Caps_Lock`).
-const XK_CAPS_LOCK: Keysym = 0xffe5;
-/// `NoSymbol` -- remapping the Caps Lock keycode to this disables the
-/// caps toggle entirely while keeping the raw key events.
+/// X11 `CurrentTime` (0) — used with `allow_events` to release queued events.
+const CURRENT_TIME: u32 = 0;
 const NO_SYMBOL: Keysym = 0;
 /// Typical PC keyboard Caps Lock keycode (evdev / xfree86).
 const FALLBACK_CAPS_KEYCODE: Keycode = 66;
+/// How long after Press a second key counts as a cancel vs. pre-held.
+const CANCEL_GRACE: Duration = Duration::from_millis(120);
+/// X11 keysym for Caps Lock.
+const XK_CAPS_LOCK: Keysym = 0xffe5;
 
 
 /// Global X11 Caps Lock push-to-talk hotkey grabber.
@@ -55,12 +50,6 @@ pub struct Hotkey {
     root: Window,
     /// Caps Lock keycode -- the push-to-talk trigger.
     trigger: Keycode,
-    /// Keysyms the trigger keycode had before we remapped it to
-    /// NoSymbol; restored on Drop. Synthesized as plain Caps_Lock when
-    /// a previous crashed daemon left it unmapped.
-    orig_keysyms: Vec<Keysym>,
-    /// Slot width from GetKeyboardMapping — Drop must pad to this count.
-    keysyms_per_keycode: usize,
     /// Modifier keycodes (Shift/Ctrl/Alt/Super/Lock/Mod*): never cancel.
     modifiers: Vec<Keycode>,
     /// Device id of the "Virtual core XTEST keyboard" slave: its fake key
@@ -80,12 +69,6 @@ pub struct Hotkey {
     /// passes its own `held` into the inherent methods.
     source_held: bool,
 }
-
-/// Window after the activating Caps Lock press during which non-trigger
-/// XI2 key events are recorded as pre-held (auto-repeat), not Cancel.
-/// After grace, those keycodes stay suppressed; a *different* key cancels.
-const CANCEL_GRACE: Duration = Duration::from_millis(150);
-
 /// Restores Caps Lock keysyms if a prior daemon left the keycode mapped
 /// to NoSymbol (SIGKILL / failed grab before `Hotkey` was constructed).
 ///
@@ -249,14 +232,16 @@ fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
 }
 
 impl Hotkey {
-    /// Grab Caps Lock system-wide on the default display, and remap the
-    /// keycode to NoSymbol so the caps toggle is dead while we run.
+    /// Grab Caps Lock system-wide on the default display. Uses a SYNC
+    /// passive grab so the XKB Lock action never fires while we own the
+    /// grab. No keymap modification — Caps Lock works normally the
+    /// instant the daemon exits (even SIGKILL).
     pub fn grab_caps_lock() -> Result<Self> {
         let (conn, screen_num) = connect_x11()
             .context("cannot connect to X11: is DISPLAY set?")?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
-        let (trigger, mapped, per_slot) = resolve_caps_trigger(&conn)?.ok_or_else(|| {
+        let (trigger, _mapped, _per_slot) = resolve_caps_trigger(&conn)?.ok_or_else(|| {
             anyhow!(
                 "keyboard has no Caps Lock keycode: cannot bind it. \
                  If Caps Lock was blackholed by a killed daemon, run: \
@@ -264,30 +249,13 @@ impl Hotkey {
             )
         })?;
 
-        // Swallow caps: remap the keycode to NoSymbol for our lifetime.
-        // A passive grab alone does NOT stop XKB from latching Lock on
-        // press; with NoSymbol the key gets no action and the toggle can
-        // never fire. Key events still flow, so our grab still works.
-        // SIGKILL skips Drop, leaving NoSymbol — recover so Drop / stop
-        // can hand Caps_Lock back.
-        let orig_keysyms = recover_orig_keysyms(mapped);
+        // No keymap remap: a SYNC passive grab freezes the keyboard when
+        // Caps Lock fires, preventing the XKB Lock action from latching.
+        // We call XAllowEvents(AsyncKeyboard) to discard the event and
+        // unfreeze. When the daemon dies (even SIGKILL), the X server
+        // releases the grab automatically — Caps Lock works again
+        // instantly with no recovery needed.
         remember_caps_keycode(trigger);
-        let dead = nosymbol_mapping(per_slot);
-        conn.change_keyboard_mapping(1, trigger, dead.len() as u8, &dead)?
-            .check()
-            .context("cannot remap Caps Lock to NoSymbol")?;
-
-        // Own the connection in a guard so ANY failure after remap restores
-        // Caps Lock (Hotkey does not exist yet, so Hotkey::Drop cannot run).
-        let mut guard = CapsRemapGuard {
-            conn: Some(conn),
-            root,
-            trigger,
-            orig_keysyms,
-            keysyms_per_keycode: per_slot,
-            masks: Vec::new(),
-            armed: true,
-        };
 
         // NumLock (Mod2) and friends are sticky; grab every combo so the
         // hotkey still fires when they are on.
@@ -298,34 +266,42 @@ impl Hotkey {
             ModMask::LOCK | ModMask::M2,
         ];
 
+        let mut masks = Vec::new();
         for mask in mask_list {
-            let cookie = guard.conn.as_ref().unwrap()
+            let cookie = conn
                 .grab_key(
                     false, // owner_events: we alone get the events
                     root,
                     mask,
                     trigger,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
+                    GrabMode::ASYNC, // pointer: not affected
+                    GrabMode::SYNC,  // keyboard: freeze to prevent XKB Lock latch
                 )
                 .with_context(|| format!("XGrabKey(CapsLock, mask={mask:?}) request failed"))?;
             if let Err(e) = cookie.check() {
+                // Release any grabs we already established before bailing.
+                for m in &masks {
+                    let _ = conn.ungrab_key(trigger, root, *m);
+                }
                 bail!(
                     "XGrabKey(CapsLock) failed ({e}). Another client may already own that \
                      shortcut: remove any GNOME, KDE, sxhkd, or custom window manager binding \
                      on Caps Lock and retry."
                 );
             }
-            guard.masks.push(mask);
+            masks.push(mask);
         }
-        guard.conn.as_ref().unwrap().flush()?;
+        conn.flush()?;
 
         // Passive cancel listener: raw key presses for every key, still
         // delivered to the focused app (nothing is grabbed or swallowed).
-        let version = xinput::xi_query_version(guard.conn.as_ref().unwrap(), 2, 0)?
+        let version = xinput::xi_query_version(&conn, 2, 0)?
             .reply()
             .context("XIQueryVersion failed: XInput2 is required for cancel-any-key")?;
         if version.major_version < 2 {
+            for m in &masks {
+                let _ = conn.ungrab_key(trigger, root, *m);
+            }
             bail!(
                 "X server has XInput {}.{}, need 2.0+ for cancel-any-key: upgrade the X server",
                 version.major_version,
@@ -333,7 +309,7 @@ impl Hotkey {
             );
         }
         xinput::xi_select_events(
-            guard.conn.as_ref().unwrap(),
+            &conn,
             root,
             &[xinput::EventMask {
                 deviceid: xinput::Device::ALL_MASTER.into(),
@@ -342,13 +318,13 @@ impl Hotkey {
         )?
         .check()
         .context("XISelectEvents(RawKeyPress) failed")?;
-        let modifier_reply = guard.conn.as_ref().unwrap()
+        let modifier_reply = conn
             .get_modifier_mapping()?
             .reply()
             .context("GetModifierMapping failed")?;
         let modifiers = modifier_reply.keycodes;
         // Find the XTEST slave so its synthetic keys can't cancel.
-        let xtest_device = xinput::xi_query_device(guard.conn.as_ref().unwrap(), xinput::Device::ALL)
+        let xtest_device = xinput::xi_query_device(&conn, xinput::Device::ALL)
             .ok()
             .and_then(|c| c.reply().ok())
             .and_then(|r| {
@@ -361,15 +337,12 @@ impl Hotkey {
                     }
                 })
             });
-        guard.conn.as_ref().unwrap().flush()?;
+        conn.flush()?;
 
-        let (conn, trigger, orig_keysyms, keysyms_per_keycode, masks) = guard.into_parts();
         Ok(Self {
             conn,
             root,
             trigger,
-            orig_keysyms,
-            keysyms_per_keycode,
             modifiers,
             xtest_device,
             press_at: None,
@@ -391,49 +364,6 @@ impl Hotkey {
         while let Ok(Some(_)) = self.conn.poll_for_event() {}
     }
 
-    /// Spawn a background thread that restores Caps Lock when `shutdown`
-    /// is set — a safety net for SIGTERM arriving while the main thread
-    /// is blocked in a long sherpa transcription.
-    ///
-    /// The signal handler sets `shutdown`; this thread detects it within
-    /// 200 ms and restores the keysyms via its own X11 connection. Without
-    /// it, `steno stop` escalates to SIGKILL after 10 s, `Drop` never runs,
-    /// and Caps Lock stays mapped to NoSymbol (blackholed).
-    ///
-    /// Fire-and-forget: in the normal exit path `Drop` restores first
-    /// (redundant, harmless — same keysyms written twice). On SIGKILL the
-    /// thread is killed too, but by then it has long finished; the final
-    /// fallback is `repair_caps_lock_if_needed()` in `steno stop`/`start`.
-    pub fn spawn_shutdown_watchdog(
-        &self,
-        shutdown: &'static AtomicBool,
-    ) -> thread::JoinHandle<()> {
-        let trigger = self.trigger;
-        let orig_keysyms = self.orig_keysyms.clone();
-        let keysyms_per_keycode = self.keysyms_per_keycode;
-
-        thread::Builder::new()
-            .name("steno-caps-watchdog".into())
-            .spawn(move || {
-                while !shutdown.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(200));
-                }
-                // Restore via our own connection — the main thread may
-                // be stuck in sherpa and unable to flush its connection.
-                if let Ok((conn, _)) = connect_x11_for_restore() {
-                    let restore = caps_lock_restore_keysyms(&orig_keysyms);
-                    let payload = pad_keysyms(restore, keysyms_per_keycode);
-                    let _ = conn.change_keyboard_mapping(
-                        1,
-                        trigger,
-                        payload.len() as u8,
-                        &payload,
-                    );
-                    let _ = conn.flush();
-                }
-            })
-            .expect("cannot spawn caps watchdog thread")
-    }
 
     /// The resolved trigger keycode (used by the off-host test harness).
     #[allow(dead_code)]
@@ -516,8 +446,15 @@ impl Hotkey {
                         continue;
                     }
                     if *held {
-                        continue; // auto-repeat
+                        // Auto-repeat: unfreeze and discard, then continue.
+                        let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
+                        let _ = self.conn.flush();
+                        continue;
                     }
+                    // Unfreeze the keyboard and discard the queued event
+                    // so the XKB Lock action never fires.
+                    let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
+                    let _ = self.conn.flush();
                     *held = true;
                     self.press_at = Some(Instant::now());
                     self.suppress_cancel.clear();
@@ -527,6 +464,10 @@ impl Hotkey {
                     if !*held || ev.detail != self.trigger {
                         continue;
                     }
+                    // Unfreeze the keyboard so the next event (auto-repeat
+                    // press or a different key) can arrive for peek-ahead.
+                    let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
+                    let _ = self.conn.flush();
                     // X auto-repeat emits a release+press pair with the
                     // SAME timestamp for a held key. Peek past unrelated
                     // events (esp. XI2 RawKeyPress) for a matching press —
@@ -592,69 +533,14 @@ impl Hotkey {
 
 impl Drop for Hotkey {
     fn drop(&mut self) {
+        // Release the passive grabs. No keymap restore needed — we never
+        // modified the keymap. The X server releases grabs automatically
+        // on connection close (even SIGKILL), but explicit ungrab is
+        // cleaner for normal shutdown.
         for mask in &self.masks {
             let _ = self.conn.ungrab_key(self.trigger, self.root, *mask);
         }
-        // Hand Caps Lock back: restore the keycode's original keysyms so
-        // the caps toggle works again once the daemon exits.
-        // SIGKILL never runs Drop — see recover_orig_keysyms / PLATFORM_TRAITS.
-        let restore = caps_lock_restore_keysyms(&self.orig_keysyms);
-        let payload = pad_keysyms(restore, self.keysyms_per_keycode);
-        let _ = self.conn.change_keyboard_mapping(
-            1,
-            self.trigger,
-            payload.len() as u8,
-            &payload,
-        );
         let _ = self.conn.flush();
-    }
-}
-
-/// Restores Caps Lock if `grab_caps_lock` fails after remapping to NoSymbol
-/// but before `Hotkey` exists (so `Hotkey::Drop` cannot run).
-struct CapsRemapGuard {
-    conn: Option<RustConnection>,
-    root: Window,
-    trigger: Keycode,
-    orig_keysyms: Vec<Keysym>,
-    keysyms_per_keycode: usize,
-    masks: Vec<ModMask>,
-    armed: bool,
-}
-
-impl CapsRemapGuard {
-    fn into_parts(mut self) -> (RustConnection, Keycode, Vec<Keysym>, usize, Vec<ModMask>) {
-        self.armed = false;
-        (
-            self.conn.take().expect("CapsRemapGuard conn"),
-            self.trigger,
-            std::mem::take(&mut self.orig_keysyms),
-            self.keysyms_per_keycode,
-            std::mem::take(&mut self.masks),
-        )
-    }
-}
-
-impl Drop for CapsRemapGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Some(conn) = self.conn.as_ref() else {
-            return;
-        };
-        for mask in &self.masks {
-            let _ = conn.ungrab_key(self.trigger, self.root, *mask);
-        }
-        let restore = caps_lock_restore_keysyms(&self.orig_keysyms);
-        let payload = pad_keysyms(restore, self.keysyms_per_keycode);
-        let _ = conn.change_keyboard_mapping(
-            1,
-            self.trigger,
-            payload.len() as u8,
-            &payload,
-        );
-        let _ = conn.flush();
     }
 }
 
@@ -671,12 +557,6 @@ impl crate::HotkeySource for Hotkey {
     }
 }
 
-/// Keysyms Drop / grab-failure cleanup write back for the Caps Lock keycode.
-///
-/// Always the captured (or SIGKILL-recovered) mapping — never NoSymbol.
-fn caps_lock_restore_keysyms(orig_keysyms: &[Keysym]) -> &[Keysym] {
-    orig_keysyms
-}
 
 /// If a prior daemon was SIGKILL'd, Drop never ran and the Caps Lock keycode
 /// may still be all-NoSymbol. Synthesize the conventional Caps_Lock mapping
@@ -731,10 +611,6 @@ fn pad_keysyms(keysyms: &[Keysym], per_slot: usize) -> Vec<Keysym> {
     out
 }
 
-/// Remap payload that disables the caps toggle while leaving raw key events.
-fn nosymbol_mapping(keysyms_per_keycode: usize) -> Vec<Keysym> {
-    vec![NO_SYMBOL; keysyms_per_keycode.max(1)]
-}
 
 /// Resolve the Caps Lock keycode even when a dead daemon left it NoSymbol.
 ///
@@ -840,49 +716,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn recover_preserves_real_caps_lock_mapping() {
-        let orig = vec![XK_CAPS_LOCK, NO_SYMBOL, NO_SYMBOL, NO_SYMBOL];
-        assert_eq!(recover_orig_keysyms(orig.clone()), orig);
-    }
-
-    #[test]
-    fn recover_synthesizes_caps_lock_when_all_nosymbol() {
-        // Prior daemon SIGKILL'd before Drop — keycode stuck on NoSymbol.
-        assert_eq!(
-            recover_orig_keysyms(vec![NO_SYMBOL, NO_SYMBOL, NO_SYMBOL, NO_SYMBOL]),
-            vec![XK_CAPS_LOCK]
-        );
-    }
-
-    #[test]
-    fn recover_synthesizes_caps_lock_for_empty_mapping() {
-        assert_eq!(recover_orig_keysyms(vec![]), vec![XK_CAPS_LOCK]);
-    }
-
-    #[test]
-    fn nosymbol_mapping_matches_slot_count() {
-        assert_eq!(nosymbol_mapping(4), vec![NO_SYMBOL; 4]);
-        assert_eq!(nosymbol_mapping(1), vec![NO_SYMBOL]);
-        // X11 should never report 0, but keep Drop/grab safe.
-        assert_eq!(nosymbol_mapping(0), vec![NO_SYMBOL]);
-    }
-
-    #[test]
-    fn drop_restore_payload_is_exactly_orig_keysyms() {
-        let recovered = recover_orig_keysyms(vec![NO_SYMBOL; 4]);
-        assert_eq!(caps_lock_restore_keysyms(&recovered), &[XK_CAPS_LOCK]);
-
-        let live = vec![XK_CAPS_LOCK, 0xffe5, NO_SYMBOL, NO_SYMBOL];
-        assert_eq!(caps_lock_restore_keysyms(&live), live.as_slice());
-    }
-
-    #[test]
-    fn swallow_then_recover_round_trip_yields_caps_lock() {
-        let dead = nosymbol_mapping(4);
-        assert!(dead.iter().all(|&k| k == NO_SYMBOL));
-        assert_eq!(recover_orig_keysyms(dead), vec![XK_CAPS_LOCK]);
-    }
     #[test]
     fn preheld_key_does_not_cancel_after_grace() {
         let mut suppress = HashSet::new();

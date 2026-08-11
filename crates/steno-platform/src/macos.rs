@@ -175,23 +175,6 @@ impl Hotkey {
         }
     }
 
-    /// No-op watchdog on macOS: Caps Lock is handled by CGEventTap, not X11
-    /// keymap manipulation, so there is nothing to restore on kill.
-    pub fn spawn_shutdown_watchdog(
-        &self,
-        shutdown: &'static std::sync::atomic::AtomicBool,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::Builder::new()
-            .name("steno-mac-watchdog".into())
-            .spawn(move || {
-                while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                // Nothing to restore on macOS — the CGEventTap's Drop
-                // disables it. This thread exists only for API parity.
-            })
-            .expect("cannot spawn macOS watchdog thread")
-    }
 }
 
 impl Drop for Hotkey {

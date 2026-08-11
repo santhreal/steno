@@ -221,23 +221,6 @@ impl Hotkey {
         }
     }
 
-    /// No-op watchdog on Windows: Caps Lock is handled by the keyboard hook,
-    /// not X11 keymap manipulation, so there is nothing to restore on kill.
-    pub fn spawn_shutdown_watchdog(
-        &self,
-        shutdown: &'static std::sync::atomic::AtomicBool,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::Builder::new()
-            .name("steno-win-watchdog".into())
-            .spawn(move || {
-                while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                // Nothing to restore on Windows — the keyboard hook's Drop
-                // uninstalls it. This thread exists only for API parity.
-            })
-            .expect("cannot spawn Windows watchdog thread")
-    }
 }
 
 impl Drop for Hotkey {

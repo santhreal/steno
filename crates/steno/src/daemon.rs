@@ -974,14 +974,10 @@ impl ApiHandler for DaemonHandler {
 
 /// Foreground worker: load model once, grab hotkey, loop utterances.
 pub fn run_daemon(cli: &Cli) -> Result<()> {
-    // Install panic hook so if the daemon panics while Caps Lock is mapped to NoSymbol,
-    // we attempt best-effort restoration before dying.
+    // Install panic hook so panics are logged to the file, not just stderr.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Log the panic message so it survives in the log file, not just stderr.
         log::error!("daemon panic: {info}");
-        #[cfg(target_os = "linux")]
-        let _ = restore_caps_lock_mapping();
         default_panic(info);
     }));
 
@@ -1079,10 +1075,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         pid_guard.api_stop = Some(api_stop);
     }
 
-    // Watchdog: if SIGTERM arrives while the main thread is blocked in a
-    // long sherpa transcription, this thread restores Caps Lock before
-    // `steno stop` escalates to SIGKILL (which skips Drop).
-    let _watchdog = hotkey.spawn_shutdown_watchdog(&SHUTDOWN);
     // Ready: model loaded AND hotkey grabbed. Tell the parent.
     if let Ok(ready) = ready_path() {
         let _ = fs::write(&ready, format!("{}", std::process::id()));
@@ -1292,9 +1284,6 @@ pub fn supervise(cli: &Cli) -> Result<()> {
                         }
                     }
                 }
-                #[cfg(target_os = "linux")]
-                let _ = restore_caps_lock_mapping();
-
                 // Wait with backoff, but check SHUTDOWN so SIGTERM during
                 // backoff exits immediately.
                 let start = std::time::Instant::now();
