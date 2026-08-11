@@ -152,7 +152,7 @@ n_threads = 4
 max_tokens = 512
 n_ctx = 4096        # context window (prompt + max_tokens must fit)
 temperature = 0.1
-```
+# no_think = false   # set true for Qwen3 reasoning models to skip <think>
 
 Requires the `llm` cargo feature (CPU) or `llm-cuda` / `llm-vulkan` /
 `llm-metal` for GPU acceleration. Build with:
@@ -166,6 +166,13 @@ cargo build --features llm         # CPU only
 
 If the model fails to load, `make_backend` logs an error and falls back
 to `RuleRefine` so dictation keeps working.
+
+`LlmRefine` loads the GGUF model once and keeps it resident. Each
+`refine()` call creates a fresh context (KV cache), serializes generation
+with an internal mutex (one utterance at a time), and strips
+`<think>...</think>` blocks from reasoning models. The `no_think` config
+flag (default `false`) injects `/no_think` into the prompt for Qwen3
+models to skip the reasoning phase entirely.
 
 `RefineBackend` implementations must stay pure and offline: there is no network path in
 `steno-core`. Heavier offline GEC belongs behind the same trait.

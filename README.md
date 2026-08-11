@@ -1,8 +1,9 @@
 # steno
 
-Minimal, fully offline speech-to-text dictation for Linux. Speak; text comes
-out. No cloud. Default decode uses CUDA; set `provider = "cpu"` for CPU-only
-hosts. One-shot or a background daemon.
+Minimal, fully offline speech-to-text dictation for Linux, macOS, and
+Windows. Speak; text comes out. No cloud. Default decode uses CUDA on
+Linux; set `provider = "cpu"` for CPU-only hosts, or `"metal"` on macOS.
+One-shot or a background daemon.
 
 `steno` records from your microphone, transcribes locally with
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Parakeet TDT), cleans
@@ -22,9 +23,10 @@ The budget is approved, see attached.
 
 ## Build
 
-You need a Rust toolchain, a C compiler, and the sherpa-onnx CUDA shared
-libraries (or a CPU build) available at build time via
-`SHERPA_ONNX_LIB_DIR` (e.g. `/usr/local/lib/sherpa-onnx`).
+You need a Rust toolchain (1.85+), a C compiler, and the sherpa-onnx
+shared libraries available at build time via `SHERPA_ONNX_LIB_DIR`.
+
+### Linux (CUDA or CPU)
 
 ```bash
 export SHERPA_ONNX_LIB_DIR=/usr/local/lib/sherpa-onnx
@@ -32,25 +34,87 @@ cargo build -p steno --release
 cargo install --path crates/steno
 ```
 
-Workspace crates: `steno-core` (embeddable engine), `steno-platform`
-(OS backends), `steno` (CLI/daemon binary).
+For CUDA LLM offload (NVIDIA GPU), build with the `llm-cuda` feature.
+nvcc 12.8 is incompatible with GCC 13's `_Float128` in system headers;
+use g++-12 as the CUDA host compiler:
 
-There is no cargo `--features cuda` flag: pick the execution provider in
-config (`provider = "cuda"` default, or `"cpu"`). CUDA builds still need the
-system CUDA/cuDNN install the sherpa libs were built against. Unknown
-provider values fail closed (no silent fallback).
+```bash
+export CUDA_PATH=/usr/local/cuda-12.8
+export CMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12
+export CMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc
+cargo build -p steno --release --features llm-cuda
+cargo install --path crates/steno --features llm-cuda
+```
 
-**CPU CI.** GitHub Actions (`.github/workflows/ci-cpu.yml`) and the local
-gate `./scripts/ci-cpu.sh` download the CPU sherpa-onnx shared libs
-(`linux-x64-shared-lib`, never CUDA), then run
-`cargo test -p steno-core --lib`, `cargo test -p steno-platform --lib`,
-and clippy on `steno-core` / `steno-platform` / `steno`. No daemon,
-DISPLAY, or GPU soak.
+For Vulkan LLM offload (AMD/Intel/NVIDIA):
+
+```bash
+cargo build -p steno --release --features llm-vulkan
+```
+
+### macOS (Metal or CPU)
+
+```bash
+export SHERPA_ONNX_LIB_DIR=/path/to/sherpa-onnx-macos-lib
+cargo build -p steno --release --features llm-metal
+cargo install --path crates/steno --features llm-metal
+```
+
+Set `provider = "metal"` in config for Metal GPU decode. Accessibility
+permission is required for hotkey and typing: grant it in System Settings
+> Privacy & Security > Accessibility.
+
+### Windows
+
+```bash
+set SHERPA_ONNX_LIB_DIR=C:\path\to\sherpa-onnx-windows-lib
+cargo build -p steno --release
+cargo install --path crates/steno
+```
+
+The daemon API uses a named pipe at `\\.\pipe\steno` instead of a Unix
+socket. Typing uses SendInput Unicode keystrokes. `curl` and `tar`
+(included in Windows 10 1803+) are needed for `steno model download`.
+
+### Cargo features
+
+| Feature | Effect |
+| --- | --- |
+| (default) | STT only, no LLM refine |
+| `llm` | CPU-only LLM refine via llama-cpp-2 |
+| `llm-cuda` | LLM refine with NVIDIA CUDA offload |
+| `llm-vulkan` | LLM refine with Vulkan offload (AMD/Intel/NVIDIA) |
+| `llm-metal` | LLM refine with macOS Metal offload |
+| `wayland` | Wayland overlay (layer-shell) and evdev hotkey backends |
+
+There is no cargo `--features cuda` flag for STT: pick the execution
+provider in config (`provider = "cuda"` default, `"cpu"`, or `"metal"`).
+CUDA builds still need the system CUDA/cuDNN install the sherpa libs were
+built against. Unknown provider values fail closed (no silent fallback).
+
+### CI
+
+GitHub Actions runs three workflows:
+
+- **cpu-ci** (`.github/workflows/ci-cpu.yml`): unit tests + clippy with
+  default, `llm`, and `wayland` features, across stable/beta/1.85. No
+  daemon, DISPLAY, or GPU.
+- **cross-compile** (`.github/workflows/ci-cross.yml`): `cargo check` +
+  clippy for Windows and macOS targets (best-effort).
+- **release-check** (`.github/workflows/release-check.yml`):
+  `cargo publish --dry-run` for each crate.
 
 ## Get a model
 
 `steno` uses a sherpa-onnx **model directory** (encoder/decoder/joiner
 ONNX + `tokens.txt`). Recommended: NVIDIA Parakeet TDT v3 int8.
+
+```bash
+steno model download              # STT model (~150 MB)
+steno model download --llm        # STT + LLM refine model (~1.6 GB extra)
+```
+
+Or download the STT model manually:
 
 ```bash
 mkdir -p ~/.local/share/steno/models
@@ -194,6 +258,33 @@ that file, never the operator XDG path. Copy entries under
 `[refine.dictionary]` and remove
 the old file; `steno` never rewrites your config for you. Restart the
 daemon after edits (`steno restart`).
+
+### LLM refine
+
+For higher-quality correction, swap the rule-based refiner for a local LLM.
+Build with `--features llm` (CPU), `llm-cuda` (NVIDIA), `llm-vulkan`
+(AMD/Intel/NVIDIA), or `llm-metal` (macOS). Then set `backend = "llm"`:
+
+```toml
+[refine]
+backend = "llm"
+
+[refine.llm]
+model_path = "~/.local/share/steno/models/LFM2.5-2.6B-Q4_K_M.gguf"
+n_gpu_layers = -1          # -1 = all layers to GPU, 0 = CPU only
+n_threads = 4              # CPU threads for prompt processing
+max_tokens = 512           # max generated tokens per utterance
+temperature = 0.1          # 0.0 = greedy, >0 = sampled
+n_ctx = 4096               # context window (must fit prompt + max_tokens)
+# prompt = "..."           # override the built-in system prompt
+# no_think = false         # set true for Qwen3 reasoning models to skip <think>
+```
+
+Download the default LLM model with `steno model download --llm`, or
+supply any GGUF chat model. If the model cannot be loaded (missing file,
+corrupt GGUF, OOM), steno logs the error and falls back to `RuleRefine`
+so dictation keeps working. The LLM refine backend serializes generation
+calls with a mutex; only one utterance is refined at a time.
 ## Configuration
 
 Everything has a default; `~/.config/steno/config.toml` overrides it; CLI
@@ -229,6 +320,15 @@ backend = "rules"      # RuleRefine; unknown names warn and use rules
 "handy" = "Dictate"
 "main street" = "Main Street"
 "um" = ""
+
+[refine.llm]            # only used when backend = "llm"
+# model_path = "~/.local/share/steno/models/LFM2.5-2.6B-Q4_K_M.gguf"
+n_gpu_layers = -1       # -1 = all to GPU, 0 = CPU only
+n_threads = 4
+max_tokens = 512
+temperature = 0.1
+n_ctx = 4096
+# no_think = false       # set true for Qwen3 reasoning models
 [ui]
 overlay = true         # bottom-center status overlay
 done_flash_ms = 1200   # how long done/error stays visible
@@ -392,5 +492,15 @@ fresh decode state: nothing leaks between them.
 - If no speech starts within `start_timeout_secs`, `steno` exits non-zero
   with an error, so scripts can tell silence apart from an empty result.
 - Typing: X11/XWayland uses `xdotool`; pure Wayland (`WAYLAND_DISPLAY` without `DISPLAY`) uses `wtype` (optional `ydotool` fallback). Install with `sudo apt install wtype`. Caps Lock hotkey still needs `DISPLAY` (XWayland); otherwise the daemon errors with corrective actions. Overlay on pure Wayland is a no-op until layer-shell lands; use stdout mode or XWayland for the pill.
+- X11 connection: `steno` connects via the filesystem socket in
+  `/tmp/.X11-unix/` first, then falls back to the abstract Unix socket
+  (`\0/tmp/.X11-unix/Xn`) used by GDM/GNOME XWayland sessions that do not
+  create a filesystem socket. `XAUTHORITY` must be set (or
+  `~/.Xauthority` must exist) for MIT-MAGIC-COOKIE authentication.
+- Caps Lock grab: if another application (GNOME custom shortcut, sxhkd,
+  KDE, or a custom window manager) already owns Caps Lock, the daemon
+  errors with a corrective hint. If Caps Lock feels "dead" after a hard
+  kill, run `steno stop` or `steno start` to restore the X11 mapping.
+  Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
   is no language flag.
