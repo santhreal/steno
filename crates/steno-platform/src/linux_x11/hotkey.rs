@@ -491,7 +491,11 @@ impl Hotkey {
                         }
                     }
                     if is_repeat {
-                        // Drop deferred XI2 noise from this coalesce window.
+                        // The auto-repeat KeyPress triggered a new SYNC
+                        // freeze. Unfreeze and discard it so the XKB Lock
+                        // action never fires, then drop deferred XI2 noise.
+                        let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
+                        let _ = self.conn.flush();
                         continue;
                     }
                     self.pending.extend(deferred);
