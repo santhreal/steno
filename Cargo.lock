@@ -1927,6 +1927,7 @@ dependencies = [
  "wayland-client",
  "windows-sys 0.61.2",
  "x11rb",
+ "x11rb-protocol",
 ]
 
 [[package]]
