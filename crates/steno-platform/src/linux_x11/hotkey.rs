@@ -188,7 +188,7 @@ fn connect_abstract(display_num: &str) -> Result<(RustConnection, usize)> {
             bail!("abstract socket path too long: {path}");
         }
         std::ptr::copy_nonoverlapping(
-            bytes.as_ptr() as *const u8,
+            bytes.as_ptr(),
             addr.sun_path.as_mut_ptr() as *mut u8,
             bytes.len(),
         );
