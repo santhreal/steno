@@ -15,14 +15,23 @@ pub type Rgba = [u8; 4];
 /// Resolved overlay palette after theme preset + optional hex overrides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemePalette {
+    /// Background fill color.
     pub bg: Rgba,
+    /// Foreground text color.
     pub fg: Rgba,
+    /// Border outline color.
     pub border: Rgba,
+    /// Icon badge background color.
     pub icon_bg: Rgba,
+    /// Icon glyph color.
     pub icon_fg: Rgba,
+    /// Secondary metadata text color.
     pub meta: Rgba,
+    /// Drop shadow color.
     pub shadow: Rgba,
+    /// Accent highlight color.
     pub accent: Rgba,
+    /// Error stage color.
     pub error: Rgba,
 }
 
@@ -34,9 +43,13 @@ pub struct ResolvedUi {
     /// `null` / `none` / `off` still yield the pill palette here; platform
     /// `create` maps those names to [`crate::overlay::NullOverlay`].
     pub theme: String,
+    /// Resolved color palette after theme preset and hex overrides.
     pub colors: ThemePalette,
+    /// Stage labels and transition timing.
     pub stages: UiStages,
+    /// Whether the status overlay is shown.
     pub overlay: bool,
+    /// How long the done or error stage stays visible before hide, in milliseconds.
     pub done_flash_ms: u64,
 }
 

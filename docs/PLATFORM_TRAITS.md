@@ -98,28 +98,31 @@ path. Unknown themes fall back to pill colors (fail-open).
 
 ### Caps Lock (Linux X11)
 
-Hold Caps Lock to record; release to stop. While the daemon runs, the Caps
-Lock keycode is remapped to `NoSymbol` so XKB cannot latch Lock, as a passive
-`XGrabKey` alone does not prevent the toggle. `Hotkey`'s `Drop` restores the
-original keysyms (ungrab + `ChangeKeyboardMapping`) on clean exit, panic
-unwinding, or graceful stop.
+Hold Caps Lock to record; release to stop. The daemon installs a SYNC
+passive grab (`XGrabKey` with `GrabMode::SYNC` for keyboard mode) on the
+Caps Lock keycode. When Caps Lock fires, the X server freezes the keyboard
+and queues the event without processing the XKB Lock action. The daemon
+receives the event, calls `XAllowEvents(AsyncKeyboard, CurrentTime)` to
+discard it and unfreeze, so the Lock modifier never latches and caps state
+never toggles.
 
-**SIGKILL limitation.** `kill -9` / `SIGKILL` never runs `Drop`, so the
-keycode stays mapped to `NoSymbol` and Caps Lock appears "dead" even with
-the daemon gone. Looking up `Caps_Lock` by keysym alone also fails in that
-state, so older builds could not self-heal on the next start.
+No keymap modification occurs. When the daemon dies for any reason
+(SIGKILL, crash, normal exit), the X server automatically releases the
+passive grab and Caps Lock works normally again instantly. There is no
+`Drop` keymap restore, no watchdog thread, and no RAII guard.
 
-Recovery order now:
+`Hotkey`'s `Drop` only ungrabs the key (explicit cleanup for normal
+shutdown; the X server would release it on connection close anyway).
 
-1. `steno stop` / `steno start` call `restore_caps_lock_mapping()` (skipped while a live daemon is detected, never while a live daemon intentionally holds NoSymbol):
-   resolves the keycode via live keysym, then `~/.cache/steno/caps_keycode`,
-   then PC fallback **66**, and writes plain `Caps_Lock` when the slot is
-   all-`NoSymbol`.
-2. Next `grab_caps_lock()` uses the same resolver before remapping again.
-3. Failed grabs after remap use an RAII guard so Caps Lock is restored even
-   when `Hotkey` was never constructed.
+Legacy recovery: `restore_caps_lock_mapping()` and `repair_caps_lock()`
+remain for backward compatibility with daemons killed under the old
+NoSymbol-remap approach. `steno stop` / `steno start` call them
+automatically (skipped while a live daemon is detected). They resolve the
+keycode via live keysym, then `~/.cache/steno/caps_keycode`, then PC
+fallback **66**, and write plain `Caps_Lock` when the slot is
+all-`NoSymbol`.
 
-Manual recovery on a typical PC keyboard (X11 keycode **66**):
+Manual recovery from an old-daemon NoSymbol remnant:
 
 ```bash
 xmodmap -e 'keycode 66 = Caps_Lock'
@@ -127,10 +130,7 @@ xmodmap -e 'keycode 66 = Caps_Lock'
 steno stop
 ```
 
-Restore helpers (`recover_orig_keysyms`, `nosymbol_mapping`,
-`caps_lock_restore_keysyms`, `resolve_caps_trigger`) are unit-tested without
-a live display. `steno stop` waits longer before escalating to SIGKILL so
-a clean `Drop` is more likely mid-transcription.
+`resolve_caps_trigger` is unit-tested without a live display.
 
 
 ### Linux Wayland (`linux_wayland` + `linux` facade)

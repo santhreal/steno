@@ -106,10 +106,12 @@ impl Dictionary {
         Self { entries }
     }
 
+/// True when no entries are present.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+/// Number of entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }

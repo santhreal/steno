@@ -9,7 +9,9 @@
 /// Method names match the concrete X11 pill API so call sites can move
 /// to `Box<dyn OverlayBackend>` without renaming.
 pub trait OverlayBackend: Send {
+    /// Set the current status stage.
     fn set(&self, stage: Stage);
+    /// Hold the final stage visible for `ms` milliseconds.
     fn flash(&self, ms: u64);
     /// True while the backend is live (fail-open UIs may return false).
     fn active(&self) -> bool;
@@ -19,6 +21,7 @@ pub trait OverlayBackend: Send {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NullOverlay;
 impl NullOverlay {
+    /// Construct a null overlay.
     pub fn new() -> Self {
         Self
     }
@@ -63,6 +66,7 @@ impl OverlayBackend for Box<dyn OverlayBackend> {
 }
 
 
+/// Status stage shown by the overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     /// Window unmapped (idle between utterances).
@@ -71,7 +75,9 @@ pub enum Stage {
     Recording,
     /// Decode in flight (shown as "Processing" with spinner).
     Transcribing,
+    /// Decode complete (shown as a checkmark).
     Done,
+    /// Decode failed (shown as an X).
     Error,
 }
 

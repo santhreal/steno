@@ -57,6 +57,7 @@ fn stage_text(ui: &ResolvedUi, stage: Stage) -> &str {
     }
 }
 
+/// Animated X11 status pill backed by a render thread.
 pub struct Overlay {
     tx: Option<Sender<Stage>>,
     /// Set when the overlay thread failed (no X, no font, X error).
@@ -88,6 +89,7 @@ impl Overlay {
         }
     }
 
+    /// Set the current status stage.
     pub fn set(&self, stage: Stage) {
         if let Some(tx) = &self.tx {
             // A dead overlay thread must never block dictation.

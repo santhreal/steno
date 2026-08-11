@@ -14,6 +14,7 @@ use crate::text::TextPipeline;
 /// in `steno-core` without depending on the platform crate. Platform
 /// backends implement both traits; hosts may also adapt any sink.
 pub trait InjectTyper: Send {
+/// Type the given text into the focused window.
     fn type_text(&mut self, text: &str) -> Result<()>;
 }
 

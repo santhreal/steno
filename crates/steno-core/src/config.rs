@@ -25,14 +25,23 @@ use crate::text::{Dictionary, RefineConfig, TextConfig};
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiColors {
+    /// Background fill color.
     pub bg: Option<String>,
+    /// Foreground text color.
     pub fg: Option<String>,
+    /// Border outline color.
     pub border: Option<String>,
+    /// Icon badge background color.
     pub icon_bg: Option<String>,
+    /// Icon glyph color.
     pub icon_fg: Option<String>,
+    /// Secondary metadata text color.
     pub meta: Option<String>,
+    /// Drop shadow color.
     pub shadow: Option<String>,
+    /// Accent highlight color.
     pub accent: Option<String>,
+    /// Error stage color.
     pub error: Option<String>,
 }
 
@@ -44,7 +53,9 @@ pub struct UiStages {
     pub recording: String,
     /// Label for [`crate::overlay::Stage::Transcribing`] (default `"Processing"`).
     pub transcribing: String,
+    /// Label for [`crate::overlay::Stage::Done`] (default `"Done"`).
     pub done: String,
+    /// Label for [`crate::overlay::Stage::Error`] (default `"Error"`).
     pub error: String,
     /// Show the live recording timer in the meta slot.
     pub show_timer: bool,
@@ -104,6 +115,7 @@ impl Default for UiConfig {
     }
 }
 
+/// Top-level steno configuration loaded from `config.toml`.
 // deny_unknown_fields: a typo'd key must fail loudly, not be silently
 // ignored. Every nested table sets it too.
 #[derive(Debug, Clone, Deserialize)]
@@ -127,9 +139,13 @@ pub struct Config {
     /// out, so no script or test can inject keystrokes into a live
     /// session without the user having armed this file first.
     pub type_output: bool,
+    /// Voice activity detection settings (`[vad]`).
     pub vad: VadConfig,
+    /// Digital signal processing settings (`[dsp]`).
     pub dsp: DspConfig,
+    /// Text post-processing and refinement settings (`[text]`).
     pub text: TextConfig,
+    /// Status overlay configuration (`[ui]`).
     pub ui: UiConfig,
     /// Legacy `[dict.overrides]` — merged into `refine.dictionary` on load.
     pub dict: DictConfig,
@@ -144,6 +160,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DictConfig {
+    /// Word-to-replacement map merged into `[refine.dictionary]` on load.
     pub overrides: HashMap<String, String>,
 }
 

@@ -34,8 +34,10 @@ fn is_closing(c: char) -> bool {
 pub struct FmtState {
     /// Next alphabetic char starts a sentence (begin forced uppercase).
     pub capitalize_next: bool,
-    pub in_dquote: bool,
-    pub in_squote: bool,
+/// Inside a double-quote pair.
+pub in_dquote: bool,
+/// Inside a single-quote pair.
+pub in_squote: bool,
     /// Last emitted char was an opener (`(`, `[`, `{`, or opening quote):
     /// suppresses the space before the next char.
     pub last_open: bool,

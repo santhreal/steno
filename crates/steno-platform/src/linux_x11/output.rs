@@ -23,6 +23,7 @@ pub struct Emitter {
 }
 
 impl Emitter {
+    /// Construct an emitter for the given output mode.
     pub fn new(mode: OutputMode) -> Self {
         Self { mode, last: None }
     }

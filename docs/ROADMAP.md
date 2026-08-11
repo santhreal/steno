@@ -28,7 +28,7 @@
 - [x] RuleRefine post-STT + RefineBackend hook (offline unified refinement: GEC + vocabulary)
 - [x] GPU soak (100× en.wav) + nvidia-smi memory delta - **axiomexec / disposable VM only** (not operator workstation)
 - [x] Socket framing fuzz / partial lines (`api::server` framing_* tests)
-- [x] Caps Lock restore Drop helpers + SIGKILL recovery docs (keycode 66)
+- [x] Caps Lock SYNC passive grab (no keymap modification; SIGKILL-safe; legacy NoSymbol repair retained)
 - [x] axiomexec remote Xvfb verify: **PASS** on `axiomexec@192.168.0.135` (Tailscale SSH still interactive-auth blocked)
 - [x] `utterance.*` streaming API (DaemonHandler text-only stop + `Event::UtteranceDone`)
 - [x] README + EMBEDDING.md synced for single config / refine / API / embed hooks

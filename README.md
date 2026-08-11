@@ -162,9 +162,12 @@ it; pass `--foreground` to `steno start` or `steno restart` to run in the termin
 Daemon pid/ready/log files live under `$XDG_CACHE_HOME/steno/` when that
 env is set, otherwise `~/.cache/steno/`. Make sure no other app (GNOME
 custom shortcut, etc.) already owns Caps Lock.
-If Caps Lock ever feels "dead" after a hard kill (`kill -9` / crashed
-daemon), run `steno stop` (or `steno start`): it restores the X11
-mapping. Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
+If another application (GNOME custom shortcut, sxhkd, KDE) already owns
+Caps Lock, the daemon errors with a corrective hint. Caps Lock is grabbed
+with a SYNC passive grab that never modifies the keymap: if the daemon
+dies for any reason (including `kill -9`), Caps Lock works again
+instantly with no repair needed. Legacy `steno stop` still repairs
+NoSymbol damage from older daemon builds.
 
 **Record and print (one-shot).** Run `steno`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to
@@ -499,8 +502,10 @@ fresh decode state: nothing leaks between them.
   `~/.Xauthority` must exist) for MIT-MAGIC-COOKIE authentication.
 - Caps Lock grab: if another application (GNOME custom shortcut, sxhkd,
   KDE, or a custom window manager) already owns Caps Lock, the daemon
-  errors with a corrective hint. If Caps Lock feels "dead" after a hard
-  kill, run `steno stop` or `steno start` to restore the X11 mapping.
-  Manual fallback: `xmodmap -e 'keycode 66 = Caps_Lock'`.
+  errors with a corrective hint. The grab uses SYNC mode with no keymap
+  modification, so `kill -9` or a crash leaves Caps Lock working
+  instantly. Older builds that remapped to NoSymbol may have left
+  damage; `steno stop` or `xmodmap -e 'keycode 66 = Caps_Lock'` repairs
+  that.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
   is no language flag.

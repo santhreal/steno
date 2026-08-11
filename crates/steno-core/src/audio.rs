@@ -18,9 +18,13 @@ use crate::dsp::{self, Endpoint, VadConfig, VadEvent, STT_RATE};
 pub struct RecordConfig {
     /// Substring match on the input device name; `None` = system default.
     pub device: Option<String>,
+    /// Hard cap on a single recording.
     pub max_duration: Duration,
+    /// Voice activity detection and endpointing parameters.
     pub vad: VadConfig,
+    /// Target RMS level for gain normalization.
     pub target_rms: f32,
+    /// Maximum gain applied during normalization.
     pub max_gain: f32,
 }
 impl RecordConfig {

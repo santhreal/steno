@@ -55,11 +55,14 @@ use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 /// Error returned by handler methods. Mapped onto a failed [`Response`].
 #[derive(Debug, Clone)]
 pub struct ApiError {
+    /// Error message describing what went wrong.
     pub error: String,
+    /// Optional remediation hint shown to the caller.
     pub hint: Option<String>,
 }
 
 impl ApiError {
+    /// Construct an error with a message and an optional hint.
     pub fn new(error: impl Into<String>, hint: impl Into<Option<String>>) -> Self {
         Self {
             error: error.into(),
@@ -67,6 +70,7 @@ impl ApiError {
         }
     }
 
+    /// Construct a standard "not implemented" error for the given op name.
     pub fn not_implemented(op: &str) -> Self {
         Self::new(
             format!("{op} is not implemented"),
@@ -78,6 +82,7 @@ impl ApiError {
     }
 }
 
+/// Return type for handler methods: an optional JSON result or an error.
 pub type ApiResult = std::result::Result<Option<Value>, ApiError>;
 
 /// Hard cap on a single NDJSON request line (bytes). Prevents a same-uid
@@ -199,11 +204,13 @@ pub struct UtteranceBuffer {
 }
 
 impl UtteranceBuffer {
+    /// Begin a new utterance session, clearing any prior samples.
     pub fn start(&mut self) {
         self.active = true;
         self.samples.clear();
     }
 
+    /// Decode and append base64 PCM samples to the active utterance.
     pub fn append_b64(&mut self, pcm_f32_b64: &str) -> Result<(), ApiError> {
         if !self.active {
             return Err(ApiError::new(
@@ -236,6 +243,7 @@ impl UtteranceBuffer {
         Ok(())
     }
 
+    /// Discard the active utterance and clear buffered samples.
     pub fn cancel(&mut self) {
         self.active = false;
         self.samples.clear();
@@ -253,14 +261,17 @@ impl UtteranceBuffer {
         Ok(std::mem::take(&mut self.samples))
     }
 
+    /// Return whether an utterance session is active.
     pub fn is_active(&self) -> bool {
         self.active
     }
 
+    /// Return the number of buffered samples.
     pub fn len(&self) -> usize {
         self.samples.len()
     }
 
+    /// Return whether the buffer holds no samples.
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }
@@ -269,6 +280,7 @@ impl UtteranceBuffer {
 /// Decode hook used by [`UtteranceApiHandler`] so tests can inject a mock
 /// transcoder without loading a GPU model.
 pub trait PcmTranscoder: Send + Sync {
+    /// Transcribe PCM samples and return the resulting text.
     fn transcribe_pcm(&self, samples: &[f32]) -> Result<String, ApiError>;
 }
 
@@ -296,6 +308,7 @@ pub struct UtteranceApiHandler<T: PcmTranscoder> {
 }
 
 impl<T: PcmTranscoder> UtteranceApiHandler<T> {
+    /// Construct a handler with the given PCM transcoder.
     pub fn new(transcoder: T) -> Self {
         Self {
             buf: Mutex::new(UtteranceBuffer::default()),
@@ -354,8 +367,11 @@ impl<T: PcmTranscoder> ApiHandler for UtteranceApiHandler<T> {
 /// Linux `SO_PEERCRED` identity for an accepted Unix-stream peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerCred {
+    /// Process ID of the peer.
     pub pid: u32,
+    /// User ID of the peer.
     pub uid: u32,
+    /// Group ID of the peer.
     pub gid: u32,
 }
 

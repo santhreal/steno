@@ -25,25 +25,38 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Op {
+    /// Health check. Returns a static `pong` payload.
     #[serde(rename = "ping")]
     Ping,
+    /// Daemon status query. Returns process metadata and current stage.
     #[serde(rename = "status")]
     Status,
+    /// One-shot transcription from a file path or inline PCM.
     #[serde(rename = "transcribe")]
     Transcribe {
+        /// Path to a WAV file on disk to transcribe.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wav_path: Option<PathBuf>,
+        /// Standard-base64 little-endian f32 PCM at 16 kHz mono.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pcm_f32_b64: Option<String>,
     },
+    /// Begin a streaming utterance session.
     #[serde(rename = "utterance.start")]
     UtteranceStart,
+    /// Append audio to the active utterance session.
     #[serde(rename = "utterance.audio")]
-    UtteranceAudio { pcm_f32_b64: String },
+    UtteranceAudio {
+        /// Standard-base64 left-endian f32 PCM at 16 kHz mono.
+        pcm_f32_b64: String,
+    },
+    /// Finalize the active utterance session and return the transcript.
     #[serde(rename = "utterance.stop")]
     UtteranceStop,
+    /// Discard the active utterance session without transcribing.
     #[serde(rename = "utterance.cancel")]
     UtteranceCancel,
+    /// Request daemon shutdown.
     #[serde(rename = "shutdown")]
     Shutdown,
 }
@@ -67,6 +80,7 @@ pub struct Response {
 }
 
 impl Response {
+    /// Build a successful response carrying an optional result payload.
     pub fn ok(id: u64, result: Option<Value>) -> Self {
         Self {
             id,
@@ -77,6 +91,7 @@ impl Response {
         }
     }
 
+    /// Build a failed response carrying an error message and optional hint.
     pub fn err(id: u64, error: impl Into<String>, hint: Option<String>) -> Self {
         Self {
             id,
@@ -92,18 +107,28 @@ impl Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
+    /// Daemon lifecycle stage change notification.
     #[serde(rename = "stage")]
-    Stage { stage: String },
+    Stage {
+        /// Current stage name.
+        stage: String,
+    },
+    /// Partial or final transcript text.
     #[serde(rename = "transcript")]
     Transcript {
+        /// Transcript text for this segment.
         text: String,
+        /// Whether this transcript is final (no further updates expected).
         #[serde(rename = "final")]
         final_: bool,
     },
     /// Final text for a completed `utterance.*` session (fan-out reserved;
     /// `utterance.stop` also returns the same text in the `Response` result).
     #[serde(rename = "utterance.done")]
-    UtteranceDone { text: String },
+    UtteranceDone {
+        /// Final transcribed text for the utterance.
+        text: String,
+    },
 }
 
 /// Serialize `value` as a single NDJSON line (trailing `\n`).

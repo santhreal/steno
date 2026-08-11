@@ -27,6 +27,7 @@ pub use crate::traits::{HotkeyEvent, OutputMode};
 /// XWayland); evdev direct input on pure Wayland (with `wayland` feature).
 #[allow(clippy::large_enum_variant)]
 pub enum Hotkey {
+    /// X11 grab backend (including XWayland).
     X11(linux_x11::Hotkey),
     #[cfg(feature = "wayland")]
     Evdev(Box<linux_wayland::hotkey::EvdevHotkey>),
@@ -58,6 +59,7 @@ impl Hotkey {
         }
     }
 
+    /// Drain queued events without blocking.
     pub fn drain_pending(&mut self) {
         match self {
             Self::X11(h) => h.drain_pending(),
@@ -66,6 +68,7 @@ impl Hotkey {
         }
     }
 
+    /// Poll for the next hotkey event, tracking held state.
     pub fn next_event(&mut self, held: &mut bool) -> Result<HotkeyEvent> {
         match self {
             Self::X11(h) => h.next_event(held),
@@ -74,6 +77,7 @@ impl Hotkey {
         }
     }
 
+    /// Poll for the next hotkey event with debug and shutdown control.
     pub fn next_event_debug(
         &mut self,
         held: &mut bool,
@@ -118,11 +122,14 @@ impl HotkeySource for Hotkey {
 
 /// Progressive emitter: X11 `xdotool` or Wayland `wtype` by session.
 pub enum Emitter {
+    /// X11 `xdotool` typing backend.
     X11(linux_x11::Emitter),
+    /// Wayland `wtype` typing backend.
     Wayland(linux_wayland::Emitter),
 }
 
 impl Emitter {
+    /// Construct the emitter for the active session's typing backend.
     pub fn new(mode: OutputMode) -> Self {
         match typing_backend() {
             TypingBackend::Xdotool => Self::X11(linux_x11::Emitter::new(mode)),
@@ -130,6 +137,7 @@ impl Emitter {
         }
     }
 
+    /// Emit one processed chunk.
     pub fn push(&mut self, chunk: &str) -> Result<()> {
         match self {
             Self::X11(e) => e.push(chunk),
@@ -137,6 +145,7 @@ impl Emitter {
         }
     }
 
+    /// True once at least one chunk has been written.
     pub fn started(&self) -> bool {
         match self {
             Self::X11(e) => e.started(),
@@ -144,6 +153,7 @@ impl Emitter {
         }
     }
 
+    /// Finish the stream.
     pub fn finish(&mut self) -> Result<()> {
         match self {
             Self::X11(e) => e.finish(),

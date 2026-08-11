@@ -402,3 +402,16 @@ Embedders running the socket server or embedding custom socket handlers use the 
 | `overlay` | `Stage` + `OverlayBackend` (no OS deps) |
 
 Platform crate: `HotkeySource`, `Typer`, `create(&UiConfig)`, Linux/Win/mac backends.
+
+
+## Runnable example
+
+`crates/steno-core/examples/embed.rs` demonstrates every embedding
+pattern in one file: config loading, explicit model path, WAV
+transcription, raw decode, text reprocessing, custom `RefineBackend`,
+`Session` with `FnOverlay`, programmatic config without a file, and
+overlay stage driving without a model.
+
+```sh
+cargo run -p steno-core --example embed -- /path/to/model-dir recording.wav
+```

@@ -36,6 +36,7 @@ use super::llm_refine::LlmRefine;
 
 /// Pluggable post-STT refinement. Implementations must be pure and offline.
 pub trait RefineBackend: Send + Sync {
+/// Return the refined transcript text.
     fn refine(&self, text: &str) -> String;
 }
 
@@ -52,14 +53,17 @@ impl RefineBackend for NullRefine {
 /// Default offline rule backend (`backend = "rules"`).
 #[derive(Debug, Default, Clone)]
 pub struct RuleRefine {
+/// Phrase replacement dictionary applied during refinement.
     pub dictionary: Dictionary,
 }
 
 impl RuleRefine {
+/// Construct from a pre-built dictionary.
     pub fn new(dictionary: Dictionary) -> Self {
         Self { dictionary }
     }
 
+/// Construct from a phrase-to-replacement map.
     pub fn from_map(map: HashMap<String, String>) -> Self {
         Self {
             dictionary: Dictionary::from_map(map),

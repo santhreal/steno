@@ -60,6 +60,7 @@ pub fn typing_backend_from(display: Option<&str>, wayland: Option<&str>) -> Typi
         TypingBackend::Xdotool
     }
 }
+/// Select the hotkey backend from explicit env snapshots (unit-testable).
 pub fn hotkey_backend_from(display: Option<&str>, wayland: Option<&str>) -> HotkeyBackend {
     if has_display_var(display) {
         HotkeyBackend::X11
@@ -73,6 +74,7 @@ pub fn hotkey_backend_from(display: Option<&str>, wayland: Option<&str>) -> Hotk
         HotkeyBackend::X11
     }
 }
+/// Select the overlay backend from explicit env snapshots (unit-testable).
 pub fn overlay_backend_from(display: Option<&str>, wayland: Option<&str>) -> OverlayBackendChoice {
     if has_display_var(display) {
         OverlayBackendChoice::X11

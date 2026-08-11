@@ -110,8 +110,11 @@ pub fn create_typer(mode: OutputMode) -> Box<dyn InjectTyper> {
 
 /// Aggregated platform backends for hotkey, typing, and status overlay.
 pub struct PlatformBackends {
+    /// Hotkey source bound to Caps Lock.
     pub hotkey: Box<dyn HotkeySource>,
+    /// Keystroke injector for the selected output mode.
     pub typer: Box<dyn InjectTyper>,
+    /// Status overlay backend.
     pub overlay: Box<dyn OverlayBackend>,
 }
 

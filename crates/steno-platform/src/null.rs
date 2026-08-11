@@ -13,6 +13,7 @@ pub use steno_core::overlay::NullOverlay;
 pub struct NullHotkey;
 
 impl NullHotkey {
+    /// Construct a null hotkey source.
     pub fn new() -> Self {
         Self
     }
@@ -33,6 +34,7 @@ impl HotkeySource for NullHotkey {
 pub struct NullTyper;
 
 impl NullTyper {
+    /// Construct a null typer.
     pub fn new() -> Self {
         Self
     }
