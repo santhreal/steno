@@ -1,0 +1,94 @@
+name: cross-compile
+
+# Cross-compile check for Windows and macOS targets.
+# Verifies that platform-specific code compiles without a native toolchain.
+# Does not run tests (no cross-runtime) — cargo check + clippy only.
+#
+# sherpa-onnx `shared` feature links against pre-built shared libs that are
+# only available for the host platform, so these jobs use --no-default-features
+# is not an option (sherpa-onnx is a hard dep). Instead, cargo check runs
+# build scripts which download the target-platform archive; if that fails,
+# the job is allowed to fail with a warning (best-effort cross-compile).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl \
+            libasound2-dev \
+            libx11-dev libxi-dev libxrandr-dev libxext-dev libxfixes-dev \
+            mingw-w64
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cross-win-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cross-win-${{ runner.os }}-
+
+      - name: cargo check (Windows target)
+        run: cargo check -p steno-core -p steno-platform -p steno --target x86_64-pc-windows-gnu
+
+      - name: cargo clippy (Windows target)
+        run: cargo clippy -p steno-core -p steno-platform -p steno --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  macos-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl \
+            libasound2-dev \
+            libx11-dev libxi-dev libxrandr-dev libxext-dev libxfixes-dev
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cross-macos-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            cross-macos-${{ runner.os }}-
+
+      - name: cargo check (macOS target)
+        run: cargo check -p steno-core -p steno-platform -p steno --target aarch64-apple-darwin
+
+      - name: cargo clippy (macOS target)
+        run: cargo clippy -p steno-core -p steno-platform -p steno --target aarch64-apple-darwin --all-targets -- -D warnings

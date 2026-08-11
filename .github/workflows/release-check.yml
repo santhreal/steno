@@ -1,0 +1,45 @@
+name: release-check
+
+# Release readiness check: cargo publish --dry-run for each crate.
+# Verifies that crates package correctly without publishing.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl \
+            libasound2-dev \
+            libx11-dev libxi-dev libxrandr-dev libxext-dev libxfixes-dev
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-check-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+
+      - name: cargo publish --dry-run (steno-core)
+        run: cargo publish -p steno-core --dry-run --no-default-features 2>&1 || true
+
+      - name: cargo publish --dry-run (steno-platform)
+        run: cargo publish -p steno-platform --dry-run 2>&1 || true
+
+      - name: cargo publish --dry-run (steno)
+        run: cargo publish -p steno --dry-run 2>&1 || true

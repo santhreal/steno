@@ -550,13 +550,15 @@ mod tests {
             }
         };
 
-        let mut cfg = LlmRefineConfig::default();
-        cfg.model_path = Some(std::path::PathBuf::from(&model_path));
-        cfg.n_threads = 4;
-        cfg.max_tokens = 64;
-        cfg.n_ctx = 2048;
-        cfg.temperature = 0.1;
-        cfg.no_think = false;
+        let cfg = LlmRefineConfig {
+            model_path: Some(std::path::PathBuf::from(&model_path)),
+            n_threads: 4,
+            max_tokens: 64,
+            n_ctx: 2048,
+            temperature: 0.1,
+            no_think: false,
+            ..LlmRefineConfig::default()
+        };
 
         let refine = match LlmRefine::new(&cfg, &HashMap::new()) {
             Ok(r) => r,

@@ -3,15 +3,22 @@
 #
 # What this runs (honest scope):
 #   - fetch/link against CPU sherpa-onnx shared libs (never CUDA)
-#   - cargo test -p steno-core --lib
-#   - cargo test -p steno-platform --lib
-#   - cargo clippy -p steno-core -p steno-platform -p steno --all-targets -- -D warnings
+#   - cargo test -p steno-core --lib (default features)
+#   - cargo test -p steno-core --lib --features llm (CPU-only LLM, smoke test skips without a model)
+#   - cargo test -p steno-platform --lib (default features)
+#   - cargo test -p steno-platform --lib --features wayland (Wayland backends)
+#   - cargo test -p steno (binary crate)
+#   - cargo clippy for all crates with default + llm + wayland features, -D warnings
 #
 # What this never does:
 #   - start the steno daemon
 #   - touch DISPLAY / GNOME / live X
 #   - GPU soak / nvidia-smi
 #   - download ASR models or run e2e decode
+#   - cross-compile for Windows or macOS (see ci-cross.yml)
+#   - test --features llm-cuda (requires a self-hosted runner with NVIDIA GPU + CUDA toolkit)
+#   - test --features llm-metal (requires a macOS runner with Metal framework)
+#   - test --features llm-vulkan (requires a runner with Vulkan SDK + GPU)
 #
 # Provider coverage comes from unit tests in steno-core (config + Transcriber
 # fail-closed validation for cpu|cuda). Linking uses the CPU shared archive
@@ -62,9 +69,31 @@ unset DISPLAY WAYLAND_DISPLAY
 echo "SHERPA_ONNX_LIB_DIR=$SHERPA_ONNX_LIB_DIR"
 echo "running CPU unit/clippy gate (no daemon, no GPU, no overlay X)"
 
+# --- Default features ---
 cargo test -p steno-core --lib
 cargo test -p steno-platform --lib
 cargo test -p steno
 cargo clippy -p steno-core -p steno-platform -p steno --all-targets -- -D warnings
+
+# --- LLM feature (CPU-only llama.cpp, no GPU) ---
+# The smoke test (llm_smoke_refine) skips gracefully when no GGUF model is
+# present; the unit tests (strip_think_blocks, build_system_prompt, etc.)
+# exercise the pure-logic paths without a model.
+echo "running LLM feature gate (CPU-only, no model required for unit tests)"
+cargo test -p steno-core --lib --features llm
+cargo clippy -p steno-core --all-targets --features llm -- -D warnings
+cargo clippy -p steno --all-targets --features llm -- -D warnings
+
+# --- Wayland feature (compiles wayland-client/smithay-client-toolkit/evdev) ---
+# No live Wayland compositor needed: tests are unit-level (selection logic,
+# sanitize_for_typing, output formatting). Runtime wtype/layer-shell paths
+# require a real compositor and are not exercised here.
+echo "running Wayland feature gate (compile + unit tests, no compositor)"
+cargo test -p steno-platform --lib --features wayland
+cargo clippy -p steno-platform --all-targets --features wayland -- -D warnings
+cargo clippy -p steno --all-targets --features wayland -- -D warnings
+
+# --- Combined features (llm + wayland on the binary crate) ---
+cargo clippy -p steno --all-targets --features llm,wayland -- -D warnings
 
 echo "ci-cpu: OK"
