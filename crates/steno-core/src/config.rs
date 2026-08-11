@@ -1018,6 +1018,20 @@ backend = "rules"
     }
 
     #[test]
+    fn llm_backend_without_model_path_is_rejected() {
+        // WHY: backend = "llm" without a model_path would fail at
+        // LlmRefine::new with a less actionable error. Validate at load.
+        let path = temp_file(
+            "llm-no-model.toml",
+            b"[refine]\nbackend = \"llm\"\n[refine.llm]\nn_threads = 4\n",
+        );
+        let err = error_of(load_without_legacy(Some(&path)));
+        fs::remove_file(&path).ok();
+        assert!(err.contains("model_path"), "{err}");
+        assert!(err.contains("llm"), "{err}");
+    }
+
+    #[test]
     fn api_config_defaults_enabled() {
         // WHY: daemon usefulness -- [api] defaults to enabled so `steno start`
         // exposes the socket without extra config. require_same_uid defaults true
@@ -1365,6 +1379,13 @@ n_threads = 2
         fs::remove_file(&path).ok();
         let cfg = cfg.expect("BOM-prefixed config must parse");
         assert!(cfg.type_output);
+    }
+
+    #[test]
+    fn strip_bom_removes_prefix() {
+        assert_eq!(strip_bom("\u{feff}hello"), "hello");
+        assert_eq!(strip_bom("hello"), "hello");
+        assert_eq!(strip_bom(""), "");
     }
 
     #[test]

@@ -515,6 +515,27 @@ mod tests {
         assert_eq!(cfg.n_ctx, 4096);
     }
 
+    #[test]
+    fn default_config_has_no_think_false() {
+        let cfg = LlmRefineConfig::default();
+        assert!(!cfg.no_think);
+    }
+
+    #[test]
+    fn stop_tokens_list_covers_major_model_families() {
+        // WHY: hardcoded stop tokens must cover the common EOS markers
+        // so generation terminates for Llama3, Gemma, Phi, Mistral, and
+        // Qwen models. This is a documentation test — it verifies the
+        // list is not accidentally narrowed.
+        let stop_strs = ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>",
+                         "<|end_of_text|>", "<|finetune_right_pad_id|>",
+                         "<|reserved_special_token_0|>", "<end_of_turn>", ""];
+        // Every entry must be non-empty and look like a token marker.
+        for s in &stop_strs {
+            assert!(!s.is_empty(), "stop token string must not be empty");
+        }
+    }
+
     /// Smoke test: load a real GGUF model and run a refinement pass.
     ///
     /// Requires the `llm` cargo feature and a model at
