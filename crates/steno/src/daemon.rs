@@ -978,6 +978,8 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
     // we attempt best-effort restoration before dying.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Log the panic message so it survives in the log file, not just stderr.
+        log::error!("daemon panic: {info}");
         #[cfg(target_os = "linux")]
         let _ = restore_caps_lock_mapping();
         default_panic(info);
@@ -1234,6 +1236,8 @@ pub fn supervise(cli: &Cli) -> Result<()> {
 
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
+    const MAX_RESTARTS: u32 = 10;
+    let mut restarts: u32 = 0;
 
     // Reset SHUTDOWN from a possible prior run (e.g. `steno stop` then
     // `steno start` in the same process). After this, only the signal
@@ -1264,6 +1268,13 @@ pub fn supervise(cli: &Cli) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
+                restarts += 1;
+                if restarts > MAX_RESTARTS {
+                    log::error!("daemon exceeded {MAX_RESTARTS} restarts; giving up");
+                    eprintln!("steno: daemon exceeded {MAX_RESTARTS} consecutive restarts; giving up. \
+                               Check the log at {} for the root cause.", log_path().map(|p| p.display().to_string()).unwrap_or_default());
+                    return Err(e);
+                }
                 log::error!("daemon worker crashed: {e:#}; restarting in {backoff:?}");
                 eprintln!("steno: daemon crashed: {e:#}; restarting in {backoff:?}");
 
