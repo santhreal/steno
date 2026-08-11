@@ -121,23 +121,36 @@ fn connect_x11() -> Result<(RustConnection, usize)> {
     let display_num = std::env::var("DISPLAY")
         .ok()
         .and_then(|d| {
-            let d = d.strip_prefix(':').unwrap_or(&d);
-            d.split('.').next().map(|s| s.to_string())
+            // DISPLAY format: [protocol/][host]:display[.screen]
+            // Abstract sockets are local-only; skip remote hosts.
+            // Strip everything up to and including the last ':'.
+            let after = d.rsplit_once(':')?.1;
+            after.split('.').next().map(|s| s.to_string())
         });
 
     let mut candidates = Vec::new();
     if let Some(n) = &display_num {
         candidates.push(n.clone());
     }
-    // Also scan /tmp/.X11-unix/ for filesystem sockets (may exist even
-    // when the abstract socket is the one that works).
-    if let Ok(entries) = std::fs::read_dir("/tmp/.X11-unix") {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy();
-            if let Some(num) = s.strip_prefix('X') {
-                if !candidates.contains(&num.to_string()) {
-                    candidates.push(num.to_string());
+    // Also scan for filesystem sockets. X11 sockets live in /tmp/.X11-unix/
+    // on most systems, but some configurations use $XDG_RUNTIME_DIR/X11-unix/.
+    let socket_dirs: Vec<String> = [
+        Some("/tmp/.X11-unix".to_string()),
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|d| std::path::PathBuf::from(d).join("X11-unix").to_string_lossy().into_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for dir in &socket_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let s = name.to_string_lossy();
+                if let Some(num) = s.strip_prefix('X') {
+                    if !candidates.contains(&num.to_string()) {
+                        candidates.push(num.to_string());
+                    }
                 }
             }
         }
@@ -170,7 +183,17 @@ fn connect_abstract(display_num: &str) -> Result<(RustConnection, usize)> {
 
     let path = format!("\0/tmp/.X11-unix/X{display_num}");
     let display: u16 = display_num.parse().unwrap_or(0);
-    let screen = 0;
+    // Parse the screen number from DISPLAY (e.g. ":1.0" → screen 0).
+    // Default to 0 when absent — most single-monitor and XWayland setups
+    // only expose screen 0.
+    let screen = std::env::var("DISPLAY")
+        .ok()
+        .and_then(|d| {
+            d.rsplit_once(':')
+                .and_then(|(_, after)| after.split('.').nth(1))
+                .and_then(|s| s.parse::<usize>().ok())
+        })
+        .unwrap_or(0);
 
     // Create a Unix socket and connect to the abstract namespace address.
     let fd = unsafe {
@@ -289,7 +312,8 @@ impl Hotkey {
             if let Err(e) = cookie.check() {
                 bail!(
                     "XGrabKey(CapsLock) failed ({e}). Another client may already own that \
-                     shortcut: remove any GNOME/KDE binding on Caps Lock and retry."
+                     shortcut: remove any GNOME, KDE, sxhkd, or custom window manager binding \
+                     on Caps Lock and retry."
                 );
             }
             guard.masks.push(mask);
