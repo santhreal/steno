@@ -1004,8 +1004,14 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         );
     }
     let mode = OutputMode::Type;
-    let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
 
+    // Grab the hotkey BEFORE loading the sherpa-onnx model. If X11 is
+    // unavailable, failing here avoids dropping the C++ model (whose
+    // destructor corrupts the heap on the error path — "corrupted
+    // double-linked list"). The hotkey's Drop restores Caps Lock.
+    let mut hotkey = Hotkey::grab_caps_lock()?;
+
+    let model = config::resolve_model(cli.model.as_ref(), &cfg)?;
     eprintln!(
         "steno: loading model {} …",
         model.display()
@@ -1071,7 +1077,6 @@ pub fn run_daemon(cli: &Cli) -> Result<()> {
         pid_guard.api_stop = Some(api_stop);
     }
 
-    let mut hotkey = Hotkey::grab_caps_lock()?;
     // Watchdog: if SIGTERM arrives while the main thread is blocked in a
     // long sherpa transcription, this thread restores Caps Lock before
     // `steno stop` escalates to SIGKILL (which skips Drop).

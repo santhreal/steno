@@ -107,11 +107,17 @@ pub fn restore_caps_lock_mapping() -> Result<bool> {
     Ok(true)
 }
 
-fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
+fn connect_x11() -> Result<(RustConnection, usize)> {
+    // Try DISPLAY first (the common case).
     if let Ok(res) = RustConnection::connect(None) {
         return Ok(res);
     }
 
+    // DISPLAY failed or is unset — scan /tmp/.X11-unix/ for available
+    // displays. This handles XWayland compositors that set DISPLAY to
+    // a socket the daemon process can't reach after setsid(), and
+    // cases where DISPLAY points at a different X server than the one
+    // with the physical keyboard.
     let mut candidates = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/tmp/.X11-unix") {
         for entry in entries.flatten() {
@@ -128,8 +134,8 @@ fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
         }
     }
 
-    for disp in candidates {
-        if let Ok(res) = RustConnection::connect(Some(&disp)) {
+    for disp in &candidates {
+        if let Ok(res) = RustConnection::connect(Some(disp)) {
             return Ok(res);
         }
     }
@@ -137,11 +143,15 @@ fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
     RustConnection::connect(None).context("cannot connect to X11: is DISPLAY set?")
 }
 
+fn connect_x11_for_restore() -> Result<(RustConnection, usize)> {
+    connect_x11()
+}
+
 impl Hotkey {
     /// Grab Caps Lock system-wide on the default display, and remap the
     /// keycode to NoSymbol so the caps toggle is dead while we run.
     pub fn grab_caps_lock() -> Result<Self> {
-        let (conn, screen_num) = RustConnection::connect(None)
+        let (conn, screen_num) = connect_x11()
             .context("cannot connect to X11: is DISPLAY set?")?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
