@@ -245,7 +245,7 @@ pub fn model_download(config_path: Option<&Path>, download_llm: bool) -> Result<
     // Write model_path if not already set.
     let cfg_path = resolve_config_path(config_path)?;
     if config_get(&cfg_path, "model_path")?.is_none() {
-        let rendered = format!("~/.local/share/steno/models/{stt_name}");
+        let rendered = tilde_path(&stt_dir);
         config_set(&cfg_path, "model_path", &rendered)?;
         println!("Set model_path = {rendered}");
     }
@@ -263,7 +263,7 @@ pub fn model_download(config_path: Option<&Path>, download_llm: bool) -> Result<
         }
 
         if config_get(&cfg_path, "refine.llm.model_path")?.is_none() {
-            let rendered = format!("~/.local/share/steno/models/{llm_name}");
+            let rendered = tilde_path(&llm_path);
             config_set(&cfg_path, "refine.llm.model_path", &rendered)?;
             println!("Set refine.llm.model_path = {rendered}");
         }
@@ -301,6 +301,19 @@ fn run_tar_extract(archive: &Path, dest_dir: &Path) -> Result<()> {
         .context("failed to spawn tar — is it installed?")?;
     ensure!(status.success(), "tar failed with status {status} for {}", archive.display());
     Ok(())
+}
+
+/// Render an absolute path with the home directory prefix replaced by `~`
+/// for human-readable config output. Falls back to the full path when
+/// the home directory cannot be determined or the path is not under it.
+fn tilde_path(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if let Ok(rel) = path.strip_prefix(&home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    path.display().to_string()
 }
 
 /// `steno theme list`

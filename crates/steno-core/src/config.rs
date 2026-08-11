@@ -809,7 +809,25 @@ fn config_dir() -> Result<PathBuf> {
 fn data_dir() -> Result<PathBuf> {
     match std::env::var_os("XDG_DATA_HOME") {
         Some(d) if !d.as_os_str().is_empty() => Ok(PathBuf::from(d)),
-        _ => Ok(home_dir()?.join(".local/share")),
+        _ => {
+            #[cfg(target_os = "macos")]
+            {
+                return Ok(home_dir()?.join("Library/Application Support"));
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(d) = std::env::var_os("LOCALAPPDATA") {
+                    if !d.is_empty() {
+                        return Ok(PathBuf::from(d));
+                    }
+                }
+                return Ok(home_dir()?.join("AppData/Local"));
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                Ok(home_dir()?.join(".local/share"))
+            }
+        }
     }
 }
 
