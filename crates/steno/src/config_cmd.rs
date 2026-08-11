@@ -278,15 +278,31 @@ pub fn model_download(config_path: Option<&Path>, download_llm: bool) -> Result<
 }
 
 /// Download a URL to a file using `curl`. Follows redirects, fails on
-/// HTTP errors, shows a progress bar on terminals.
+/// HTTP errors, shows a progress bar on terminals. Retries once on
+/// transient failure. Verifies the downloaded file is non-empty.
 fn run_curl(url: &str, dest: &Path) -> Result<()> {
-    let status = std::process::Command::new("curl")
-        .args(["-L", "--fail", "--progress-bar", "-o"])
-        .arg(dest)
-        .arg(url)
-        .status()
-        .context("failed to spawn curl — is it installed?")?;
-    ensure!(status.success(), "curl failed with status {status} for {url}");
+    let run_once = || {
+        std::process::Command::new("curl")
+            .args(["-L", "--fail", "--progress-bar", "--retry", "3", "-o"])
+            .arg(dest)
+            .arg(url)
+            .status()
+    };
+    let status = run_once().context("failed to spawn curl — is it installed?")?;
+    if !status.success() {
+        // Remove any partial file before retrying.
+        fs::remove_file(dest).ok();
+        let status = run_once().context("failed to spawn curl on retry")?;
+        ensure!(status.success(), "curl failed with status {status} for {url}");
+    }
+    // Verify the download is non-empty — a truncated file would fail at
+    // model load with a cryptic error instead of a clear download failure.
+    let meta = fs::metadata(dest)
+        .with_context(|| format!("downloaded file missing after curl: {}", dest.display()))?;
+    ensure!(
+        meta.len() > 0,
+        "downloaded file is empty (0 bytes) — the URL may be wrong or the server returned an error page: {url}"
+    );
     Ok(())
 }
 

@@ -140,7 +140,7 @@ impl LlmRefine {
 
         // Collect stop tokens: EOS + common chat markers.
         let mut stop_tokens = vec![model.token_eos()];
-        for stop_str in ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>"] {
+        for stop_str in ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>", "<|end_of_text|>", "<|finetune_right_pad_id|>", "<|reserved_special_token_0|>", "<end_of_turn>", "<|endoftext|>"] {
             if let Ok(toks) = model.str_to_token(stop_str, AddBos::Never) {
                 if let Some(&first) = toks.first() {
                     stop_tokens.push(first);
@@ -168,6 +168,7 @@ impl LlmRefine {
     /// Run a single generation pass: create a context, encode the
     /// prompt, decode tokens, extract the corrected text.
     fn generate(&self, prompt: &str) -> Result<String> {
+        let gen_start = std::time::Instant::now();
         // Serialize generation: the shared LlamaModel is not safe for
         // concurrent context creation + decoding across threads.
         let _guard = self.lock.lock().expect("LLM refine mutex poisoned");
@@ -251,7 +252,11 @@ impl LlmRefine {
             ctx.decode(&mut batch)
                 .context("failed to decode generated token")?;
         }
-
+        log::info!(
+            "LLM refine: generated {} chars in {:.2}s",
+            output.len(),
+            gen_start.elapsed().as_secs_f64()
+        );
         Ok(output.trim().to_string())
     }
 }

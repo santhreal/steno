@@ -36,6 +36,7 @@ fn main() {
             n_ctx: 4096,
             temperature: 0.1,
             prompt: String::new(),
+            no_think: false,
         },
     };
 
