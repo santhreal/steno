@@ -247,7 +247,7 @@ impl Config {
                     path.display()
                 )
             })?;
-            let cfg: Self = toml::from_str(&raw)
+            let cfg: Self = toml::from_str(strip_bom(&raw))
                 .with_context(|| format!("invalid TOML in config {}", path.display()))?;
             cfg
         };
@@ -416,6 +416,11 @@ impl Config {
                 self.refine.llm.n_ctx >= 512,
                 "invalid refine.llm.n_ctx = {} in {}: set it to at least 512 (must fit prompt + max_tokens)",
                 self.refine.llm.n_ctx,
+                path.display()
+            );
+            ensure!(
+                self.refine.llm.model_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty()),
+                "invalid refine.llm.model_path in {}: backend = \"llm\" requires a GGUF model path",
                 path.display()
             );
         }
@@ -618,7 +623,7 @@ pub fn config_get(path: &Path, key: &str) -> Result<Option<String>> {
             path.display()
         )
     })?;
-    let doc = raw
+    let doc = strip_bom(&raw)
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("invalid TOML in {}", path.display()))?;
     Ok(get_dotted(&doc, key).and_then(item_display))
@@ -639,7 +644,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
                 path.display()
             )
         })?;
-        raw.parse::<toml_edit::DocumentMut>()
+        strip_bom(&raw).parse::<toml_edit::DocumentMut>()
             .with_context(|| format!("invalid TOML in {}", path.display()))?
     } else {
         toml_edit::DocumentMut::new()
@@ -760,6 +765,13 @@ fn looks_like_model(dir: &Path) -> bool {
         && ["encoder.int8.onnx", "encoder.onnx", "encoder.fp16.onnx"]
             .iter()
             .any(|n| dir.join(n).is_file())
+}
+
+/// Strip a UTF-8 BOM (U+FEFF) from the start of a string. Windows
+/// editors sometimes prepend a BOM to TOML files; `toml::from_str`
+/// treats it as an invalid character at position 0.
+fn strip_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
 }
 
 /// Expand a leading `~` or `~/` to $HOME. Non-UTF-8 paths and paths
@@ -1341,6 +1353,18 @@ n_threads = 2
         let path = std::env::temp_dir().join("dictate-test-does-not-exist.toml");
         let err = error_of(load_without_legacy(Some(&path)));
         assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn config_with_bom_is_parsed() {
+        // WHY: Windows editors prepend a UTF-8 BOM (U+FEFF) to TOML
+        // files; without stripping it, toml::from_str fails with an
+        // invalid character error at position 0.
+        let path = temp_file("bom-config.toml", b"\xEF\xBB\xBFtype_output = true\n");
+        let cfg = load_without_legacy(Some(&path));
+        fs::remove_file(&path).ok();
+        let cfg = cfg.expect("BOM-prefixed config must parse");
+        assert!(cfg.type_output);
     }
 
     #[test]
