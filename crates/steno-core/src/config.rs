@@ -699,7 +699,7 @@ pub fn default_model_dir() -> Result<PathBuf> {
 }
 
 /// Hint showing how to download a sherpa-onnx model.
-pub const MODEL_DOWNLOAD_HINT: &str = "download a model, e.g.:\n  \
+pub const MODEL_DOWNLOAD_HINT: &str = "download a model with `steno model download`, or manually:\n  \
     cd ~/.local/share/steno/models && \\\n  \
     curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2 && \\\n  \
     tar xjf sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2\n  \
@@ -802,7 +802,25 @@ fn home_dir_from(home: Option<std::ffi::OsString>, var_name: &str) -> Result<Pat
 fn config_dir() -> Result<PathBuf> {
     match std::env::var_os("XDG_CONFIG_HOME") {
         Some(d) if !d.as_os_str().is_empty() => Ok(PathBuf::from(d)),
-        _ => Ok(home_dir()?.join(".config")),
+        _ => {
+            #[cfg(target_os = "macos")]
+            {
+                return Ok(home_dir()?.join("Library/Preferences"));
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(d) = std::env::var_os("APPDATA") {
+                    if !d.is_empty() {
+                        return Ok(PathBuf::from(d));
+                    }
+                }
+                return Ok(home_dir()?.join("AppData/Roaming"));
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                Ok(home_dir()?.join(".config"))
+            }
+        }
     }
 }
 
