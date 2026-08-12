@@ -24,6 +24,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Caps Lock grab no longer blackholes the keyboard. The SYNC passive grab
+  freezes the whole keyboard until `XAllowEvents` runs; it was serviced
+  from the daemon's main loop, so a Caps Lock press that arrived during
+  transcription, LLM refine, or typing held every key hostage until the
+  daemon came back — indefinitely if it wedged. A dedicated thread now
+  owns the grab connection and unfreezes on every key event before any
+  classification.
 - Token decode buffer increased from 8 to 64 bytes for multi-byte UTF-8.
 - LLM refine prompt truncation now keeps the system prompt (first tokens)
   instead of the last tokens.

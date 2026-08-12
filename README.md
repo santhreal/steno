@@ -169,6 +169,12 @@ dies for any reason (including `kill -9`), Caps Lock works again
 instantly with no repair needed. Legacy `steno stop` still repairs
 NoSymbol damage from older daemon builds.
 
+A SYNC grab freezes the whole keyboard between the Caps Lock press and
+the daemon's `XAllowEvents`. A dedicated thread owns the grab connection
+and does nothing else, so that window is a few milliseconds regardless of
+what the daemon is doing. Transcription, LLM refine, and typing cannot
+hold the keyboard.
+
 **Record and print (one-shot).** Run `steno`, speak, pause. Recording
 stops after about a second of silence (configurable). Text streams to
 stdout segment by segment as it is decoded, so it composes:
@@ -506,6 +512,9 @@ fresh decode state: nothing leaks between them.
   modification, so `kill -9` or a crash leaves Caps Lock working
   instantly. Older builds that remapped to NoSymbol may have left
   damage; `steno stop` or `xmodmap -e 'keycode 66 = Caps_Lock'` repairs
-  that.
+  that. The SYNC grab freezes the whole keyboard until the daemon calls
+  `XAllowEvents`; a dedicated thread owns that connection and runs no
+  other work, so the freeze lasts milliseconds even while the daemon is
+  transcribing or typing.
 - Parakeet TDT v3 covers 25 languages and detects them on its own; there
   is no language flag.

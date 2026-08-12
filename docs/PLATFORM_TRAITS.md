@@ -106,13 +106,22 @@ receives the event, calls `XAllowEvents(AsyncKeyboard, CurrentTime)` to
 discard it and unfreeze, so the Lock modifier never latches and caps state
 never toggles.
 
+The freeze covers every key on the machine, so the unfreeze must not wait
+on application work. A dedicated thread owns the grab connection, polls it
+every 5 ms, and calls `XAllowEvents` on every key event before deciding
+anything; it forwards Press/Release/Cancel over a channel. `next_event`
+reads that channel and never touches X. Transcription, LLM refine, and
+typing therefore cannot hold the keyboard, and a dead worker closes the
+connection, which releases both the grab and the freeze.
+
 No keymap modification occurs. When the daemon dies for any reason
 (SIGKILL, crash, normal exit), the X server automatically releases the
 passive grab and Caps Lock works normally again instantly. There is no
-`Drop` keymap restore, no watchdog thread, and no RAII guard.
+`Drop` keymap restore and no RAII guard.
 
-`Hotkey`'s `Drop` only ungrabs the key (explicit cleanup for normal
-shutdown; the X server would release it on connection close anyway).
+`Hotkey`'s `Drop` stops the worker and joins it; the worker unfreezes and
+ungrabs on the way out (explicit cleanup for normal shutdown; the X server
+would release both on connection close anyway).
 
 Legacy recovery: `restore_caps_lock_mapping()` and `repair_caps_lock()`
 remain for backward compatibility with daemons killed under the old

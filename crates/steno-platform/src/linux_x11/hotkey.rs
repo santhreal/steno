@@ -24,6 +24,9 @@ use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::JoinHandle;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xinput::{self, XIEventMask};
@@ -40,15 +43,47 @@ const NO_SYMBOL: Keysym = 0;
 const FALLBACK_CAPS_KEYCODE: Keycode = 66;
 /// How long after Press a second key counts as a cancel vs. pre-held.
 const CANCEL_GRACE: Duration = Duration::from_millis(120);
+/// Idle sleep of the grab-servicing thread. This bounds how long the X
+/// server keeps the keyboard frozen after a SYNC grab fires.
+const POLL_IDLE: Duration = Duration::from_millis(5);
+/// Bound on how long `drain_pending` waits for the worker to acknowledge.
+const DRAIN_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// X11 keysym for Caps Lock.
 const XK_CAPS_LOCK: Keysym = 0xffe5;
 
 
 /// Global X11 Caps Lock push-to-talk hotkey grabber.
+///
+/// The connection owning the SYNC grab is serviced by a dedicated thread
+/// that does nothing but unfreeze the keyboard and classify events.
+///
+/// WHY: with `GrabMode::SYNC` every Caps Lock press freezes the WHOLE
+/// keyboard until someone calls `XAllowEvents`. Servicing the grab from
+/// the daemon's main loop meant any long or wedged work (transcription,
+/// LLM refine, typing) held that freeze: a Caps Lock press during
+/// transcription blackholed the entire keyboard until the daemon came
+/// back, forever if it never did. The worker runs no application work,
+/// so the freeze window is bounded by [`POLL_IDLE`], and if the worker
+/// dies the connection closes and the X server releases the freeze.
 pub struct Hotkey {
+    /// Caps Lock keycode -- the push-to-talk trigger.
+    trigger: Keycode,
+    /// Classified events from the worker.
+    rx: Receiver<HotkeyEvent>,
+    /// Tells the worker to ungrab and exit.
+    stop: Arc<AtomicBool>,
+    /// Set to request a queue flush; the worker clears it when done.
+    drain: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+    /// Hold state for [`crate::HotkeySource::next_event`].
+    source_held: bool,
+}
+
+/// State owned exclusively by the grab-servicing thread. Nothing else may
+/// touch the connection: that is what keeps the freeze window bounded.
+struct Servicer {
     conn: RustConnection,
     root: Window,
-    /// Caps Lock keycode -- the push-to-talk trigger.
     trigger: Keycode,
     /// Modifier keycodes (Shift/Ctrl/Alt/Super/Lock/Mod*): never cancel.
     modifiers: Vec<Keycode>,
@@ -65,9 +100,8 @@ pub struct Hotkey {
     pending: VecDeque<Event>,
     /// Modifier masks we grabbed (plain + Caps/NumLock variants).
     masks: Vec<ModMask>,
-    /// Hold state for [`crate::HotkeySource::next_event`]. The daemon still
-    /// passes its own `held` into the inherent methods.
-    source_held: bool,
+    held: bool,
+    debug: bool,
 }
 /// Restores Caps Lock keysyms if a prior daemon left the keycode mapped
 /// to NoSymbol (SIGKILL / failed grab before `Hotkey` was constructed).
@@ -339,7 +373,7 @@ impl Hotkey {
             });
         conn.flush()?;
 
-        Ok(Self {
+        let servicer = Servicer {
             conn,
             root,
             trigger,
@@ -349,6 +383,28 @@ impl Hotkey {
             suppress_cancel: HashSet::new(),
             pending: VecDeque::new(),
             masks,
+            held: false,
+            debug: std::env::var_os("HK_DEBUG").is_some(),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let drain = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let stop = Arc::clone(&stop);
+            let drain = Arc::clone(&drain);
+            std::thread::Builder::new()
+                .name("steno-hotkey".into())
+                .spawn(move || servicer.run(&tx, &stop, &drain))
+                .context("cannot spawn hotkey servicing thread")?
+        };
+
+        Ok(Self {
+            trigger,
+            rx,
+            stop,
+            drain,
+            worker: Some(worker),
             source_held: false,
         })
     }
@@ -359,9 +415,15 @@ impl Hotkey {
     /// device filter).
     #[allow(dead_code)] // used by the daemon binary, not the example harness
     pub fn drain_pending(&mut self) {
-        self.pending.clear();
-        let _ = self.conn.flush();
-        while let Ok(Some(_)) = self.conn.poll_for_event() {}
+        // Ask the worker to flush the X queue, then drop anything it had
+        // already classified. Bounded: a wedged worker must not stall the
+        // daemon, and stale events are harmless compared to a hang.
+        self.drain.store(true, Ordering::Release);
+        let deadline = Instant::now() + DRAIN_ACK_TIMEOUT;
+        while self.drain.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(POLL_IDLE);
+        }
+        while self.rx.try_recv().is_ok() {}
     }
 
 
@@ -380,171 +442,226 @@ impl Hotkey {
         self.next_event_debug(held, false, &AtomicBool::new(false))
     }
 
-    /// True once the cancel grace window after the activating press has
-    /// elapsed (see CANCEL_GRACE).
-    fn past_grace(&self) -> bool {
-        self.press_at.is_none_or(|t| t.elapsed() >= CANCEL_GRACE)
-    }
-
-    /// `next_event` with raw event logging and a shutdown flag the
-    /// daemon's SIGTERM handler sets.
+    /// `next_event` with a shutdown flag the daemon's SIGTERM handler
+    /// sets. Reads classified events from the servicing thread; it never
+    /// touches the X connection, so nothing the caller does — however
+    /// slow or wedged — can hold the SYNC keyboard freeze.
     pub fn next_event_debug(
         &mut self,
         held: &mut bool,
-        debug: bool,
+        _debug: bool,
         shutdown: &AtomicBool,
     ) -> Result<HotkeyEvent> {
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 return Ok(HotkeyEvent::Shutdown);
             }
-            self.conn
-                .flush()
-                .context("X11 flush failed while waiting for Caps Lock")?;
-            let ev = match self.pending.pop_front() {
-                Some(e) => Some(e),
-                None => self.conn.poll_for_event().context("X11 poll failed")?,
-            };
-            if debug {
-                match &ev {
-                    Some(Event::KeyPress(e)) => {
-                        println!("RAW press detail={} state={:?}", e.detail, e.state)
+            match self.rx.recv_timeout(POLL_IDLE) {
+                Ok(ev) => {
+                    match ev {
+                        HotkeyEvent::Press => *held = true,
+                        HotkeyEvent::Release | HotkeyEvent::Cancel => *held = false,
+                        HotkeyEvent::Shutdown => {}
                     }
-                    Some(Event::KeyRelease(e)) => {
-                        println!("RAW release detail={} state={:?}", e.detail, e.state)
-                    }
-                    Some(Event::XinputRawKeyPress(e)) => {
-                        println!("RAW xinput detail={}", e.detail)
-                    }
-                    Some(other) => println!("RAW {other:?}"),
-                    None => {}
+                    return Ok(ev);
                 }
-            }
-            match ev {
-                None => {
-                    std::thread::sleep(Duration::from_millis(20));
-                    continue;
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    bail!(
+                        "hotkey servicing thread exited: the X11 connection owning the \
+                         Caps Lock grab was lost. Caps Lock is released; restart the daemon."
+                    )
                 }
-                Some(Event::KeyPress(ev)) => {
-                    if ev.detail != self.trigger {
-                        // While the grab is active (key held), other keys
-                        // are delivered to us: that is the user cancelling.
-                        // Same rules as XI2 RawKeyPress (grace + pre-held).
-                        if *held
-                            && should_cancel_key(
-                                ev.detail,
-                                self.trigger,
-                                &self.modifiers,
-                                !self.past_grace(),
-                                &mut self.suppress_cancel,
-                            )
-                        {
-                            *held = false;
-                            self.suppress_cancel.clear();
-                            return Ok(HotkeyEvent::Cancel);
-                        }
-                        continue;
-                    }
-                    if *held {
-                        // Auto-repeat: unfreeze and discard, then continue.
-                        let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
-                        let _ = self.conn.flush();
-                        continue;
-                    }
-                    // Unfreeze the keyboard and discard the queued event
-                    // so the XKB Lock action never fires.
-                    let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
-                    let _ = self.conn.flush();
-                    *held = true;
-                    self.press_at = Some(Instant::now());
-                    self.suppress_cancel.clear();
-                    return Ok(HotkeyEvent::Press);
-                }
-                Some(Event::KeyRelease(ev)) => {
-                    if !*held || ev.detail != self.trigger {
-                        continue;
-                    }
-                    // Unfreeze the keyboard so the next event (auto-repeat
-                    // press or a different key) can arrive for peek-ahead.
-                    let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
-                    let _ = self.conn.flush();
-                    // X auto-repeat emits a release+press pair with the
-                    // SAME timestamp for a held key. Peek past unrelated
-                    // events (esp. XI2 RawKeyPress) for a matching press —
-                    // otherwise an interleaved XI2 event looks like a real
-                    // release and cuts the utterance at the repeat delay.
-                    let mut deferred: Vec<Event> = Vec::new();
-                    let mut is_repeat = false;
-                    while let Ok(Some(peeked)) = self.conn.poll_for_event() {
-                        match &peeked {
-                            Event::KeyPress(p)
-                                if p.detail == ev.detail && p.time == ev.time =>
-                            {
-                                is_repeat = true;
-                                break;
-                            }
-                            Event::KeyPress(_) | Event::KeyRelease(_) => {
-                                deferred.push(peeked);
-                                break;
-                            }
-                            _ => deferred.push(peeked),
-                        }
-                    }
-                    if is_repeat {
-                        // The auto-repeat KeyPress triggered a new SYNC
-                        // freeze. Unfreeze and discard it so the XKB Lock
-                        // action never fires, then drop deferred XI2 noise.
-                        let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
-                        let _ = self.conn.flush();
-                        continue;
-                    }
-                    self.pending.extend(deferred);
-                    *held = false;
-                    self.suppress_cancel.clear();
-                    return Ok(HotkeyEvent::Release);
-                }
-                Some(Event::XinputRawKeyPress(ev)) => {
-                    if !*held {
-                        continue; // normal typing while idle is not a cancel
-                    }
-                    // Synthetic XTEST keys (xdotool — including the daemon's
-                    // own typing) never cancel.
-                    if self.xtest_device == Some(ev.sourceid) {
-                        continue;
-                    }
-                    let key = ev.detail as u8;
-                    if u32::from(key) != ev.detail {
-                        continue; // out-of-range keycode: not a cancel candidate
-                    }
-                    if !should_cancel_key(
-                        key,
-                        self.trigger,
-                        &self.modifiers,
-                        !self.past_grace(),
-                        &mut self.suppress_cancel,
-                    ) {
-                        continue;
-                    }
-                    *held = false;
-                    self.suppress_cancel.clear();
-                    return Ok(HotkeyEvent::Cancel);
-                }
-                Some(_) => continue,
             }
         }
     }
 }
 
-impl Drop for Hotkey {
+impl Servicer {
+    /// Unfreeze the keyboard and discard the queued event. Called for
+    /// EVERY key event pulled off the wire, before any classification:
+    /// the SYNC grab freezes the whole keyboard until this runs, so it
+    /// must never sit behind a decision that could be slow or wrong.
+    fn unfreeze(&self) {
+        let _ = self.conn.allow_events(Allow::ASYNC_KEYBOARD, CURRENT_TIME);
+        let _ = self.conn.flush();
+    }
+
+    /// True once the cancel grace window after the activating press has
+    /// elapsed (see CANCEL_GRACE).
+    fn past_grace(&self) -> bool {
+        self.press_at.is_none_or(|t| t.elapsed() >= CANCEL_GRACE)
+    }
+
+    /// Service the grab until asked to stop or the connection dies.
+    /// Runs no application work of any kind.
+    fn run(mut self, tx: &Sender<HotkeyEvent>, stop: &AtomicBool, drain: &AtomicBool) {
+        while !stop.load(Ordering::Relaxed) {
+            if drain.load(Ordering::Acquire) {
+                self.pending.clear();
+                let _ = self.conn.flush();
+                while let Ok(Some(ev)) = self.conn.poll_for_event() {
+                    if matches!(ev, Event::KeyPress(_) | Event::KeyRelease(_)) {
+                        self.unfreeze();
+                    }
+                }
+                drain.store(false, Ordering::Release);
+            }
+            let _ = self.conn.flush();
+            let ev = match self.pending.pop_front() {
+                Some(e) => Some(e),
+                None => match self.conn.poll_for_event() {
+                    Ok(e) => e,
+                    // Connection lost: dropping it releases the grab and
+                    // any freeze. Report by closing the channel.
+                    Err(_) => return,
+                },
+            };
+            let Some(ev) = ev else {
+                std::thread::sleep(POLL_IDLE);
+                continue;
+            };
+            if matches!(ev, Event::KeyPress(_) | Event::KeyRelease(_)) {
+                self.unfreeze();
+            }
+            if self.debug {
+                match &ev {
+                    Event::KeyPress(e) => {
+                        println!("RAW press detail={} state={:?}", e.detail, e.state)
+                    }
+                    Event::KeyRelease(e) => {
+                        println!("RAW release detail={} state={:?}", e.detail, e.state)
+                    }
+                    Event::XinputRawKeyPress(e) => println!("RAW xinput detail={}", e.detail),
+                    other => println!("RAW {other:?}"),
+                }
+            }
+            if let Some(out) = self.classify(ev) {
+                if tx.send(out).is_err() {
+                    return; // receiver gone: shut down
+                }
+            }
+        }
+    }
+
+    /// Turn one X event into a hotkey event, or `None` to keep waiting.
+    /// The keyboard is already unfrozen by the time this runs.
+    fn classify(&mut self, ev: Event) -> Option<HotkeyEvent> {
+        match ev {
+            Event::KeyPress(ev) => {
+                if ev.detail != self.trigger {
+                    // While the grab is active (key held), other keys are
+                    // delivered to us: that is the user cancelling. Same
+                    // rules as XI2 RawKeyPress (grace + pre-held).
+                    if self.held
+                        && should_cancel_key(
+                            ev.detail,
+                            self.trigger,
+                            &self.modifiers,
+                            !self.past_grace(),
+                            &mut self.suppress_cancel,
+                        )
+                    {
+                        self.held = false;
+                        self.suppress_cancel.clear();
+                        return Some(HotkeyEvent::Cancel);
+                    }
+                    return None;
+                }
+                if self.held {
+                    return None; // auto-repeat: already unfrozen and discarded
+                }
+                self.held = true;
+                self.press_at = Some(Instant::now());
+                self.suppress_cancel.clear();
+                Some(HotkeyEvent::Press)
+            }
+            Event::KeyRelease(ev) => {
+                if !self.held || ev.detail != self.trigger {
+                    return None;
+                }
+                // X auto-repeat emits a release+press pair with the SAME
+                // timestamp for a held key. Peek past unrelated events
+                // (esp. XI2 RawKeyPress) for a matching press — otherwise
+                // an interleaved XI2 event looks like a real release and
+                // cuts the utterance at the repeat delay.
+                let mut deferred: Vec<Event> = Vec::new();
+                let mut is_repeat = false;
+                while let Ok(Some(peeked)) = self.conn.poll_for_event() {
+                    if matches!(peeked, Event::KeyPress(_) | Event::KeyRelease(_)) {
+                        self.unfreeze();
+                    }
+                    match &peeked {
+                        Event::KeyPress(p) if p.detail == ev.detail && p.time == ev.time => {
+                            is_repeat = true;
+                            break;
+                        }
+                        Event::KeyPress(_) | Event::KeyRelease(_) => {
+                            deferred.push(peeked);
+                            break;
+                        }
+                        _ => deferred.push(peeked),
+                    }
+                }
+                if is_repeat {
+                    return None;
+                }
+                self.pending.extend(deferred);
+                self.held = false;
+                self.suppress_cancel.clear();
+                Some(HotkeyEvent::Release)
+            }
+            Event::XinputRawKeyPress(ev) => {
+                if !self.held {
+                    return None; // normal typing while idle is not a cancel
+                }
+                // Synthetic XTEST keys (xdotool — including the daemon's
+                // own typing) never cancel.
+                if self.xtest_device == Some(ev.sourceid) {
+                    return None;
+                }
+                let key = ev.detail as u8;
+                if u32::from(key) != ev.detail {
+                    return None; // out-of-range keycode: not a cancel candidate
+                }
+                if !should_cancel_key(
+                    key,
+                    self.trigger,
+                    &self.modifiers,
+                    !self.past_grace(),
+                    &mut self.suppress_cancel,
+                ) {
+                    return None;
+                }
+                self.held = false;
+                self.suppress_cancel.clear();
+                Some(HotkeyEvent::Cancel)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Drop for Servicer {
     fn drop(&mut self) {
-        // Release the passive grabs. No keymap restore needed — we never
-        // modified the keymap. The X server releases grabs automatically
-        // on connection close (even SIGKILL), but explicit ungrab is
-        // cleaner for normal shutdown.
+        // Unfreeze first: if we are torn down while a SYNC grab is frozen,
+        // leaving it frozen would blackhole the keyboard for as long as the
+        // connection lives. Then release the passive grabs. No keymap
+        // restore needed — we never modified the keymap.
+        self.unfreeze();
         for mask in &self.masks {
             let _ = self.conn.ungrab_key(self.trigger, self.root, *mask);
         }
         let _ = self.conn.flush();
+    }
+}
+
+impl Drop for Hotkey {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
