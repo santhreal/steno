@@ -20,6 +20,8 @@
 
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use steno_platform::HotkeyEvent;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
@@ -197,4 +199,92 @@ fn keyboard_is_usable_again_after_the_hotkey_is_dropped() {
         saw_key(&listener, KEY_A, Duration::from_secs(3)),
         "keyboard still frozen after the hotkey was dropped"
     );
+}
+
+/// The other half of the class. WHY: every past attempt at this bug
+/// traded one failure for the other — either the keyboard froze, or the
+/// hotkey stopped firing at all. Unfreezing early must not swallow the
+/// events the daemon needs.
+///
+/// Cancel is reachable by two routes: the core KeyPress delivered to the
+/// grab owner, and the XInput2 raw press. Under Xvfb the core route
+/// fires first, so a mutation confined to the XI2 branch survives this
+/// test.
+#[test]
+fn caps_lock_still_reports_press_release_and_cancel() {
+    let _guard = display_lock();
+    let Some(server) = start_xvfb() else {
+        eprintln!("skipping: Xvfb unavailable");
+        return;
+    };
+    unsafe { std::env::set_var("DISPLAY", &server.display) };
+
+    let (injector, _) = RustConnection::connect(Some(&server.display)).expect("injector connect");
+    let mut hotkey = steno_platform::Hotkey::grab_caps_lock().expect("grab caps lock");
+    let mut held = false;
+
+    // Inject first: the servicing thread classifies asynchronously, so
+    // the events are already queued and next_event cannot hang the suite.
+    fake_key(&injector, CAPS_KEYCODE, true);
+    std::thread::sleep(Duration::from_millis(200));
+    fake_key(&injector, CAPS_KEYCODE, false);
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert_eq!(
+        next_within(&mut hotkey, &mut held),
+        Some(HotkeyEvent::Press),
+        "Caps Lock press was swallowed"
+    );
+    assert!(held, "held must be set on Press");
+    assert_eq!(
+        next_within(&mut hotkey, &mut held),
+        Some(HotkeyEvent::Release),
+        "Caps Lock release was swallowed"
+    );
+    assert!(!held, "held must clear on Release");
+
+    // A different key during the hold cancels the utterance.
+    hotkey.drain_pending();
+    fake_key(&injector, CAPS_KEYCODE, true);
+    std::thread::sleep(Duration::from_millis(200)); // past CANCEL_GRACE
+    fake_key(&injector, KEY_A, true);
+    fake_key(&injector, KEY_A, false);
+    std::thread::sleep(Duration::from_millis(200));
+    fake_key(&injector, CAPS_KEYCODE, false);
+    std::thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(
+        next_within(&mut hotkey, &mut held),
+        Some(HotkeyEvent::Press),
+        "second Caps Lock press was swallowed"
+    );
+    assert_eq!(
+        next_within(&mut hotkey, &mut held),
+        Some(HotkeyEvent::Cancel),
+        "typing during a hold must cancel the utterance"
+    );
+}
+
+/// `next_event_debug` with a deadline: a swallowed event must fail the
+/// test, never hang the suite. `next_event_debug` blocks until an event
+/// arrives or the shutdown flag is set, so the deadline is a helper
+/// thread that sets that flag.
+fn next_within(hotkey: &mut steno_platform::Hotkey, held: &mut bool) -> Option<HotkeyEvent> {
+    let shutdown = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !shutdown.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            shutdown.store(true, Ordering::Relaxed);
+        });
+        let ev = hotkey.next_event_debug(held, false, &shutdown);
+        shutdown.store(true, Ordering::Relaxed);
+        match ev {
+            Ok(HotkeyEvent::Shutdown) => None,
+            Ok(ev) => Some(ev),
+            Err(_) => None,
+        }
+    })
 }
