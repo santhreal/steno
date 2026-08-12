@@ -1,5 +1,6 @@
 //! Linux X11 backends: Caps Lock hotkey, status pill overlay, xdotool typing.
 
+pub mod conn;
 pub mod hotkey;
 pub mod output;
 pub mod overlay;

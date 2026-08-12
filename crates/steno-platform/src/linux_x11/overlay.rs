@@ -240,7 +240,9 @@ fn run(
     ui: ResolvedUi,
 ) {
     if let Err(e) = run_inner(&rx, &ui) {
-        log::debug!("overlay disabled: {e}");
+        // Not fatal — dictation runs without the pill — but silence here
+        // reads as "the UI is gone" with no way to find out why.
+        log::warn!("overlay disabled: {e:#}");
         failed.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -251,7 +253,7 @@ fn run_inner(rx: &Receiver<Stage>, ui: &ResolvedUi) -> anyhow::Result<()> {
     use x11rb::wrapper::ConnectionExt as _;
 
     let font = load_font()?;
-    let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let (conn, screen_num) = super::conn::connect_x11()?;
     let screen = &conn.setup().roots[screen_num];
     let (visual, depth) = find_argb_visual(&conn, screen)
         .ok_or_else(|| anyhow::anyhow!("no 32-bit ARGB visual — compositor required for pill"))?;

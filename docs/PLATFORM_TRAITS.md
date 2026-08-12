@@ -101,10 +101,16 @@ path. Unknown themes fall back to pill colors (fail-open).
 Hold Caps Lock to record; release to stop. The daemon installs a SYNC
 passive grab (`XGrabKey` with `GrabMode::SYNC` for keyboard mode) on the
 Caps Lock keycode. When Caps Lock fires, the X server freezes the keyboard
-and queues the event without processing the XKB Lock action. The daemon
-receives the event, calls `XAllowEvents(AsyncKeyboard, CurrentTime)` to
-discard it and unfreeze, so the Lock modifier never latches and caps state
-never toggles.
+and queues the event. The daemon receives the event and calls
+`XAllowEvents(AsyncKeyboard, CurrentTime)` to unfreeze.
+
+`AsyncKeyboard` resumes normal processing of that queued press, and normal
+processing runs the XKB Lock action, so the freeze alone does not stop the
+latch: after releasing each trigger event the daemon clears the Lock
+modifier with `XkbLatchLockState`. Without that step every keystroke after
+a hold — the user's own, and the daemon's `xdotool` output — arrives
+capitalised. XKB is therefore required, and the grab fails loudly when the
+server has no XKB extension rather than dictating in capitals.
 
 The freeze covers every key on the machine, so the unfreeze must not wait
 on application work. A dedicated thread owns the grab connection, polls it
@@ -122,6 +128,11 @@ passive grab and Caps Lock works normally again instantly. There is no
 `Hotkey`'s `Drop` stops the worker and joins it; the worker unfreezes and
 ungrabs on the way out (explicit cleanup for normal shutdown; the X server
 would release both on connection close anyway).
+
+The overlay uses the same `linux_x11::conn::connect_x11` as the hotkey. It
+once used `RustConnection::connect(None)`, which cannot reach an XWayland
+display that binds only the abstract socket, so the pill silently
+disappeared on exactly the sessions where the hotkey still worked.
 
 Legacy recovery: `restore_caps_lock_mapping()` and `repair_caps_lock()`
 remain for backward compatibility with daemons killed under the old

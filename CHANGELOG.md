@@ -31,6 +31,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon came back — indefinitely if it wedged. A dedicated thread now
   owns the grab connection and unfreezes on every key event before any
   classification.
+- Caps Lock no longer latches while the daemon owns it. `AllowEvents`
+  resumes normal processing of the frozen press, which runs the XKB Lock
+  action, so every following keystroke — including the daemon's own
+  `xdotool` output — came out capitalised. The grab now clears the Lock
+  modifier over XKB after releasing each trigger event.
+- Overlay reaches XWayland sessions that bind only the abstract X11
+  socket. It used `RustConnection::connect(None)` while the hotkey used
+  the abstract-socket fallback, so on those sessions the hotkey worked and
+  the status pill silently never appeared. Both now share
+  `linux_x11::conn::connect_x11`, and an overlay that cannot start logs
+  the reason at warn instead of vanishing quietly.
+- `refine.llm.no_think` now pre-fills a closed reasoning block into the
+  assistant turn instead of only emitting the Qwen3 `/no_think` marker. A
+  model that ignores that marker (LFM2.5) spent all of `max_tokens`
+  reasoning, so refine returned the original text at full latency on every
+  utterance. The fallback warning now reports the size of the discarded
+  block and what to change.
 - Token decode buffer increased from 8 to 64 bytes for multi-byte UTF-8.
 - LLM refine prompt truncation now keeps the system prompt (first tokens)
   instead of the last tokens.

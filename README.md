@@ -286,7 +286,7 @@ max_tokens = 512           # max generated tokens per utterance
 temperature = 0.1          # 0.0 = greedy, >0 = sampled
 n_ctx = 4096               # context window (must fit prompt + max_tokens)
 # prompt = "..."           # override the built-in system prompt
-# no_think = false         # set true for Qwen3 reasoning models to skip <think>
+# no_think = false         # set true for a reasoning model, so it answers instead of thinking
 ```
 
 Download the default LLM model with `steno model download --llm`, or
@@ -337,7 +337,7 @@ n_threads = 4
 max_tokens = 512
 temperature = 0.1
 n_ctx = 4096
-# no_think = false       # set true for Qwen3 reasoning models
+# no_think = false       # set true for a reasoning model (Qwen3, LFM2.5)
 [ui]
 overlay = true         # bottom-center status overlay
 done_flash_ms = 1200   # how long done/error stays visible

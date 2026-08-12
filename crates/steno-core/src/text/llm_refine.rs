@@ -47,6 +47,26 @@ use llama_cpp_2::token::LlamaToken;
 
 use super::{LlmRefineConfig, RefineBackend};
 
+/// End-of-turn markers that stop generation, on top of the model's own
+/// EOS/EOG tokens. Narrowing this list makes a model run to `max_tokens`
+/// and emit its chat scaffolding into the transcript.
+const STOP_SEQUENCES: [&str; 9] = [
+    "<|im_end|>",
+    "</s>",
+    "<|end|>",
+    "<|eot_id|>",
+    "<|end_of_text|>",
+    "<|finetune_right_pad_id|>",
+    "<|reserved_special_token_0|>",
+    "<end_of_turn>",
+    "<|endoftext|>",
+];
+
+/// Assistant-turn prefix that closes reasoning before it starts. Written
+/// from parts so this file never contains a literal think tag that the
+/// stripper's own tests could match by accident.
+const EMPTY_THINK_BLOCK: &str = "\u{3c}think\u{3e}\n\n\u{3c}/think\u{3e}\n\n";
+
 const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are a transcription correction engine. Fix the raw speech-to-text \
 output in these ways, then output ONLY the corrected text with no \
@@ -140,7 +160,7 @@ impl LlmRefine {
 
         // Collect stop tokens: EOS + common chat markers.
         let mut stop_tokens = vec![model.token_eos()];
-        for stop_str in ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>", "<|end_of_text|>", "<|finetune_right_pad_id|>", "<|reserved_special_token_0|>", "<end_of_turn>", "<|endoftext|>"] {
+        for stop_str in STOP_SEQUENCES {
             if let Ok(toks) = model.str_to_token(stop_str, AddBos::Never) {
                 if let Some(&first) = toks.first() {
                     stop_tokens.push(first);
@@ -304,15 +324,23 @@ impl RefineBackend for LlmRefine {
             ),
         };
 
+        let prompt = close_reasoning(prompt, self.config.no_think);
+
         match self.generate(&prompt) {
             Ok(corrected) if !corrected.is_empty() => {
+                log::debug!("LLM refine: raw model output: {corrected:?}");
                 let stripped = strip_think_blocks(&corrected);
                 if stripped.is_empty() {
-                    // The model only produced a think block with no
-                    // corrected text after it. Return the original.
+                    // The model reasoned and never emitted an answer. Say
+                    // what it produced: a silent fall back to the original
+                    // looks identical to refine being switched off.
                     log::warn!(
-                        "LLM refine: model output was only a think block; \
-                         using original text"
+                        "LLM refine: model output was only a think block ({} chars, \
+                         {closed} closed); using original text. Raise \
+                         refine.llm.max_tokens, or set refine.llm.no_think = true \
+                         if the model honours it.",
+                        corrected.len(),
+                        closed = if corrected.contains("</think>") { "" } else { "un" },
                     );
                     text.to_string()
                 } else {
@@ -343,6 +371,22 @@ fn build_system_prompt(dictionary: &HashMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     DEFAULT_SYSTEM_PROMPT.replace("{dictionary}", &dict_str)
+}
+
+/// Pre-fill an already-closed reasoning block into the assistant turn.
+///
+/// WHY: `/no_think` is a Qwen3 convention. A reasoning model that does
+/// not honour it (LFM2.5 does not) spends every one of `max_tokens` on an
+/// unclosed think block, so the refine finds no answer to use and falls
+/// back to the original text — refine looks switched off while costing
+/// full latency on every utterance. A closed block leaves nothing to
+/// reason in, whatever convention the model follows.
+fn close_reasoning(prompt: String, no_think: bool) -> String {
+    if no_think {
+        format!("{prompt}{EMPTY_THINK_BLOCK}")
+    } else {
+        prompt
+    }
 }
 
 /// Strip `<think>...</think>` blocks from Qwen3 reasoning model output.
@@ -430,6 +474,28 @@ mod tests {
         assert!(cfg.model_path.is_none());
         assert!(cfg.prompt.is_empty());
         assert!(!cfg.no_think);
+    }
+
+    /// WHY: the prefill only works if it is a block the stripper counts
+    /// as already closed. An unclosed prefill would make the stripper
+    /// discard the model's whole answer — the failure this fixes.
+    #[test]
+    fn close_reasoning_prefills_a_block_the_stripper_treats_as_closed() {
+        let base = "<|im_start|>assistant\n".to_string();
+        let primed = close_reasoning(base.clone(), true);
+        assert!(primed.starts_with(&base), "prompt must be preserved");
+        assert_ne!(primed, base, "no_think must prefill something");
+
+        // The model continues after the prefill; the stripper must keep
+        // that continuation rather than swallow it.
+        let generated = format!("{}Hello there.", &primed[base.len()..]);
+        assert_eq!(strip_think_blocks(&generated), "Hello there.");
+    }
+
+    #[test]
+    fn close_reasoning_is_a_no_op_when_disabled() {
+        let base = "prompt".to_string();
+        assert_eq!(close_reasoning(base.clone(), false), base);
     }
 
     #[test]
@@ -521,18 +587,28 @@ mod tests {
         assert!(!cfg.no_think);
     }
 
+    /// WHY: generation terminates on these markers, so dropping one makes
+    /// that family run to `max_tokens` and leak chat scaffolding into the
+    /// transcript. The previous version of this test asserted against a
+    /// copy of the list declared inside the test, which could not fail on
+    /// any change to the production list.
     #[test]
-    fn stop_tokens_list_covers_major_model_families() {
-        // WHY: hardcoded stop tokens must cover the common EOS markers
-        // so generation terminates for Llama3, Gemma, Phi, Mistral, and
-        // Qwen models. This is a documentation test — it verifies the
-        // list is not accidentally narrowed.
-        let stop_strs = ["<|im_end|>", "</s>", "<|end|>", "<|eot_id|>",
-                         "<|end_of_text|>", "<|finetune_right_pad_id|>",
-                         "<|reserved_special_token_0|>", "<end_of_turn>", ""];
-        // Every entry must be non-empty and look like a token marker.
-        for s in &stop_strs {
-            assert!(!s.is_empty(), "stop token string must not be empty");
+    fn stop_sequences_cover_major_model_families() {
+        for family in [
+            "<|im_end|>",     // ChatML: Qwen, LFM
+            "<|eot_id|>",     // Llama 3
+            "<end_of_turn>",  // Gemma
+            "<|end|>",        // Phi
+            "</s>",           // Mistral, Llama 2
+            "<|endoftext|>",  // GPT-2 lineage
+        ] {
+            assert!(
+                STOP_SEQUENCES.contains(&family),
+                "{family} dropped from STOP_SEQUENCES: that family now runs to max_tokens"
+            );
+        }
+        for s in STOP_SEQUENCES {
+            assert!(!s.is_empty(), "an empty stop sequence matches nothing");
         }
     }
 
